@@ -21,8 +21,7 @@ const DEBUG_LEADERBOARD = process.env.DEBUG_LEADERBOARD === '1' || process.env.D
 
 // Redis client (optional - falls back to in-memory if not configured)
 let redis = null;
-const REDIS_KEY_PREFIX = 'quordle:';
-const REDIS_ROOM_TTL = 60 * 60 * 48; // 48 hours TTL for room data
+const REDIS_TTL_SECONDS = 60 * 60 * 48; // 48 hours TTL
 
 if (process.env.REDIS_URL) {
   try {
@@ -33,6 +32,18 @@ if (process.env.REDIS_URL) {
     console.error('Failed to connect to Redis:', err);
     redis = null;
   }
+}
+
+// ========== REDIS KEY HELPERS ==========
+// Keys: player:{roomId}:{dateKey}:{visibleUserId} for PlayerState
+// Keys: roomPlayers:{roomId}:{dateKey} (Set) for leaderboard index
+
+function makePlayerRedisKey(roomId, dateKey, visibleUserId) {
+  return `player:${roomId}:${dateKey}:${visibleUserId}`;
+}
+
+function makeRoomPlayersSetKey(roomId, dateKey) {
+  return `roomPlayers:${roomId}:${dateKey}`;
 }
 
 const app = express();
@@ -67,64 +78,88 @@ function makePlayerKey(roomId, dateKey, visibleUserId) {
 }
 
 // ========== REDIS PERSISTENCE HELPERS ==========
+// Redis is source of truth for player state; in-memory Maps are cache
 
-/** Serialize room state for Redis (converts players Map to object) */
-function serializeRoom(room) {
-  return JSON.stringify({
-    roomId: room.roomId,
-    dateKey: room.dateKey,
-    players: Object.fromEntries(room.players),
-    leaderboard: room.leaderboard,
-    lastBroadcastAt: room.lastBroadcastAt,
-  });
-}
-
-/** Deserialize room state from Redis (converts players object back to Map) */
-function deserializeRoom(json) {
-  const data = JSON.parse(json);
-  return {
-    roomId: data.roomId,
-    dateKey: data.dateKey,
-    players: new Map(Object.entries(data.players || {})),
-    leaderboard: data.leaderboard || [],
-    lastBroadcastAt: data.lastBroadcastAt || Date.now(),
-  };
-}
-
-/** Save room to Redis (async, fire-and-forget for performance) */
-function persistRoom(room) {
+/** Save a single player state to Redis with TTL */
+async function persistPlayerToRedis(playerState) {
   if (!redis) return;
-  const key = REDIS_KEY_PREFIX + makeRoomKey(room.roomId, room.dateKey);
-  redis.setex(key, REDIS_ROOM_TTL, serializeRoom(room)).catch(err => {
-    console.error('Failed to persist room to Redis:', err);
-  });
+  const key = makePlayerRedisKey(playerState.roomId, playerState.dateKey, playerState.visibleUserId);
+  const setKey = makeRoomPlayersSetKey(playerState.roomId, playerState.dateKey);
+  try {
+    // Use pipeline for atomicity
+    const pipeline = redis.pipeline();
+    pipeline.setex(key, REDIS_TTL_SECONDS, JSON.stringify(playerState));
+    pipeline.sadd(setKey, playerState.visibleUserId);
+    pipeline.expire(setKey, REDIS_TTL_SECONDS);
+    await pipeline.exec();
+  } catch (err) {
+    console.error('Failed to persist player to Redis:', err);
+  }
 }
 
-/** Load room from Redis */
-async function loadRoomFromRedis(roomId, dateKey) {
+/** Load a single player state from Redis */
+async function loadPlayerFromRedis(roomId, dateKey, visibleUserId) {
   if (!redis) return null;
   try {
-    const key = REDIS_KEY_PREFIX + makeRoomKey(roomId, dateKey);
+    const key = makePlayerRedisKey(roomId, dateKey, visibleUserId);
     const data = await redis.get(key);
     if (data) {
-      const room = deserializeRoom(data);
-      // Cache in memory
-      roomStateStore.set(makeRoomKey(roomId, dateKey), room);
-      return room;
+      return JSON.parse(data);
     }
   } catch (err) {
-    console.error('Failed to load room from Redis:', err);
+    console.error('Failed to load player from Redis:', err);
   }
   return null;
 }
 
-/** Get or create room state (checks Redis first) */
+/** Rebuild leaderboard from Redis by loading all players in the roomPlayers set */
+async function rebuildLeaderboardFromRedis(roomId, dateKey) {
+  if (!redis) return null;
+  try {
+    const setKey = makeRoomPlayersSetKey(roomId, dateKey);
+    const visibleUserIds = await redis.smembers(setKey);
+    if (!visibleUserIds || visibleUserIds.length === 0) return null;
+
+    const room = getOrCreateRoom(roomId, dateKey);
+
+    // Load all players in parallel
+    const playerPromises = visibleUserIds.map(async (visibleUserId) => {
+      const key = makePlayerRedisKey(roomId, dateKey, visibleUserId);
+      const data = await redis.get(key);
+      return data ? JSON.parse(data) : null;
+    });
+
+    const players = await Promise.all(playerPromises);
+
+    // Populate in-memory cache
+    for (const player of players) {
+      if (player) {
+        room.players.set(player.visibleUserId, player);
+      }
+    }
+
+    // Update leaderboard
+    updateLeaderboard(room);
+    return room;
+  } catch (err) {
+    console.error('Failed to rebuild leaderboard from Redis:', err);
+  }
+  return null;
+}
+
+/** Get or create room state (rebuilds from Redis if cache empty) */
 async function getOrCreateRoomAsync(roomId, dateKey) {
   const key = makeRoomKey(roomId, dateKey);
   let room = roomStateStore.get(key);
-  if (!room && redis) {
-    room = await loadRoomFromRedis(roomId, dateKey);
+
+  // If room exists in memory but is empty, try to rebuild from Redis
+  if ((!room || room.players.size === 0) && redis) {
+    const rebuilt = await rebuildLeaderboardFromRedis(roomId, dateKey);
+    if (rebuilt && rebuilt.players.size > 0) {
+      return rebuilt;
+    }
   }
+
   if (!room) {
     room = {
       roomId,
@@ -157,11 +192,20 @@ function getOrCreateRoom(roomId, dateKey) {
 
 /** Get player state from room (checks Redis first) */
 async function getPlayerAsync(roomId, dateKey, visibleUserId) {
-  let room = roomStateStore.get(makeRoomKey(roomId, dateKey));
-  if (!room && redis) {
-    room = await loadRoomFromRedis(roomId, dateKey);
+  // First check in-memory cache
+  const room = roomStateStore.get(makeRoomKey(roomId, dateKey));
+  const cachedPlayer = room?.players.get(visibleUserId);
+  if (cachedPlayer) return cachedPlayer;
+
+  // Try to load from Redis
+  const redisPlayer = await loadPlayerFromRedis(roomId, dateKey, visibleUserId);
+  if (redisPlayer) {
+    // Cache in memory
+    const r = getOrCreateRoom(roomId, dateKey);
+    r.players.set(visibleUserId, redisPlayer);
+    updateLeaderboard(r);
   }
-  return room?.players.get(visibleUserId) ?? null;
+  return redisPlayer;
 }
 
 /** Get player state from room (sync) */
@@ -175,7 +219,8 @@ function setPlayer(playerState) {
   const room = getOrCreateRoom(playerState.roomId, playerState.dateKey);
   room.players.set(playerState.visibleUserId, playerState);
   updateLeaderboard(room);
-  persistRoom(room); // Fire-and-forget Redis persistence
+  // Fire-and-forget Redis persistence of individual player
+  persistPlayerToRedis(playerState);
 }
 
 /** Convert player state to leaderboard entry */
@@ -333,8 +378,8 @@ wss.on("connection", (ws, req) => {
           // Send STATE to joining client
           ws.send(JSON.stringify({ type: 'STATE', playerState }));
 
-          // Broadcast LEADERBOARD to ALL players in room (not just joiner)
-          const room = getOrCreateRoom(roomId, dateKey);
+          // Broadcast LEADERBOARD to ALL players in room (rebuilds from Redis if cache empty)
+          const room = await getOrCreateRoomAsync(roomId, dateKey);
           if (DEBUG_WS) {
             console.log('[WS JOIN] Broadcasting leaderboard, players in room:', room.players.size);
           }
@@ -737,6 +782,82 @@ app.get("/api/room/:roomId/:dateKey/player/:visibleUserId", (req, res) => {
   }
 
   res.json({ playerState });
+});
+
+// Debug endpoint to verify Redis persistence
+app.get("/api/debug/persist", async (req, res) => {
+  const { roomId, dateKey, visibleUserId } = req.query;
+
+  const status = {
+    redisConnected: !!redis,
+    redisUrl: process.env.REDIS_URL ? '***configured***' : 'not configured',
+    tests: {},
+  };
+
+  if (!redis) {
+    return res.json({ ...status, message: 'Redis not configured' });
+  }
+
+  // Test basic Redis connectivity
+  try {
+    const pong = await redis.ping();
+    status.tests.ping = { success: true, result: pong };
+  } catch (err) {
+    status.tests.ping = { success: false, error: err.message };
+  }
+
+  // If specific player requested, test load/save
+  if (roomId && dateKey && visibleUserId) {
+    const playerKey = makePlayerRedisKey(roomId, dateKey, visibleUserId);
+    const setKey = makeRoomPlayersSetKey(roomId, dateKey);
+
+    // Test GET player
+    try {
+      const data = await redis.get(playerKey);
+      status.tests.playerGet = {
+        key: playerKey,
+        success: true,
+        found: !!data,
+        data: data ? JSON.parse(data) : null,
+      };
+    } catch (err) {
+      status.tests.playerGet = { key: playerKey, success: false, error: err.message };
+    }
+
+    // Test SET members
+    try {
+      const members = await redis.smembers(setKey);
+      status.tests.roomPlayersSet = {
+        key: setKey,
+        success: true,
+        members,
+        count: members.length,
+      };
+    } catch (err) {
+      status.tests.roomPlayersSet = { key: setKey, success: false, error: err.message };
+    }
+
+    // Test TTL
+    try {
+      const ttl = await redis.ttl(playerKey);
+      status.tests.playerTtl = {
+        key: playerKey,
+        success: true,
+        ttlSeconds: ttl,
+        ttlHours: ttl > 0 ? (ttl / 3600).toFixed(2) : null,
+      };
+    } catch (err) {
+      status.tests.playerTtl = { key: playerKey, success: false, error: err.message };
+    }
+  }
+
+  // Memory cache stats
+  status.memoryStats = {
+    roomsInMemory: roomStateStore.size,
+    rooms: Array.from(roomStateStore.keys()).slice(0, 10), // First 10 room keys
+  };
+
+  res.json(status);
 });
 
 app.post("/api/token", async (req, res) => {
