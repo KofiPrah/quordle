@@ -444,14 +444,35 @@ function evaluateGuess(guess, target) {
 // ========== STATIC FILE SERVING ==========
 // Serve built client files from public folder
 const publicPath = path.join(__dirname, 'public');
-app.use(express.static(publicPath));
+app.use(express.static(publicPath, {
+  // Set proper MIME types
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.js')) {
+      res.setHeader('Content-Type', 'application/javascript');
+    } else if (filePath.endsWith('.css')) {
+      res.setHeader('Content-Type', 'text/css');
+    }
+  }
+}));
 
-// SPA fallback - serve index.html for all non-API routes
-app.get('*', (req, res) => {
-  res.sendFile(path.join(publicPath, 'index.html'));
+// SPA fallback - serve index.html for all non-API, non-asset routes
+app.get('*', (req, res, next) => {
+  // Don't intercept API routes or asset requests
+  if (req.path.startsWith('/api') || req.path.startsWith('/health')) {
+    return next();
+  }
+
+  const indexPath = path.join(publicPath, 'index.html');
+  res.sendFile(indexPath, (err) => {
+    if (err) {
+      console.error('Error serving index.html:', err);
+      res.status(500).send('Server error - index.html not found. Did the build complete?');
+    }
+  });
 });
 
 server.listen(port, () => {
   console.log(`Server listening at http://localhost:${port}`);
   console.log(`WebSocket available at ws://localhost:${port}/ws`);
+  console.log(`Serving static files from: ${publicPath}`);
 });
