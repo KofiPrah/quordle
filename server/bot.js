@@ -61,6 +61,25 @@ if (REDIS_URL) {
     console.warn("[Bot] No REDIS_URL configured - daily message tracking will not persist across restarts");
 }
 
+// Separate Redis client for pub/sub (can't use same connection)
+let redisSub = null;
+if (REDIS_URL) {
+    try {
+        redisSub = new Redis(REDIS_URL, {
+            maxRetriesPerRequest: 3,
+            retryStrategy: (times) => times > 3 ? null : Math.min(times * 200, 2000),
+        });
+        redisSub.on("error", () => { }); // Suppress errors (already logged by main client)
+        redisSub.on("ready", () => console.log("[Bot Redis Sub] Ready for pub/sub"));
+    } catch (err) {
+        redisSub = null;
+    }
+}
+
+// Track recent leave events to dedupe (users may trigger multiple times)
+const recentLeaves = new Map(); // key: `${guildId}:${channelId}:${userId}` -> timestamp
+const LEAVE_DEDUPE_MS = 30000; // 30 seconds
+
 // In-memory fallback for daily message tracking
 const dailyMessageStore = new Map();
 
@@ -310,6 +329,100 @@ async function handlePlayButton(interaction) {
     }
 }
 
+// ========== "WAS PLAYING" MESSAGE ==========
+
+function buildWasPlayingEmbed(profile, gameState) {
+    const displayName = profile?.displayName || "Someone";
+
+    let description = `**${displayName}** was playing Daily Quordle`;
+
+    // Add game result if available
+    if (gameState) {
+        const { solvedCount, guessCount, gameOver, won } = gameState;
+        if (gameOver) {
+            if (won) {
+                description += `\n🏆 Solved all 4 in ${guessCount} guesses!`;
+            } else {
+                description += `\n📊 Solved ${solvedCount}/4 boards`;
+            }
+        } else if (guessCount > 0) {
+            description += `\n📊 ${solvedCount}/4 boards • ${guessCount} guesses`;
+        }
+    }
+
+    return new EmbedBuilder()
+        .setColor(0x538d4e)
+        .setDescription(description)
+        .setFooter({ text: "Click Play to join!" });
+}
+
+async function handleActivityLeave(event) {
+    const { userId, guildId, channelId, profile, gameState } = event;
+
+    // Dedupe check
+    const dedupeKey = `${guildId}:${channelId}:${userId}`;
+    const lastLeave = recentLeaves.get(dedupeKey);
+    const now = Date.now();
+
+    if (lastLeave && (now - lastLeave) < LEAVE_DEDUPE_MS) {
+        console.log(`[Bot] Skipping duplicate leave event for ${userId}`);
+        return;
+    }
+    recentLeaves.set(dedupeKey, now);
+
+    // Clean up old entries
+    for (const [key, timestamp] of recentLeaves) {
+        if (now - timestamp > LEAVE_DEDUPE_MS * 2) {
+            recentLeaves.delete(key);
+        }
+    }
+
+    try {
+        const channel = await client.channels.fetch(channelId);
+        if (!channel) {
+            console.log(`[Bot] Channel ${channelId} not found`);
+            return;
+        }
+
+        const embed = buildWasPlayingEmbed(profile, gameState);
+        const components = [buildPlayButton()];
+
+        await channel.send({ embeds: [embed], components });
+        console.log(`[Bot] Posted "was playing" for ${profile?.displayName || userId} in ${guildId}/${channelId}`);
+    } catch (err) {
+        console.error("[Bot] Failed to post 'was playing' message:", err.message);
+    }
+}
+
+function setupActivityEventSubscription() {
+    if (!redisSub) {
+        console.log("[Bot] No Redis sub client - activity events disabled");
+        return;
+    }
+
+    redisSub.subscribe("activity:events", (err) => {
+        if (err) {
+            console.error("[Bot] Failed to subscribe to activity:events:", err.message);
+            return;
+        }
+        console.log("[Bot] Subscribed to activity:events channel");
+    });
+
+    redisSub.on("message", async (channel, message) => {
+        if (channel !== "activity:events") return;
+
+        try {
+            const event = JSON.parse(message);
+
+            if (event.type === "ACTIVITY_LEAVE") {
+                await handleActivityLeave(event);
+            }
+        } catch (err) {
+            console.error("[Bot] Failed to handle activity event:", err.message);
+        }
+    });
+}
+
 // ========== EVENT HANDLERS ==========
 
 client.once("ready", async () => {
@@ -320,6 +433,9 @@ client.once("ready", async () => {
 
     // Register slash commands
     await registerCommands();
+
+    // Start listening for activity events
+    setupActivityEventSubscription();
 });
 
 client.on("interactionCreate", async (interaction) => {
@@ -378,6 +494,7 @@ process.on("SIGINT", () => {
     console.log("[Bot] Shutting down...");
     client.destroy();
     if (redis) redis.disconnect();
+    if (redisSub) redisSub.disconnect();
     process.exit(0);
 });
 
@@ -385,6 +502,7 @@ process.on("SIGTERM", () => {
     console.log("[Bot] Shutting down...");
     client.destroy();
     if (redis) redis.disconnect();
+    if (redisSub) redisSub.disconnect();
     process.exit(0);
 });
 

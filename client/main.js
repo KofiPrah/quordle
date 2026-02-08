@@ -25,6 +25,8 @@ let gameMode = "daily"; // "daily" | "practice"
 // Discord context for server-side persistence
 let discordUserId = null;
 let discordRoomId = null;
+let discordGuildId = null;
+let discordChannelId = null;
 let userProfile = { displayName: 'Player', avatarUrl: null }; // Current user's profile info
 
 // WebSocket connection
@@ -363,11 +365,55 @@ async function setupDiscordSdk() {
 
   // Capture Discord context for server-side persistence
   discordUserId = auth.user?.id || null;
+  discordGuildId = discordSdk.guildId || null;
+  discordChannelId = discordSdk.channelId || null;
   // Use channelId as roomId (stable across activity restarts for state persistence)
   // instanceId changes per activity session, so using channelId ensures:
   // - Game state persists when player closes and reopens the activity
   // - Leaderboard shows all players who played in the same channel
   discordRoomId = discordSdk.channelId || discordSdk.instanceId || null;
+
+  // Notify server when user leaves the activity
+  setupLeaveNotification();
+}
+
+// ========== ACTIVITY LEAVE NOTIFICATION ==========
+function setupLeaveNotification() {
+  if (!discordUserId || !discordGuildId || !discordChannelId) {
+    console.log('Leave notification not set up - missing Discord context');
+    return;
+  }
+
+  const sendLeaveNotification = () => {
+    // Use sendBeacon for reliability during page unload
+    const payload = JSON.stringify({
+      userId: discordUserId,
+      guildId: discordGuildId,
+      channelId: discordChannelId,
+      dateKey: getTodayDateKey(),
+      profile: userProfile,
+      gameState: gameState ? {
+        guessCount: gameState.guessCount,
+        solvedCount: gameState.boards?.filter(b => b.solved).length || 0,
+        gameOver: gameState.gameOver,
+        won: gameState.won,
+      } : null,
+    });
+
+    // sendBeacon is more reliable during unload than fetch
+    navigator.sendBeacon(`${API_URL}/api/activity/leave`, payload);
+    console.log('Sent leave notification');
+  };
+
+  // Handle page unload (closing activity)
+  window.addEventListener('beforeunload', sendLeaveNotification);
+
+  // Also handle visibility change (activity going to background on mobile)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      sendLeaveNotification();
+    }
+  });
 }
 
 // ========== QUORDLE GAME UI ==========

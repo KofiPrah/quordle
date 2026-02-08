@@ -803,6 +803,39 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// Activity leave notification - triggers "was playing" message in Discord
+app.post("/api/activity/leave", async (req, res) => {
+  try {
+    const { userId, guildId, channelId, dateKey, profile, gameState } = req.body;
+
+    if (!userId || !guildId || !channelId) {
+      return res.status(400).json({ error: "userId, guildId, channelId required" });
+    }
+
+    // Publish leave event to Redis for bot to pick up
+    if (redis) {
+      const leaveEvent = JSON.stringify({
+        type: 'ACTIVITY_LEAVE',
+        userId,
+        guildId,
+        channelId,
+        dateKey: dateKey || getTodayDateKey(),
+        profile: profile || { displayName: 'Player', avatarUrl: null },
+        gameState: gameState || null,
+        timestamp: Date.now(),
+      });
+
+      await redis.publish('activity:events', leaveEvent);
+      console.log('[Activity] Published leave event:', userId, 'in', guildId, '/', channelId);
+    }
+
+    res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('[Activity] Leave notification error:', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
 // GET leaderboard for a room (rebuilds from Redis if cache empty)
 app.get("/api/room/:roomId/:dateKey/leaderboard", async (req, res) => {
   const { roomId, dateKey } = req.params;
