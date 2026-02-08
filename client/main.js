@@ -363,8 +363,11 @@ async function setupDiscordSdk() {
 
   // Capture Discord context for server-side persistence
   discordUserId = auth.user?.id || null;
-  // Use instanceId as roomId (unique per activity instance in a channel)
-  discordRoomId = discordSdk.instanceId || discordSdk.channelId || null;
+  // Use channelId as roomId (stable across activity restarts for state persistence)
+  // instanceId changes per activity session, so using channelId ensures:
+  // - Game state persists when player closes and reopens the activity
+  // - Leaderboard shows all players who played in the same channel
+  discordRoomId = discordSdk.channelId || discordSdk.instanceId || null;
 }
 
 // ========== QUORDLE GAME UI ==========
