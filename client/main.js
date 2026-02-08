@@ -1,6 +1,9 @@
 import { DiscordSDK } from "@discord/embedded-app-sdk";
 import "./style.css";
 
+// API URL - empty string for same-origin (dev), full URL for production
+const API_URL = import.meta.env.VITE_API_URL || '';
+
 // Import Quordle engine
 import { createGame, submitGuess, setCurrentGuess, validateGuess, getSolvedCount } from "../engine/src/game.ts";
 import { evaluateGuess } from "../engine/src/evaluator.ts";
@@ -84,7 +87,7 @@ function clearGameStorage() {
 async function serverJoinGame() {
   if (!discordUserId || !discordRoomId) return null;
   try {
-    const response = await fetch("/api/game/join", {
+    const response = await fetch(`${API_URL}/api/game/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ roomId: discordRoomId, userId: discordUserId }),
@@ -100,7 +103,7 @@ async function serverJoinGame() {
 async function serverSubmitGuess(guess) {
   if (!discordUserId || !discordRoomId) return null;
   try {
-    const response = await fetch("/api/game/guess", {
+    const response = await fetch(`${API_URL}/api/game/guess`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ roomId: discordRoomId, userId: discordUserId, guess }),
@@ -148,7 +151,7 @@ async function setupDiscordSdk() {
   });
 
   // Retrieve an access_token from your activity's server
-  const response = await fetch("/api/token", {
+  const response = await fetch(`${API_URL}/api/token`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

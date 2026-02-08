@@ -1,10 +1,34 @@
 import express from "express";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
+import { createServer } from "http";
+import { WebSocketServer, WebSocket } from "ws";
+import cors from "cors";
+
+// Load .env from parent directory in dev, or current directory in production
 dotenv.config({ path: "../.env" });
+dotenv.config(); // Also try current directory
 
 const app = express();
-const port = 3001;
+const port = process.env.PORT || 3001;
+const server = createServer(app);
+
+// CORS configuration for cross-origin requests (client on Vercel, server elsewhere)
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',')
+  : ['http://localhost:5173', 'http://localhost:3000'];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+}));
 
 // Allow express to parse JSON bodies
 app.use(express.json());
@@ -34,6 +58,112 @@ const gameStateStore = {
     this._store.delete(key);
   },
 };
+
+// ========== WEBSOCKET SETUP ==========
+const wss = new WebSocketServer({ server, path: "/ws" });
+
+// Track connections by room
+const rooms = new Map(); // roomId -> Set<{ws, userId}>
+
+wss.on("connection", (ws, req) => {
+  let currentRoom = null;
+  let currentUserId = null;
+
+  ws.on("message", (data) => {
+    try {
+      const message = JSON.parse(data.toString());
+
+      switch (message.type) {
+        case "join_room": {
+          const { roomId, userId } = message;
+          currentRoom = roomId;
+          currentUserId = userId;
+
+          if (!rooms.has(roomId)) {
+            rooms.set(roomId, new Set());
+          }
+          rooms.get(roomId).add({ ws, userId });
+
+          // Notify others in the room
+          broadcastToRoom(roomId, {
+            type: "player_joined",
+            userId,
+            playerCount: rooms.get(roomId).size,
+          }, ws);
+
+          // Send current player list to the joining player
+          const players = Array.from(rooms.get(roomId)).map(p => p.userId);
+          ws.send(JSON.stringify({ type: "room_state", players, playerCount: players.length }));
+          break;
+        }
+
+        case "guess_made": {
+          // Broadcast guess to other players in the room (for spectating/multiplayer)
+          const { roomId, userId, guess, boardStates } = message;
+          broadcastToRoom(roomId, {
+            type: "player_guessed",
+            userId,
+            guess,
+            boardStates,
+          }, ws);
+          break;
+        }
+
+        case "game_over": {
+          const { roomId, userId, won, guessCount } = message;
+          broadcastToRoom(roomId, {
+            type: "player_finished",
+            userId,
+            won,
+            guessCount,
+          }, ws);
+          break;
+        }
+      }
+    } catch (err) {
+      console.error("WebSocket message error:", err);
+    }
+  });
+
+  ws.on("close", () => {
+    if (currentRoom && rooms.has(currentRoom)) {
+      const room = rooms.get(currentRoom);
+      for (const client of room) {
+        if (client.ws === ws) {
+          room.delete(client);
+          break;
+        }
+      }
+
+      // Notify others
+      broadcastToRoom(currentRoom, {
+        type: "player_left",
+        userId: currentUserId,
+        playerCount: room.size,
+      });
+
+      // Clean up empty rooms
+      if (room.size === 0) {
+        rooms.delete(currentRoom);
+      }
+    }
+  });
+
+  ws.on("error", (err) => {
+    console.error("WebSocket error:", err);
+  });
+});
+
+function broadcastToRoom(roomId, message, excludeWs = null) {
+  if (!rooms.has(roomId)) return;
+
+  const data = JSON.stringify(message);
+  for (const client of rooms.get(roomId)) {
+    if (client.ws !== excludeWs && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(data);
+    }
+  }
+}
 
 // ========== DAILY TARGETS GENERATION ==========
 // Duplicated from engine for server-side use (avoids complex bundling)
@@ -146,6 +276,11 @@ function getTodayDateKey() {
 }
 
 // ========== API ENDPOINTS ==========
+
+// Health check for deployment platforms
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
 
 app.post("/api/token", async (req, res) => {
 
@@ -301,6 +436,7 @@ function evaluateGuess(guess, target) {
   return result;
 }
 
-app.listen(port, () => {
+server.listen(port, () => {
   console.log(`Server listening at http://localhost:${port}`);
+  console.log(`WebSocket available at ws://localhost:${port}/ws`);
 });
