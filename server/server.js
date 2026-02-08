@@ -14,6 +14,9 @@ const __dirname = path.dirname(__filename);
 dotenv.config({ path: "../.env" });
 dotenv.config(); // Also try current directory
 
+// Debug flag for WebSocket logging
+const DEBUG_WS = process.env.DEBUG_WS === 'true';
+
 const app = express();
 const port = process.env.PORT || 3001;
 const server = createServer(app);
@@ -194,6 +197,10 @@ wss.on("connection", (ws, req) => {
           }
           wsConnectionsByRoom.get(currentRoomKey).add({ ws, visibleUserId, roomId, dateKey });
 
+          if (DEBUG_WS) {
+            console.log('[WS JOIN] roomId:', roomId, 'dateKey:', dateKey, 'visibleUserId:', visibleUserId);
+          }
+
           // Get or create player state
           let playerState = getPlayer(roomId, dateKey, visibleUserId);
           if (!playerState) {
@@ -201,15 +208,19 @@ wss.on("connection", (ws, req) => {
             const targetWords = getDailyTargets(dateKey);
             const gameState = createGameState(targetWords);
             playerState = createPlayerState(roomId, dateKey, visibleUserId, gameState);
-            setPlayer(playerState);
           }
+          // Always (re-)add player to room to ensure leaderboard is updated
+          setPlayer(playerState);
 
           // Send STATE to joining client
           ws.send(JSON.stringify({ type: 'STATE', playerState }));
 
-          // Send current LEADERBOARD to joining client
+          // Broadcast LEADERBOARD to ALL players in room (not just joiner)
           const room = getOrCreateRoom(roomId, dateKey);
-          ws.send(JSON.stringify({ type: 'LEADERBOARD', leaderboard: room.leaderboard }));
+          if (DEBUG_WS) {
+            console.log('[WS JOIN] Broadcasting leaderboard, players in room:', room.players.size);
+          }
+          broadcastToRoomByKey(currentRoomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard });
 
           // Broadcast ROOM_EVENT join to everyone in room (including joiner)
           broadcastToRoomByKey(currentRoomKey, { type: 'ROOM_EVENT', event: 'join', visibleUserId });
@@ -292,6 +303,9 @@ wss.on("connection", (ws, req) => {
           // Broadcast updated LEADERBOARD to room
           const room = getOrCreateRoom(roomId, dateKey);
           const roomKey = makeRoomKey(roomId, dateKey);
+          if (DEBUG_WS) {
+            console.log('[WS GUESS] Broadcasting leaderboard, players in room:', room.players.size);
+          }
           broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard });
           break;
         }
