@@ -12,7 +12,8 @@
     "dev": "node --watch server.js",
     "dev:bot": "node --watch bot.js",
     "typecheck": "tsc --noEmit",
-    "setup:entry-point": "node scripts/configure-entry-point.js"
+    "setup:entry-point": "node scripts/configure-entry-point.js",
+    "setup:entry-point:disable": "node scripts/configure-entry-point.js --disable"
   },
   "engines": {
     "node": ">=18.0.0"

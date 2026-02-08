@@ -119,11 +119,16 @@ const client = new Client({
 const commands = [
     new SlashCommandBuilder()
         .setName("quordle")
-        .setDescription("Quordle game commands")
+        .setDescription("Play Quordle - solve 4 words at once!")
+        .addSubcommand((subcommand) =>
+            subcommand
+                .setName("play")
+                .setDescription("Launch Quordle activity instantly")
+        )
         .addSubcommand((subcommand) =>
             subcommand
                 .setName("daily")
-                .setDescription("Start today's Daily Quordle challenge")
+                .setDescription("Post today's Daily Quordle challenge to this channel")
         ),
 ];
 
@@ -287,7 +292,11 @@ client.on("interactionCreate", async (interaction) => {
         if (interaction.isChatInputCommand()) {
             if (interaction.commandName === "quordle") {
                 const subcommand = interaction.options.getSubcommand();
-                if (subcommand === "daily") {
+                if (subcommand === "play") {
+                    // Instant launch - no channel message
+                    console.log(`[Bot] /quordle play from ${interaction.user.id}`);
+                    await interaction.launchActivity();
+                } else if (subcommand === "daily") {
                     await handleDailyCommand(interaction);
                 }
             }

@@ -1,11 +1,13 @@
 /**
  * Configure Discord Entry Point Command
  * 
- * This script changes the Activity's "Launch" command to use APP_HANDLER
- * so that your bot controls the launch behavior instead of Discord auto-posting
- * invitation messages to the channel.
+ * This script configures the Activity's "Launch" command behavior:
+ * - By default: Routes "Launch" to your bot (APP_HANDLER) so it calls launchActivity() without spam
+ * - With --disable flag: Deletes the Entry Point so only /quordle commands work
  * 
- * Run once: node scripts/configure-entry-point.js
+ * Usage:
+ *   node scripts/configure-entry-point.js           # Set APP_HANDLER (Launch still works, no spam)
+ *   node scripts/configure-entry-point.js --disable # Delete Launch, use only /quordle
  */
 
 import dotenv from "dotenv";
@@ -16,6 +18,7 @@ dotenv.config();
 
 const DISCORD_CLIENT_ID = process.env.VITE_DISCORD_CLIENT_ID;
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const DISABLE_ENTRY_POINT = process.argv.includes("--disable");
 
 if (!DISCORD_CLIENT_ID || !DISCORD_BOT_TOKEN) {
     console.error("Missing VITE_DISCORD_CLIENT_ID or DISCORD_BOT_TOKEN in .env");
@@ -37,6 +40,12 @@ async function apiRequest(method, endpoint, body = null) {
     }
 
     const response = await fetch(`${API_BASE}${endpoint}`, options);
+
+    // Handle 204 No Content (e.g., DELETE)
+    if (response.status === 204) {
+        return null;
+    }
+
     const data = await response.json();
 
     if (!response.ok) {
@@ -70,16 +79,33 @@ async function main() {
     }
 
     if (!entryPointCommand) {
-        console.log("\n❌ No Entry Point command found.");
-        console.log("   Make sure Activities is enabled in your Discord Developer Portal.");
-        process.exit(1);
+        console.log("\n✅ No Entry Point command found (already disabled or Activities not enabled).");
+        if (!DISABLE_ENTRY_POINT) {
+            console.log("   If you want the built-in Launch command, enable Activities in Developer Portal.");
+        }
+        return;
     }
 
     console.log(`\n🎯 Entry Point Command: "${entryPointCommand.name}" (ID: ${entryPointCommand.id})`);
 
+    if (DISABLE_ENTRY_POINT) {
+        // Delete the Entry Point command entirely
+        console.log("\n🗑️  Deleting Entry Point command (--disable flag)...");
+
+        await apiRequest(
+            "DELETE",
+            `/applications/${DISCORD_CLIENT_ID}/commands/${entryPointCommand.id}`
+        );
+
+        console.log("✅ Entry Point command deleted!");
+        console.log("\nUsers can now only launch via /quordle play or /quordle daily");
+        return;
+    }
+
     // Check current handler
     if (entryPointCommand.handler === 1) {
         console.log("✅ Already configured to use APP_HANDLER (no changes needed)");
+        console.log("\nBoth 'Launch' and /quordle commands will work without spam.");
         return;
     }
 
@@ -93,8 +119,8 @@ async function main() {
     );
 
     console.log(`✅ Updated! Handler is now: ${updated.handler === 1 ? "APP_HANDLER" : updated.handler}`);
-    console.log("\nThe Activity's Launch command will now route to your bot.");
-    console.log("Make sure your bot handles InteractionType.APPLICATION_COMMAND_AUTOCOMPLETE or similar.");
+    console.log("\nThe 'Launch' command now routes to your bot (no channel spam).");
+    console.log("Users can use 'Launch' OR /quordle play - both work cleanly.");
 }
 
 main().catch((err) => {
