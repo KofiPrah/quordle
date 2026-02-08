@@ -21,6 +21,7 @@ let auth;
 let gameState;
 let guessError = null; // Error message for invalid guesses
 let gameMode = "daily"; // "daily" | "practice"
+let uiScreen = "game"; // "game" | "results"
 
 // Discord context for server-side persistence
 let discordUserId = null;
@@ -109,8 +110,9 @@ function handleServerMessage(message) {
         gameState = message.playerState.gameState;
         gameMode = message.playerState.mode || 'daily';
         guessError = null;
+        if (gameState.gameOver) uiScreen = "results";
         saveGameState();
-        renderGame();
+        renderApp();
         setupKeyboardListeners();
       }
       break;
@@ -138,7 +140,7 @@ function handleServerMessage(message) {
     case 'ERROR':
       console.error('Server error:', message.code, message.message);
       guessError = message.message;
-      renderGame();
+      renderApp();
       setupKeyboardListeners();
       break;
   }
@@ -445,9 +447,10 @@ async function initDailyFromServer() {
       gameState = serverState.gameState;
       gameMode = serverState.gameMode || "daily";
       guessError = null;
+      if (gameState.gameOver) uiScreen = "results";
       // Also save to localStorage as backup
       saveGameState();
-      renderGame();
+      renderApp();
       setupKeyboardListeners();
       return;
     }
@@ -456,7 +459,8 @@ async function initDailyFromServer() {
   // Fallback: try to restore from localStorage
   if (loadGameState()) {
     guessError = null;
-    renderGame();
+    if (gameState.gameOver) uiScreen = "results";
+    renderApp();
     setupKeyboardListeners();
     return;
   }
@@ -468,19 +472,40 @@ async function initDailyFromServer() {
   gameState = createGame({ targetWords });
   guessError = null;
   saveGameState();
-  renderGame();
+  renderApp();
   setupKeyboardListeners();
 }
 
-function renderGame() {
+function renderApp() {
+  if (uiScreen === "results") {
+    renderResultsScreen();
+  } else {
+    renderGameScreen();
+  }
+}
+
+// Keep backward compat alias
+const renderGame = renderApp;
+
+function renderGameScreen() {
   const app = document.querySelector('#app');
   const solvedCount = gameState.boards.filter(b => b.solved).length;
+
+  // Minimal status bar when game is over (full results on Results screen)
+  const statusHtml = gameState.gameOver
+    ? `<div class="game-status game-status-done">
+        ${gameState.won ? '🎉' : '💔'} ${gameState.won ? 'Won' : 'Lost'} · ${solvedCount}/4 · ${gameState.guessCount} guesses
+        <button class="results-link-btn">View Results →</button>
+      </div>`
+    : `<div class="game-status">
+        Solved: ${solvedCount}/4 | Guesses: ${gameState.guessCount}/${gameState.maxGuesses}
+      </div>`;
 
   app.innerHTML = `
     <div class="quordle-container">
       <h1 class="game-title">Quordle${gameMode === 'practice' ? ' <span class="mode-badge">Practice</span>' : ''}</h1>
       
-      ${renderBanner(solvedCount)}
+      ${statusHtml}
       
       <div class="game-layout">
         <div class="boards-grid">
@@ -495,8 +520,70 @@ function renderGame() {
       ${renderCurrentGuess()}
       
       ${renderKeyboard()}
+    </div>
+  `;
+}
+
+function renderResultsScreen() {
+  const app = document.querySelector('#app');
+  const solvedCount = gameState.boards.filter(b => b.solved).length;
+  const icon = gameState.won ? '🎉' : '💔';
+  const message = gameState.won ? 'You Won!' : 'Game Over';
+  const bannerClass = gameState.won ? 'results-won' : 'results-lost';
+
+  // Answers reveal (always show on results)
+  const answersHtml = `
+    <div class="answers-reveal">
+      <div class="answers-title">Answers</div>
+      <div class="answers-list">
+        ${gameState.boards.map((board, i) => `
+          <div class="answer-item ${board.solved ? 'answer-solved' : 'answer-missed'}">
+            <span class="answer-number">#${i + 1}</span>
+            <span class="answer-word">${board.targetWord.toUpperCase()}</span>
+            ${board.solved ? '<span class="answer-status">✓</span>' : '<span class="answer-status">✗</span>'}
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+
+  // CTA buttons
+  const practiceBtn = `<button class="results-btn results-btn-primary practice-btn">Play Practice Round</button>`;
+  const backBtn = `<button class="results-btn results-btn-secondary back-to-puzzle-btn">← Back to Puzzle</button>`;
+  const newPracticeBtn = gameMode === 'practice'
+    ? `<button class="results-btn results-btn-primary new-game-btn">New Practice Round</button>`
+    : '';
+
+  app.innerHTML = `
+    <div class="quordle-container">
+      <h1 class="game-title">Quordle${gameMode === 'practice' ? ' <span class="mode-badge">Practice</span>' : ''}</h1>
       
-      ${gameMode === 'practice' && gameState.gameOver ? '<button class="new-game-btn">New Practice Round</button>' : ''}
+      <div class="results-screen">
+        <div class="results-card ${bannerClass}">
+          <div class="results-icon">${icon}</div>
+          <div class="results-message">${message}</div>
+          <div class="results-stats">
+            <div class="results-stat">
+              <span class="results-stat-value">${solvedCount}</span>
+              <span class="results-stat-label">of 4 solved</span>
+            </div>
+            <div class="results-stat">
+              <span class="results-stat-value">${gameState.guessCount}</span>
+              <span class="results-stat-label">guesses</span>
+            </div>
+          </div>
+          ${answersHtml}
+        </div>
+        
+        <div class="results-actions">
+          ${backBtn}
+          ${gameMode === 'daily' ? practiceBtn : newPracticeBtn}
+        </div>
+
+        ${gameMode === 'daily' ? '<div class="results-footer">Come back tomorrow for the next Daily</div>' : ''}
+      </div>
+      
+      <div class="keyboard-spacer"></div>
     </div>
   `;
 }
@@ -553,50 +640,8 @@ function renderLeaderboardContent() {
   `;
 }
 
-function renderBanner(solvedCount) {
-  if (gameState.gameOver) {
-    const bannerClass = gameState.won ? 'banner-won' : 'banner-lost';
-    const message = gameState.won ? '🎉 You Won!' : '💔 Game Over';
-
-    // Show answers when lost (optionally also when won)
-    const answersHtml = !gameState.won ? `
-      <div class="answers-reveal">
-        <div class="answers-title">The answers were:</div>
-        <div class="answers-list">
-          ${gameState.boards.map((board, i) => `
-            <div class="answer-item ${board.solved ? 'answer-solved' : 'answer-missed'}">
-              <span class="answer-number">#${i + 1}</span>
-              <span class="answer-word">${board.targetWord.toUpperCase()}</span>
-              ${board.solved ? '<span class="answer-status">✓</span>' : '<span class="answer-status">✗</span>'}
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    ` : '';
-
-    // Daily mode: show "come back tomorrow" CTA + practice button
-    const dailyCtaHtml = gameMode === 'daily' ? `
-      <div class="daily-cta">
-        <div class="daily-cta-primary">Come back tomorrow for the next Daily</div>
-        <button class="practice-btn">Play Practice Round</button>
-      </div>
-    ` : '';
-
-    return `
-      <div class="game-banner ${bannerClass}">
-        <div class="banner-title">${message}</div>
-        <div class="banner-subtitle">Solved ${solvedCount} of 4 boards in ${gameState.guessCount} guesses</div>
-        ${answersHtml}
-        ${dailyCtaHtml}
-      </div>
-    `;
-  }
-  return `
-    <div class="game-status">
-      Solved: ${solvedCount}/4 | Guesses: ${gameState.guessCount}/${gameState.maxGuesses}
-    </div>
-  `;
-}
+// renderBanner removed — game status is now inline in renderGameScreen,
+// full results are in renderResultsScreen
 
 function renderBoard(board, index) {
   const rows = [];
@@ -696,7 +741,7 @@ function handleKeyPress(key) {
       // Validate against word list using engine's isValidGuess
       if (!isValidGuess(gameState.currentGuess)) {
         guessError = 'Not in word list';
-        renderGame();
+        renderApp();
         setupKeyboardListeners();
         return;
       }
@@ -709,13 +754,13 @@ function handleKeyPress(key) {
   } else if (key === '⌫' || key === 'BACKSPACE') {
     guessError = null; // Clear error on input change
     gameState = setCurrentGuess(gameState, gameState.currentGuess.slice(0, -1));
-    renderGame();
+    renderApp();
     setupKeyboardListeners();
   } else if (key.length === 1 && /^[A-Z]$/i.test(key)) {
     if (gameState.currentGuess.length < 5) {
       guessError = null; // Clear error on input change
       gameState = setCurrentGuess(gameState, gameState.currentGuess + key.toLowerCase());
-      renderGame();
+      renderApp();
       setupKeyboardListeners();
     }
   }
@@ -734,8 +779,9 @@ async function submitGuessWithPersistence(guess) {
     const serverState = await serverSubmitGuess(guess);
     if (serverState && serverState.gameState) {
       gameState = serverState.gameState;
+      if (gameState.gameOver) uiScreen = "results";
       saveGameState(); // Backup to localStorage
-      renderGame();
+      renderApp();
       setupKeyboardListeners();
       return;
     }
@@ -743,8 +789,9 @@ async function submitGuessWithPersistence(guess) {
 
   // Fallback: local-only submission (practice mode or no server)
   gameState = submitGuess(gameState, guess);
+  if (gameState.gameOver) uiScreen = "results";
   saveGameState();
-  renderGame();
+  renderApp();
   setupKeyboardListeners();
 }
 
@@ -756,16 +803,42 @@ function setupKeyboardListeners() {
     });
   });
 
-  // Practice button
+  // Practice button (on results screen)
   const practiceBtn = document.querySelector('.practice-btn');
   if (practiceBtn) {
-    practiceBtn.addEventListener('click', startPracticeGame);
+    practiceBtn.addEventListener('click', () => {
+      uiScreen = "game";
+      startPracticeGame();
+    });
   }
 
   // New practice game button (after practice game ends)
   const newGameBtn = document.querySelector('.new-game-btn');
   if (newGameBtn) {
-    newGameBtn.addEventListener('click', startPracticeGame);
+    newGameBtn.addEventListener('click', () => {
+      uiScreen = "game";
+      startPracticeGame();
+    });
+  }
+
+  // Back to puzzle button (results → game screen with frozen boards)
+  const backBtn = document.querySelector('.back-to-puzzle-btn');
+  if (backBtn) {
+    backBtn.addEventListener('click', () => {
+      uiScreen = "game";
+      renderApp();
+      setupKeyboardListeners();
+    });
+  }
+
+  // View results link on game screen (when game is over)
+  const resultsLink = document.querySelector('.results-link-btn');
+  if (resultsLink) {
+    resultsLink.addEventListener('click', () => {
+      uiScreen = "results";
+      renderApp();
+      setupKeyboardListeners();
+    });
   }
 }
 
@@ -785,11 +858,12 @@ document.addEventListener('keydown', (e) => {
 // Start a new practice round (random targets)
 function startPracticeGame() {
   gameMode = "practice";
+  uiScreen = "game";
   const targetWords = getQuordleWords();
   gameState = createGame({ targetWords });
   guessError = null;
   saveGameState(); // Save new practice game
-  renderGame();
+  renderApp();
   setupKeyboardListeners();
 }
 window.startPractice = startPracticeGame; // Keep for backwards compat
@@ -798,12 +872,13 @@ window.startPractice = startPracticeGame; // Keep for backwards compat
 function resetGame() {
   clearGameStorage();
   gameMode = "daily";
+  uiScreen = "game";
   const dateKey = getTodayDateKey();
   const targetWords = getDailyTargets(dateKey);
   gameState = createGame({ targetWords });
   guessError = null;
   saveGameState();
-  renderGame();
+  renderApp();
   setupKeyboardListeners();
 }
 window.resetGame = resetGame; // Keep for backwards compat
