@@ -116,6 +116,8 @@ awoke
 axial
 axiom
 azure
+barge
+bathe
 beard
 bears
 beast
@@ -126,6 +128,7 @@ being
 below
 bench
 berry
+berth
 black
 blade
 blame

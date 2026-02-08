@@ -10,7 +10,7 @@ const WS_URL = API_URL
   : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 
 // Import Quordle engine
-import { createGame, submitGuess, setCurrentGuess, validateGuess, getSolvedCount } from "../engine/src/game.ts";
+import { createGame, submitGuess, setCurrentGuess, validateGuess, getSolvedCount, computeKeyboardMap } from "../engine/src/game.ts";
 import { evaluateGuess } from "../engine/src/evaluator.ts";
 import { getQuordleWords, isValidGuess } from "../engine/src/words.ts";
 import { getDailyTargets } from "../engine/src/daily.ts";
@@ -578,7 +578,7 @@ function renderKeyboard() {
     ['ENTER', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '⌫']
   ];
 
-  const letterStates = getLetterStates();
+  const letterStates = computeKeyboardMap(gameState);
 
   return `
     <div class="keyboard">
@@ -593,29 +593,6 @@ function renderKeyboard() {
       `).join('')}
     </div>
   `;
-}
-
-function getLetterStates() {
-  const states = {};
-  for (const board of gameState.boards) {
-    for (let i = 0; i < board.guesses.length; i++) {
-      const guess = board.guesses[i];
-      const result = board.results[i];
-      for (let j = 0; j < guess.length; j++) {
-        const letter = guess[j];
-        const state = result[j];
-        // Priority: correct > present > absent
-        if (state === 'correct') {
-          states[letter] = 'correct';
-        } else if (state === 'present' && states[letter] !== 'correct') {
-          states[letter] = 'present';
-        } else if (state === 'absent' && !states[letter]) {
-          states[letter] = 'absent';
-        }
-      }
-    }
-  }
-  return states;
 }
 
 function handleKeyPress(key) {

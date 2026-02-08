@@ -6,6 +6,7 @@ import {
     validateGuess,
     getRemainingGuesses,
     getSolvedCount,
+    computeKeyboardMap,
 } from '../src/game.js';
 
 describe('createGame', () => {
@@ -215,5 +216,58 @@ describe('getSolvedCount', () => {
 
         game = submitGuess(game, 'beach');
         expect(getSolvedCount(game)).toBe(2);
+    });
+});
+
+describe('computeKeyboardMap', () => {
+    it('derives keyboard status from scored tiles with correct precedence', () => {
+        // Bug scenario: BROTH against targets [BREAK, BROWN, QUEEN, BADGE]
+        // B: correct in BREAK(pos0), BROWN(pos0), BADGE(pos0)
+        // R: correct in BREAK(pos1), BROWN(pos1)
+        // O: correct in BROWN(pos2)
+        // T: absent in all
+        // H: absent in all
+        let game = createGame({
+            targetWords: ['break', 'brown', 'queen', 'badge'],
+        });
+
+        game = submitGuess(game, 'broth');
+        const keyMap = computeKeyboardMap(game);
+
+        expect(keyMap['b']).toBe('correct');
+        expect(keyMap['r']).toBe('correct');
+        expect(keyMap['o']).toBe('correct');
+        expect(keyMap['t']).toBe('absent');
+        expect(keyMap['h']).toBe('absent');
+    });
+
+    it('only includes letters from submitted guesses', () => {
+        const game = createGame({
+            targetWords: ['apple', 'beach', 'chair', 'dance'],
+        });
+
+        const keyMap = computeKeyboardMap(game);
+
+        expect(Object.keys(keyMap)).toHaveLength(0);
+    });
+
+    it('applies max precedence across multiple boards', () => {
+        let game = createGame({
+            targetWords: ['crane', 'brain', 'plain', 'drain'],
+        });
+
+        game = submitGuess(game, 'train');
+        const keyMap = computeKeyboardMap(game);
+
+        // T: absent in crane, absent in brain, absent in plain, absent in drain
+        expect(keyMap['t']).toBe('absent');
+        // R: present in crane, correct in brain, present in plain, correct in drain
+        expect(keyMap['r']).toBe('correct');
+        // A: present in crane, correct in brain, correct in plain, correct in drain
+        expect(keyMap['a']).toBe('correct');
+        // I: absent in crane, correct in brain, correct in plain, correct in drain
+        expect(keyMap['i']).toBe('correct');
+        // N: present in crane, correct in brain, correct in plain, correct in drain
+        expect(keyMap['n']).toBe('correct');
     });
 });

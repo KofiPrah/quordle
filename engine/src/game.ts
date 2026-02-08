@@ -1,4 +1,4 @@
-import type { BoardState, GameConfig, GameState } from './types.js';
+import type { BoardState, GameConfig, GameState, LetterResult } from './types.js';
 import { evaluateGuess, isSolved } from './evaluator.js';
 
 const DEFAULT_MAX_GUESSES = 9;
@@ -133,4 +133,37 @@ export function getRemainingGuesses(state: GameState): number {
  */
 export function getSolvedCount(state: GameState): number {
     return state.boards.filter((b) => b.solved).length;
+}
+
+/**
+ * Computes keyboard letter statuses derived from all scored tile results.
+ * For each guessed letter, looks across all boards and all submitted guesses
+ * and assigns the max status using precedence: correct > present > absent.
+ * Only letters that appear in submitted guesses will have a status.
+ */
+export function computeKeyboardMap(state: GameState): Record<string, LetterResult> {
+    const statuses: Record<string, LetterResult> = {};
+
+    for (const board of state.boards) {
+        for (let guessIdx = 0; guessIdx < board.guesses.length; guessIdx++) {
+            const guess = board.guesses[guessIdx];
+            const result = board.results[guessIdx];
+
+            for (let letterIdx = 0; letterIdx < guess.length; letterIdx++) {
+                const letter = guess[letterIdx];
+                const tileStatus = result[letterIdx];
+
+                // Apply max precedence: correct > present > absent
+                if (tileStatus === 'correct') {
+                    statuses[letter] = 'correct';
+                } else if (tileStatus === 'present' && statuses[letter] !== 'correct') {
+                    statuses[letter] = 'present';
+                } else if (tileStatus === 'absent' && !statuses[letter]) {
+                    statuses[letter] = 'absent';
+                }
+            }
+        }
+    }
+
+    return statuses;
 }

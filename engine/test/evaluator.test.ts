@@ -23,11 +23,11 @@ describe('evaluateGuess', () => {
     });
 
     it('handles duplicate letters correctly - only marks as many as exist', () => {
-        // Target has one 'l', guess has two 'l's
+        // Target has one 'l' at position 1, guess has two 'l's at positions 0 and 1
         const result = evaluateGuess('llama', 'plate');
-        // First 'l' is present (exists in target), second 'l' is absent (only one 'l' in target)
-        expect(result[0]).toBe('present');
-        expect(result[1]).toBe('absent');
+        // Second 'l' (pos 1) is correct (exact match), first 'l' (pos 0) is absent (no remaining 'l's)
+        expect(result[0]).toBe('absent');
+        expect(result[1]).toBe('correct');
     });
 
     it('prioritizes correct over present for duplicate letters', () => {

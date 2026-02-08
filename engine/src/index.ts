@@ -15,6 +15,7 @@ export {
     validateGuess,
     getRemainingGuesses,
     getSolvedCount,
+    computeKeyboardMap,
 } from './game.js';
 
 // Evaluator
