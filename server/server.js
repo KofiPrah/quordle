@@ -6,6 +6,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
+import Redis from "ioredis";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +17,22 @@ dotenv.config(); // Also try current directory
 
 // Debug flag for WebSocket logging
 const DEBUG_WS = process.env.DEBUG_WS === 'true';
+
+// Redis client (optional - falls back to in-memory if not configured)
+let redis = null;
+const REDIS_KEY_PREFIX = 'quordle:';
+const REDIS_ROOM_TTL = 60 * 60 * 48; // 48 hours TTL for room data
+
+if (process.env.REDIS_URL) {
+  try {
+    redis = new Redis(process.env.REDIS_URL);
+    redis.on('error', (err) => console.error('Redis error:', err));
+    redis.on('connect', () => console.log('Redis connected'));
+  } catch (err) {
+    console.error('Failed to connect to Redis:', err);
+    redis = null;
+  }
+}
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -48,7 +65,79 @@ function makePlayerKey(roomId, dateKey, visibleUserId) {
   return `${roomId}:${dateKey}:${visibleUserId}`;
 }
 
-/** Get or create room state */
+// ========== REDIS PERSISTENCE HELPERS ==========
+
+/** Serialize room state for Redis (converts players Map to object) */
+function serializeRoom(room) {
+  return JSON.stringify({
+    roomId: room.roomId,
+    dateKey: room.dateKey,
+    players: Object.fromEntries(room.players),
+    leaderboard: room.leaderboard,
+    lastBroadcastAt: room.lastBroadcastAt,
+  });
+}
+
+/** Deserialize room state from Redis (converts players object back to Map) */
+function deserializeRoom(json) {
+  const data = JSON.parse(json);
+  return {
+    roomId: data.roomId,
+    dateKey: data.dateKey,
+    players: new Map(Object.entries(data.players || {})),
+    leaderboard: data.leaderboard || [],
+    lastBroadcastAt: data.lastBroadcastAt || Date.now(),
+  };
+}
+
+/** Save room to Redis (async, fire-and-forget for performance) */
+function persistRoom(room) {
+  if (!redis) return;
+  const key = REDIS_KEY_PREFIX + makeRoomKey(room.roomId, room.dateKey);
+  redis.setex(key, REDIS_ROOM_TTL, serializeRoom(room)).catch(err => {
+    console.error('Failed to persist room to Redis:', err);
+  });
+}
+
+/** Load room from Redis */
+async function loadRoomFromRedis(roomId, dateKey) {
+  if (!redis) return null;
+  try {
+    const key = REDIS_KEY_PREFIX + makeRoomKey(roomId, dateKey);
+    const data = await redis.get(key);
+    if (data) {
+      const room = deserializeRoom(data);
+      // Cache in memory
+      roomStateStore.set(makeRoomKey(roomId, dateKey), room);
+      return room;
+    }
+  } catch (err) {
+    console.error('Failed to load room from Redis:', err);
+  }
+  return null;
+}
+
+/** Get or create room state (checks Redis first) */
+async function getOrCreateRoomAsync(roomId, dateKey) {
+  const key = makeRoomKey(roomId, dateKey);
+  let room = roomStateStore.get(key);
+  if (!room && redis) {
+    room = await loadRoomFromRedis(roomId, dateKey);
+  }
+  if (!room) {
+    room = {
+      roomId,
+      dateKey,
+      players: new Map(),
+      leaderboard: [],
+      lastBroadcastAt: Date.now(),
+    };
+    roomStateStore.set(key, room);
+  }
+  return room;
+}
+
+/** Get or create room state (sync version for non-async contexts) */
 function getOrCreateRoom(roomId, dateKey) {
   const key = makeRoomKey(roomId, dateKey);
   let room = roomStateStore.get(key);
@@ -65,17 +154,27 @@ function getOrCreateRoom(roomId, dateKey) {
   return room;
 }
 
-/** Get player state from room */
+/** Get player state from room (checks Redis first) */
+async function getPlayerAsync(roomId, dateKey, visibleUserId) {
+  let room = roomStateStore.get(makeRoomKey(roomId, dateKey));
+  if (!room && redis) {
+    room = await loadRoomFromRedis(roomId, dateKey);
+  }
+  return room?.players.get(visibleUserId) ?? null;
+}
+
+/** Get player state from room (sync) */
 function getPlayer(roomId, dateKey, visibleUserId) {
   const room = roomStateStore.get(makeRoomKey(roomId, dateKey));
   return room?.players.get(visibleUserId) ?? null;
 }
 
-/** Set player state in room */
+/** Set player state in room (also persists to Redis) */
 function setPlayer(playerState) {
   const room = getOrCreateRoom(playerState.roomId, playerState.dateKey);
   room.players.set(playerState.visibleUserId, playerState);
   updateLeaderboard(room);
+  persistRoom(room); // Fire-and-forget Redis persistence
 }
 
 /** Convert player state to leaderboard entry */
@@ -173,7 +272,7 @@ wss.on("connection", (ws, req) => {
   let currentRoomId = null;
   let currentDateKey = null;
 
-  ws.on("message", (data) => {
+  ws.on("message", async (data) => {
     try {
       const message = JSON.parse(data.toString());
 
@@ -201,8 +300,8 @@ wss.on("connection", (ws, req) => {
             console.log('[WS JOIN] roomId:', roomId, 'dateKey:', dateKey, 'visibleUserId:', visibleUserId);
           }
 
-          // Get or create player state
-          let playerState = getPlayer(roomId, dateKey, visibleUserId);
+          // Get or create player state (checks Redis first)
+          let playerState = await getPlayerAsync(roomId, dateKey, visibleUserId);
           if (!playerState) {
             // Create new daily game
             const targetWords = getDailyTargets(dateKey);
