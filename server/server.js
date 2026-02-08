@@ -753,20 +753,51 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// GET leaderboard for a room
-app.get("/api/room/:roomId/:dateKey/leaderboard", (req, res) => {
+// GET leaderboard for a room (rebuilds from Redis if cache empty)
+app.get("/api/room/:roomId/:dateKey/leaderboard", async (req, res) => {
   const { roomId, dateKey } = req.params;
   if (!roomId || !dateKey) {
     return res.status(400).json({ error: "roomId and dateKey required" });
   }
 
-  const room = roomStateStore.get(makeRoomKey(roomId, dateKey));
-  if (!room) {
-    // Return empty leaderboard if room doesn't exist yet
-    return res.json({ leaderboard: [] });
+  // Try to rebuild from Redis if room not in memory
+  const room = await getOrCreateRoomAsync(roomId, dateKey);
+  res.json({ leaderboard: room.leaderboard });
+});
+
+// GET players in a room (from Redis roomPlayers set)
+app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
+  const { roomId, dateKey } = req.params;
+  if (!roomId || !dateKey) {
+    return res.status(400).json({ error: "roomId and dateKey required" });
   }
 
-  res.json({ leaderboard: room.leaderboard });
+  let visibleUserIds = [];
+
+  // Try Redis first for authoritative list
+  if (redis) {
+    try {
+      const setKey = makeRoomPlayersSetKey(roomId, dateKey);
+      visibleUserIds = await redis.smembers(setKey);
+    } catch (err) {
+      console.error('Failed to get room players from Redis:', err);
+    }
+  }
+
+  // Fallback to in-memory if Redis empty/unavailable
+  if (visibleUserIds.length === 0) {
+    const room = roomStateStore.get(makeRoomKey(roomId, dateKey));
+    if (room) {
+      visibleUserIds = Array.from(room.players.keys());
+    }
+  }
+
+  res.json({
+    roomId,
+    dateKey,
+    count: visibleUserIds.length,
+    visibleUserIds,
+  });
 });
 
 // GET player state
