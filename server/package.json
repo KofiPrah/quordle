@@ -2,11 +2,13 @@
   "name": "quordle-server",
   "version": "1.0.0",
   "description": "Quordle game server for Discord Activity",
-  "main": "server.js",
+  "main": "dist/index.js",
   "type": "module",
   "scripts": {
+    "build": "tsc",
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -15,10 +17,18 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@quordle/engine": "file:../engine",
     "cors": "^2.8.5",
     "dotenv": "^17.0.0",
     "express": "^4.18.2",
     "node-fetch": "^3.3.2",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.0"
   }
 }

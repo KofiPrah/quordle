@@ -28,7 +28,106 @@ app.use(cors({
 app.use(express.json());
 
 // ========== GAME STATE STORAGE ==========
-// In-memory storage (swap to Redis later by replacing this object)
+// In-memory storage keyed by roomId:dateKey for room-level state
+// and roomId:dateKey:visibleUserId for player-level state
+
+/** @type {Map<string, {roomId: string, dateKey: string, players: Map<string, object>, leaderboard: Array, lastBroadcastAt: number}>} */
+const roomStateStore = new Map();
+
+/** @type {Map<string, Set<{ws: WebSocket, visibleUserId: string, roomId: string, dateKey: string}>>} */
+const wsConnectionsByRoom = new Map();
+
+function makeRoomKey(roomId, dateKey) {
+  return `${roomId}:${dateKey}`;
+}
+
+function makePlayerKey(roomId, dateKey, visibleUserId) {
+  return `${roomId}:${dateKey}:${visibleUserId}`;
+}
+
+/** Get or create room state */
+function getOrCreateRoom(roomId, dateKey) {
+  const key = makeRoomKey(roomId, dateKey);
+  let room = roomStateStore.get(key);
+  if (!room) {
+    room = {
+      roomId,
+      dateKey,
+      players: new Map(),
+      leaderboard: [],
+      lastBroadcastAt: Date.now(),
+    };
+    roomStateStore.set(key, room);
+  }
+  return room;
+}
+
+/** Get player state from room */
+function getPlayer(roomId, dateKey, visibleUserId) {
+  const room = roomStateStore.get(makeRoomKey(roomId, dateKey));
+  return room?.players.get(visibleUserId) ?? null;
+}
+
+/** Set player state in room */
+function setPlayer(playerState) {
+  const room = getOrCreateRoom(playerState.roomId, playerState.dateKey);
+  room.players.set(playerState.visibleUserId, playerState);
+  updateLeaderboard(room);
+}
+
+/** Convert player state to leaderboard entry */
+function toLeaderboardEntry(player) {
+  const gs = player.gameState;
+  const solvedCount = gs.boards.filter(b => b.solved).length;
+  return {
+    visibleUserId: player.visibleUserId,
+    solvedCount,
+    guessCount: gs.guessCount,
+    gameOver: gs.gameOver,
+    won: gs.won,
+    finishedAt: player.finishedAt,
+  };
+}
+
+/** Sort leaderboard: finished first, most solved, fewest guesses, earliest finish */
+function sortLeaderboard(entries) {
+  return [...entries].sort((a, b) => {
+    if (a.gameOver !== b.gameOver) return a.gameOver ? -1 : 1;
+    if (a.solvedCount !== b.solvedCount) return b.solvedCount - a.solvedCount;
+    if (a.guessCount !== b.guessCount) return a.guessCount - b.guessCount;
+    if (a.finishedAt !== null && b.finishedAt !== null) {
+      return a.finishedAt - b.finishedAt;
+    }
+    return 0;
+  });
+}
+
+/** Update leaderboard for a room */
+function updateLeaderboard(room) {
+  const entries = [];
+  for (const player of room.players.values()) {
+    entries.push(toLeaderboardEntry(player));
+  }
+  room.leaderboard = sortLeaderboard(entries);
+  room.lastBroadcastAt = Date.now();
+}
+
+/** Create new player state */
+function createPlayerState(roomId, dateKey, visibleUserId, gameState) {
+  const now = Date.now();
+  return {
+    visibleUserId,
+    roomId,
+    dateKey,
+    mode: 'daily',
+    gameState,
+    createdAt: now,
+    updatedAt: now,
+    finishedAt: null,
+  };
+}
+
+// Legacy store for REST API compatibility
 const gameStateStore = {
   /** @type {Map<string, object>} */
   _store: new Map(),
@@ -38,6 +137,12 @@ const gameStateStore = {
   },
 
   async get(roomId, dateKey, userId) {
+    // First check new room store
+    const player = getPlayer(roomId, dateKey, userId);
+    if (player) {
+      return { gameState: player.gameState, gameMode: player.mode, dateKey: player.dateKey };
+    }
+    // Fallback to legacy store
     const key = this._makeKey(roomId, dateKey, userId);
     return this._store.get(key) || null;
   },
@@ -56,22 +161,155 @@ const gameStateStore = {
 // ========== WEBSOCKET SETUP ==========
 const wss = new WebSocketServer({ server, path: "/ws" });
 
-// Track connections by room
-const rooms = new Map(); // roomId -> Set<{ws, userId}>
+// Track connections by room (new protocol uses roomKey = roomId:dateKey)
+const rooms = new Map(); // roomId -> Set<{ws, visibleUserId}> (legacy compat)
 
 wss.on("connection", (ws, req) => {
-  let currentRoom = null;
-  let currentUserId = null;
+  let currentRoomKey = null;
+  let currentVisibleUserId = null;
+  let currentRoomId = null;
+  let currentDateKey = null;
 
   ws.on("message", (data) => {
     try {
       const message = JSON.parse(data.toString());
 
       switch (message.type) {
+        // ===== NEW PROTOCOL =====
+        case "JOIN": {
+          const { roomId, dateKey, visibleUserId } = message;
+          if (!roomId || !dateKey || !visibleUserId) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing required fields' }));
+            return;
+          }
+
+          currentRoomKey = makeRoomKey(roomId, dateKey);
+          currentVisibleUserId = visibleUserId;
+          currentRoomId = roomId;
+          currentDateKey = dateKey;
+
+          // Add to WebSocket connections for this room
+          if (!wsConnectionsByRoom.has(currentRoomKey)) {
+            wsConnectionsByRoom.set(currentRoomKey, new Set());
+          }
+          wsConnectionsByRoom.get(currentRoomKey).add({ ws, visibleUserId, roomId, dateKey });
+
+          // Get or create player state
+          let playerState = getPlayer(roomId, dateKey, visibleUserId);
+          if (!playerState) {
+            // Create new daily game
+            const targetWords = getDailyTargets(dateKey);
+            const gameState = createGameState(targetWords);
+            playerState = createPlayerState(roomId, dateKey, visibleUserId, gameState);
+            setPlayer(playerState);
+          }
+
+          // Send STATE to joining client
+          ws.send(JSON.stringify({ type: 'STATE', playerState }));
+
+          // Send current LEADERBOARD to joining client
+          const room = getOrCreateRoom(roomId, dateKey);
+          ws.send(JSON.stringify({ type: 'LEADERBOARD', leaderboard: room.leaderboard }));
+
+          // Broadcast ROOM_EVENT join to everyone in room (including joiner)
+          broadcastToRoomByKey(currentRoomKey, { type: 'ROOM_EVENT', event: 'join', visibleUserId });
+          break;
+        }
+
+        case "GUESS": {
+          const { roomId, dateKey, visibleUserId, guess } = message;
+          if (!roomId || !dateKey || !visibleUserId || !guess) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing required fields' }));
+            return;
+          }
+
+          const playerState = getPlayer(roomId, dateKey, visibleUserId);
+          if (!playerState) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'PLAYER_NOT_FOUND', message: 'Player not found. Send JOIN first.' }));
+            return;
+          }
+
+          if (playerState.gameState.gameOver) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'GAME_OVER', message: 'Game already over' }));
+            return;
+          }
+
+          // Validate guess
+          const normalizedGuess = guess.toLowerCase();
+          if (normalizedGuess.length !== 5 || !/^[a-z]+$/.test(normalizedGuess)) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_GUESS', message: 'Guess must be 5 letters' }));
+            return;
+          }
+
+          // Apply guess to game state
+          const oldGameState = playerState.gameState;
+          const newBoards = oldGameState.boards.map((board) => {
+            if (board.solved) {
+              return {
+                ...board,
+                guesses: [...board.guesses, normalizedGuess],
+                results: [...board.results, board.results[board.results.length - 1] || []],
+              };
+            }
+            const result = evaluateGuess(normalizedGuess, board.targetWord);
+            const solved = result.every(r => r === 'correct');
+            return {
+              ...board,
+              guesses: [...board.guesses, normalizedGuess],
+              results: [...board.results, result],
+              solved,
+              solvedOnGuess: solved ? oldGameState.guessCount + 1 : board.solvedOnGuess,
+            };
+          });
+
+          const newGuessCount = oldGameState.guessCount + 1;
+          const allSolved = newBoards.every(b => b.solved);
+          const outOfGuesses = newGuessCount >= oldGameState.maxGuesses;
+          const newGameOver = allSolved || outOfGuesses;
+
+          const newGameState = {
+            ...oldGameState,
+            boards: newBoards,
+            currentGuess: '',
+            guessCount: newGuessCount,
+            gameOver: newGameOver,
+            won: allSolved,
+          };
+
+          // Update player state
+          const now = Date.now();
+          const updatedPlayerState = {
+            ...playerState,
+            gameState: newGameState,
+            updatedAt: now,
+            finishedAt: newGameOver && !playerState.finishedAt ? now : playerState.finishedAt,
+          };
+          setPlayer(updatedPlayerState);
+
+          // Send updated STATE to player
+          ws.send(JSON.stringify({ type: 'STATE', playerState: updatedPlayerState }));
+
+          // Broadcast updated LEADERBOARD to room
+          const room = getOrCreateRoom(roomId, dateKey);
+          const roomKey = makeRoomKey(roomId, dateKey);
+          broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard });
+          break;
+        }
+
+        case "LEAVE": {
+          const { roomId, dateKey, visibleUserId } = message;
+          if (!roomId || !dateKey || !visibleUserId) {
+            return;
+          }
+          handleLeave(roomId, dateKey, visibleUserId, ws);
+          break;
+        }
+
+        // ===== LEGACY PROTOCOL (backwards compat) =====
         case "join_room": {
           const { roomId, userId } = message;
-          currentRoom = roomId;
-          currentUserId = userId;
+          currentRoomId = roomId;
+          currentVisibleUserId = userId;
 
           if (!rooms.has(roomId)) {
             rooms.set(roomId, new Set());
@@ -116,12 +354,19 @@ wss.on("connection", (ws, req) => {
       }
     } catch (err) {
       console.error("WebSocket message error:", err);
+      ws.send(JSON.stringify({ type: 'ERROR', code: 'INTERNAL_ERROR', message: 'Failed to process message' }));
     }
   });
 
   ws.on("close", () => {
-    if (currentRoom && rooms.has(currentRoom)) {
-      const room = rooms.get(currentRoom);
+    // Handle new protocol disconnect
+    if (currentRoomKey && currentVisibleUserId) {
+      handleLeave(currentRoomId, currentDateKey, currentVisibleUserId, ws);
+    }
+
+    // Handle legacy protocol disconnect
+    if (currentRoomId && rooms.has(currentRoomId)) {
+      const room = rooms.get(currentRoomId);
       for (const client of room) {
         if (client.ws === ws) {
           room.delete(client);
@@ -130,15 +375,15 @@ wss.on("connection", (ws, req) => {
       }
 
       // Notify others
-      broadcastToRoom(currentRoom, {
+      broadcastToRoom(currentRoomId, {
         type: "player_left",
-        userId: currentUserId,
+        userId: currentVisibleUserId,
         playerCount: room.size,
       });
 
       // Clean up empty rooms
       if (room.size === 0) {
-        rooms.delete(currentRoom);
+        rooms.delete(currentRoomId);
       }
     }
   });
@@ -148,6 +393,40 @@ wss.on("connection", (ws, req) => {
   });
 });
 
+/** Handle player leaving (LEAVE message or disconnect) */
+function handleLeave(roomId, dateKey, visibleUserId, ws) {
+  const roomKey = makeRoomKey(roomId, dateKey);
+  const connections = wsConnectionsByRoom.get(roomKey);
+  if (connections) {
+    for (const client of connections) {
+      if (client.ws === ws) {
+        connections.delete(client);
+        break;
+      }
+    }
+    if (connections.size === 0) {
+      wsConnectionsByRoom.delete(roomKey);
+    }
+  }
+
+  // Broadcast ROOM_EVENT leave to remaining players
+  broadcastToRoomByKey(roomKey, { type: 'ROOM_EVENT', event: 'leave', visibleUserId });
+}
+
+/** Broadcast to room using new protocol (roomKey = roomId:dateKey) */
+function broadcastToRoomByKey(roomKey, message, excludeWs = null) {
+  const connections = wsConnectionsByRoom.get(roomKey);
+  if (!connections) return;
+
+  const data = JSON.stringify(message);
+  for (const client of connections) {
+    if (client.ws !== excludeWs && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(data);
+    }
+  }
+}
+
+/** Broadcast to room using legacy protocol (roomId only) */
 function broadcastToRoom(roomId, message, excludeWs = null) {
   if (!rooms.has(roomId)) return;
 
@@ -276,6 +555,37 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// GET leaderboard for a room
+app.get("/api/room/:roomId/:dateKey/leaderboard", (req, res) => {
+  const { roomId, dateKey } = req.params;
+  if (!roomId || !dateKey) {
+    return res.status(400).json({ error: "roomId and dateKey required" });
+  }
+
+  const room = roomStateStore.get(makeRoomKey(roomId, dateKey));
+  if (!room) {
+    // Return empty leaderboard if room doesn't exist yet
+    return res.json({ leaderboard: [] });
+  }
+
+  res.json({ leaderboard: room.leaderboard });
+});
+
+// GET player state
+app.get("/api/room/:roomId/:dateKey/player/:visibleUserId", (req, res) => {
+  const { roomId, dateKey, visibleUserId } = req.params;
+  if (!roomId || !dateKey || !visibleUserId) {
+    return res.status(400).json({ error: "roomId, dateKey, and visibleUserId required" });
+  }
+
+  const playerState = getPlayer(roomId, dateKey, visibleUserId);
+  if (!playerState) {
+    return res.status(404).json({ error: "Player not found" });
+  }
+
+  res.json({ playerState });
+});
+
 app.post("/api/token", async (req, res) => {
 
   // Exchange the code for an access_token
@@ -302,12 +612,15 @@ app.post("/api/token", async (req, res) => {
 // JOIN: Get or create game state for a player in a room
 app.post("/api/game/join", async (req, res) => {
   try {
-    const { roomId, userId } = req.body;
+    const { roomId, userId, dateKey: clientDateKey } = req.body;
     if (!roomId || !userId) {
       return res.status(400).json({ error: "roomId and userId required" });
     }
 
-    const dateKey = getTodayDateKey();
+    // Use client-provided dateKey if valid, otherwise compute on server
+    const dateKey = (clientDateKey && /^\d{4}-\d{2}-\d{2}$/.test(clientDateKey))
+      ? clientDateKey
+      : getTodayDateKey();
     let state = await gameStateStore.get(roomId, dateKey, userId);
 
     if (!state) {
@@ -331,12 +644,15 @@ app.post("/api/game/join", async (req, res) => {
 // GUESS: Submit a guess and get updated state
 app.post("/api/game/guess", async (req, res) => {
   try {
-    const { roomId, userId, guess } = req.body;
+    const { roomId, userId, guess, dateKey: clientDateKey } = req.body;
     if (!roomId || !userId || !guess) {
       return res.status(400).json({ error: "roomId, userId, and guess required" });
     }
 
-    const dateKey = getTodayDateKey();
+    // Use client-provided dateKey if valid, otherwise compute on server
+    const dateKey = (clientDateKey && /^\d{4}-\d{2}-\d{2}$/.test(clientDateKey))
+      ? clientDateKey
+      : getTodayDateKey();
     let state = await gameStateStore.get(roomId, dateKey, userId);
 
     if (!state) {
@@ -465,3 +781,38 @@ server.listen(port, () => {
   console.log(`WebSocket available at ws://localhost:${port}/ws`);
   console.log(`Serving static files from: ${publicPath}`);
 });
+
+// ========== CLEANUP JOB ==========
+// Remove room states older than 2 days to prevent memory growth
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // Run every hour
+const MAX_AGE_DAYS = 2;
+
+function cleanupOldRoomStates() {
+  const now = new Date();
+  const chicagoNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/Chicago' }));
+
+  // Calculate cutoff date (2 days ago)
+  const cutoffDate = new Date(chicagoNow);
+  cutoffDate.setDate(cutoffDate.getDate() - MAX_AGE_DAYS);
+  const cutoffDateKey = `${cutoffDate.getFullYear()}-${String(cutoffDate.getMonth() + 1).padStart(2, '0')}-${String(cutoffDate.getDate()).padStart(2, '0')}`;
+
+  let cleanedCount = 0;
+
+  for (const [roomKey, room] of roomStateStore.entries()) {
+    // roomKey format: "roomId:dateKey"
+    const dateKey = room.dateKey;
+    if (dateKey && dateKey < cutoffDateKey) {
+      roomStateStore.delete(roomKey);
+      wsConnectionsByRoom.delete(roomKey);
+      cleanedCount++;
+    }
+  }
+
+  if (cleanedCount > 0) {
+    console.log(`[Cleanup] Removed ${cleanedCount} room states older than ${cutoffDateKey}`);
+  }
+}
+
+// Run cleanup on startup and then periodically
+cleanupOldRoomStates();
+setInterval(cleanupOldRoomStates, CLEANUP_INTERVAL_MS);

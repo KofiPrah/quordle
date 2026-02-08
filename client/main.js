@@ -4,6 +4,11 @@ import "./style.css";
 // API URL - empty string for same-origin (dev), full URL for production
 const API_URL = import.meta.env.VITE_API_URL || '';
 
+// WebSocket URL - derive from API_URL or use same origin
+const WS_URL = API_URL
+  ? API_URL.replace(/^http/, 'ws') + '/ws'
+  : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+
 // Import Quordle engine
 import { createGame, submitGuess, setCurrentGuess, validateGuess, getSolvedCount } from "../engine/src/game.ts";
 import { evaluateGuess } from "../engine/src/evaluator.ts";
@@ -19,6 +24,134 @@ let gameMode = "daily"; // "daily" | "practice"
 // Discord context for server-side persistence
 let discordUserId = null;
 let discordRoomId = null;
+
+// WebSocket connection
+let ws = null;
+let wsReconnectTimeout = null;
+let leaderboard = []; // Current room leaderboard
+
+// ========== WEBSOCKET CONNECTION ==========
+function connectWebSocket() {
+  if (!discordUserId || !discordRoomId) return;
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+
+  console.log('Connecting to WebSocket:', WS_URL);
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    console.log('WebSocket connected');
+    // Send JOIN message
+    const dateKey = getTodayDateKey();
+    ws.send(JSON.stringify({
+      type: 'JOIN',
+      roomId: discordRoomId,
+      dateKey,
+      visibleUserId: discordUserId
+    }));
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const message = JSON.parse(event.data);
+      handleServerMessage(message);
+    } catch (e) {
+      console.error('Failed to parse WebSocket message:', e);
+    }
+  };
+
+  ws.onclose = () => {
+    console.log('WebSocket disconnected');
+    // Auto-reconnect after 3 seconds
+    if (wsReconnectTimeout) clearTimeout(wsReconnectTimeout);
+    wsReconnectTimeout = setTimeout(() => {
+      if (discordUserId && discordRoomId) {
+        connectWebSocket();
+      }
+    }, 3000);
+  };
+
+  ws.onerror = (err) => {
+    console.error('WebSocket error:', err);
+  };
+}
+
+function handleServerMessage(message) {
+  console.log('Server message:', message.type, message);
+
+  switch (message.type) {
+    case 'STATE':
+      // Update game state from server
+      if (message.playerState && message.playerState.gameState) {
+        gameState = message.playerState.gameState;
+        gameMode = message.playerState.mode || 'daily';
+        guessError = null;
+        saveGameState();
+        renderGame();
+        setupKeyboardListeners();
+      }
+      break;
+
+    case 'LEADERBOARD':
+      // Update leaderboard
+      leaderboard = message.leaderboard || [];
+      renderLeaderboard();
+      break;
+
+    case 'ROOM_EVENT':
+      // Show toast for join/leave
+      const action = message.event === 'join' ? 'joined' : 'left';
+      // Don't show toast for own join
+      if (message.visibleUserId !== discordUserId) {
+        showToast(`Player ${action}`);
+      }
+      break;
+
+    case 'ERROR':
+      console.error('Server error:', message.code, message.message);
+      guessError = message.message;
+      renderGame();
+      setupKeyboardListeners();
+      break;
+  }
+}
+
+function sendGuessViaWebSocket(guess) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.warn('WebSocket not connected');
+    return false;
+  }
+
+  const dateKey = getTodayDateKey();
+  ws.send(JSON.stringify({
+    type: 'GUESS',
+    roomId: discordRoomId,
+    dateKey,
+    visibleUserId: discordUserId,
+    guess
+  }));
+  return true;
+}
+
+// ========== TOAST NOTIFICATIONS ==========
+function showToast(message, duration = 3000) {
+  // Remove existing toast
+  const existingToast = document.querySelector('.toast');
+  if (existingToast) existingToast.remove();
+
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.textContent = message;
+  document.body.appendChild(toast);
+
+  // Trigger animation
+  setTimeout(() => toast.classList.add('toast-visible'), 10);
+
+  // Remove after duration
+  setTimeout(() => {
+    toast.classList.remove('toast-visible');
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
 
 // ========== LOCAL STORAGE PERSISTENCE ==========
 const STORAGE_KEY_DAILY = "quordle_daily";
@@ -87,10 +220,11 @@ function clearGameStorage() {
 async function serverJoinGame() {
   if (!discordUserId || !discordRoomId) return null;
   try {
+    const dateKey = getTodayDateKey();
     const response = await fetch(`${API_URL}/api/game/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ roomId: discordRoomId, userId: discordUserId }),
+      body: JSON.stringify({ roomId: discordRoomId, userId: discordUserId, dateKey }),
     });
     if (!response.ok) return null;
     return await response.json();
@@ -103,10 +237,11 @@ async function serverJoinGame() {
 async function serverSubmitGuess(guess) {
   if (!discordUserId || !discordRoomId) return null;
   try {
+    const dateKey = getTodayDateKey();
     const response = await fetch(`${API_URL}/api/game/guess`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ roomId: discordRoomId, userId: discordUserId, guess }),
+      body: JSON.stringify({ roomId: discordRoomId, userId: discordUserId, guess, dateKey }),
     });
     if (!response.ok) return null;
     return await response.json();
@@ -125,13 +260,28 @@ setupDiscordSdk()
   })
   .catch((err) => {
     console.error("Discord SDK init failed:", err);
-    document.querySelector('#app').innerHTML = `
-      <div style="padding:16px;color:#f66;">
-        <h2>Activity failed to start</h2>
-        <pre>${String(err)}</pre>
-      </div>
-    `;
+    // Dev mode fallback - use localStorage-persisted random IDs
+    setupDevMode();
+    initQuordleGame();
   });
+
+function setupDevMode() {
+  console.log("Running in dev mode (no Discord SDK)");
+
+  // Generate or retrieve persistent dev user ID
+  let devUserId = localStorage.getItem('dev_user_id');
+  if (!devUserId) {
+    devUserId = 'dev-' + crypto.randomUUID().slice(0, 8);
+    localStorage.setItem('dev_user_id', devUserId);
+  }
+  discordUserId = devUserId;
+
+  // Use a fixed dev room or allow override via URL param
+  const urlParams = new URLSearchParams(window.location.search);
+  discordRoomId = urlParams.get('room') || 'dev-room';
+
+  console.log(`Dev mode: userId=${discordUserId}, roomId=${discordRoomId}`);
+}
 
 async function setupDiscordSdk() {
   await discordSdk.ready();
@@ -180,8 +330,13 @@ async function setupDiscordSdk() {
 // ========== QUORDLE GAME UI ==========
 
 function getTodayDateKey() {
-  const today = new Date();
-  return today.toISOString().slice(0, 10); // "YYYY-MM-DD"
+  // Use America/Chicago timezone for consistent daily reset across all users
+  const now = new Date();
+  const chicagoTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Chicago' }));
+  const year = chicagoTime.getFullYear();
+  const month = String(chicagoTime.getMonth() + 1).padStart(2, '0');
+  const day = String(chicagoTime.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`; // "YYYY-MM-DD" in America/Chicago
 }
 
 function initQuordleGame() {
@@ -190,8 +345,12 @@ function initQuordleGame() {
 }
 
 async function initDailyFromServer() {
-  // Try to get state from server (for daily mode with Discord context)
+  // Try to get state from server via WebSocket (for daily mode with Discord context)
   if (discordUserId && discordRoomId) {
+    // Connect WebSocket - it will send JOIN and receive STATE
+    connectWebSocket();
+
+    // Also do REST fallback in case WebSocket takes time
     const serverState = await serverJoinGame();
     if (serverState && serverState.gameState) {
       gameState = serverState.gameState;
@@ -234,8 +393,14 @@ function renderGame() {
       
       ${renderBanner(solvedCount)}
       
-      <div class="boards-grid">
-        ${gameState.boards.map((board, i) => renderBoard(board, i)).join('')}
+      <div class="game-layout">
+        <div class="boards-grid">
+          ${gameState.boards.map((board, i) => renderBoard(board, i)).join('')}
+        </div>
+        
+        <div class="leaderboard-panel" id="leaderboard-panel">
+          ${renderLeaderboardContent()}
+        </div>
       </div>
       
       ${renderCurrentGuess()}
@@ -243,6 +408,47 @@ function renderGame() {
       ${renderKeyboard()}
       
       ${gameMode === 'practice' && gameState.gameOver ? '<button class="new-game-btn">New Practice Round</button>' : ''}
+    </div>
+  `;
+}
+
+function renderLeaderboard() {
+  const panel = document.getElementById('leaderboard-panel');
+  if (panel) {
+    panel.innerHTML = renderLeaderboardContent();
+  }
+}
+
+function renderLeaderboardContent() {
+  if (!leaderboard || leaderboard.length === 0) {
+    return `
+      <div class="leaderboard">
+        <h3 class="leaderboard-title">Leaderboard</h3>
+        <div class="leaderboard-empty">No players yet</div>
+      </div>
+    `;
+  }
+
+  const entries = leaderboard.map((entry, i) => {
+    const isYou = entry.visibleUserId === discordUserId;
+    const statusIcon = entry.gameOver ? (entry.won ? '🏆' : '💀') : '🎮';
+    const youBadge = isYou ? ' <span class="you-badge">(You)</span>' : '';
+
+    return `
+      <div class="leaderboard-entry ${isYou ? 'leaderboard-entry-you' : ''} ${entry.gameOver ? 'leaderboard-entry-done' : ''}">
+        <span class="leaderboard-rank">#${i + 1}</span>
+        <span class="leaderboard-status">${statusIcon}</span>
+        <span class="leaderboard-name">${entry.visibleUserId.slice(0, 8)}...${youBadge}</span>
+        <span class="leaderboard-score">${entry.solvedCount}/4</span>
+        <span class="leaderboard-guesses">${entry.guessCount}g</span>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="leaderboard">
+      <h3 class="leaderboard-title">Leaderboard</h3>
+      ${entries}
     </div>
   `;
 }
@@ -440,8 +646,15 @@ function handleKeyPress(key) {
 }
 
 async function submitGuessWithPersistence(guess) {
-  // For daily mode with Discord context, use server
+  // For daily mode with Discord context, use WebSocket (server-authoritative)
   if (gameMode === "daily" && discordUserId && discordRoomId) {
+    // Try WebSocket first (preferred, real-time)
+    if (sendGuessViaWebSocket(guess)) {
+      // Server will respond with STATE message, which triggers render
+      return;
+    }
+
+    // Fallback to REST if WebSocket not connected
     const serverState = await serverSubmitGuess(guess);
     if (serverState && serverState.gameState) {
       gameState = serverState.gameState;
@@ -452,7 +665,7 @@ async function submitGuessWithPersistence(guess) {
     }
   }
 
-  // Fallback: local-only submission
+  // Fallback: local-only submission (practice mode or no server)
   gameState = submitGuess(gameState, guess);
   saveGameState();
   renderGame();

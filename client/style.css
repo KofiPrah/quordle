@@ -465,3 +465,155 @@ button:focus-visible {
   color: #fff;
   border-color: #ef4444;
 }
+
+/* ========== GAME LAYOUT WITH LEADERBOARD ========== */
+.game-layout {
+  display: flex;
+  gap: 1.5rem;
+  justify-content: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+/* ========== LEADERBOARD PANEL ========== */
+.leaderboard-panel {
+  min-width: 180px;
+  max-width: 220px;
+}
+
+.leaderboard {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 0.75rem;
+  text-align: left;
+}
+
+.leaderboard-title {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #fff;
+  text-align: center;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.leaderboard-empty {
+  color: #888;
+  font-size: 0.8rem;
+  text-align: center;
+  padding: 0.5rem;
+}
+
+.leaderboard-entry {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.25rem;
+  font-size: 0.75rem;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.leaderboard-entry:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.leaderboard-entry-you {
+  background: rgba(88, 101, 242, 0.2);
+}
+
+.leaderboard-entry-done {
+  opacity: 0.7;
+}
+
+.leaderboard-rank {
+  color: #888;
+  font-weight: 600;
+  min-width: 1.5rem;
+}
+
+.leaderboard-status {
+  font-size: 0.85rem;
+}
+
+.leaderboard-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #ddd;
+}
+
+.you-badge {
+  color: #5865f2;
+  font-weight: 600;
+}
+
+.leaderboard-score {
+  color: #6aaa64;
+  font-weight: 600;
+  min-width: 2rem;
+  text-align: right;
+}
+
+.leaderboard-guesses {
+  color: #888;
+  min-width: 1.5rem;
+  text-align: right;
+}
+
+/* ========== TOAST NOTIFICATIONS ========== */
+.toast {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%) translateY(-100%);
+  background: rgba(0, 0, 0, 0.85);
+  color: #fff;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  z-index: 1000;
+  opacity: 0;
+  transition: transform 0.3s ease, opacity 0.3s ease;
+  pointer-events: none;
+}
+
+.toast-visible {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+}
+
+/* ========== RESPONSIVE ADJUSTMENTS ========== */
+@media (max-width: 700px) {
+  .game-layout {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .leaderboard-panel {
+    width: 100%;
+    max-width: 100%;
+    order: -1;
+    /* Put leaderboard above boards on mobile */
+  }
+
+  .leaderboard {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: center;
+  }
+
+  .leaderboard-title {
+    width: 100%;
+    border-bottom: none;
+    margin-bottom: 0;
+  }
+
+  .leaderboard-entry {
+    padding: 0.25rem 0.5rem;
+    background: rgba(255, 255, 255, 0.05);
+  }
+}
