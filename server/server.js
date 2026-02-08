@@ -89,15 +89,22 @@ function makePlayerKey(roomId, dateKey, visibleUserId) {
 /** Save a single player state to Redis with TTL */
 async function persistPlayerToRedis(playerState) {
   if (!redis) {
-    if (DEBUG_WS) console.log('[Redis] Skipping persist - no Redis connection');
+    console.log('[Redis] Skipping persist - no Redis connection');
     return;
   }
   const key = makePlayerRedisKey(playerState.roomId, playerState.dateKey, playerState.visibleUserId);
   const setKey = makeRoomPlayersSetKey(playerState.roomId, playerState.dateKey);
+
+  // Log what we're about to save
+  const guessCount = playerState.gameState?.guessCount || 0;
+  const boardGuesses = playerState.gameState?.boards?.map(b => b.guesses?.length || 0) || [];
+  console.log('[Redis SAVE]', key, '- guesses:', guessCount, 'boards:', boardGuesses);
+
   try {
     // Use pipeline for atomicity
     const pipeline = redis.pipeline();
-    pipeline.setex(key, REDIS_TTL_SECONDS, JSON.stringify(playerState));
+    const serialized = JSON.stringify(playerState);
+    pipeline.setex(key, REDIS_TTL_SECONDS, serialized);
     pipeline.sadd(setKey, playerState.visibleUserId);
     pipeline.expire(setKey, REDIS_TTL_SECONDS);
     const results = await pipeline.exec();
@@ -106,7 +113,7 @@ async function persistPlayerToRedis(playerState) {
     if (errors.length > 0) {
       console.error('[Redis] Pipeline errors:', errors);
     } else {
-      console.log('[Redis] Persisted player:', key, 'guesses:', playerState.gameState?.guessCount || 0);
+      console.log('[Redis SAVE OK]', key, '- bytes:', serialized.length);
     }
   } catch (err) {
     console.error('[Redis] Failed to persist player:', err.message);
@@ -116,18 +123,21 @@ async function persistPlayerToRedis(playerState) {
 /** Load a single player state from Redis */
 async function loadPlayerFromRedis(roomId, dateKey, visibleUserId) {
   if (!redis) {
-    if (DEBUG_WS) console.log('[Redis] Skipping load - no Redis connection');
+    console.log('[Redis] Skipping load - no Redis connection');
     return null;
   }
   try {
     const key = makePlayerRedisKey(roomId, dateKey, visibleUserId);
+    console.log('[Redis LOAD] Attempting to load:', key);
     const data = await redis.get(key);
     if (data) {
       const parsed = JSON.parse(data);
-      console.log('[Redis] Loaded player:', key, 'guesses:', parsed.gameState?.guessCount || 0);
+      const guessCount = parsed.gameState?.guessCount || 0;
+      const boardGuesses = parsed.gameState?.boards?.map(b => b.guesses?.length || 0) || [];
+      console.log('[Redis LOAD OK]', key, '- guesses:', guessCount, 'boards:', boardGuesses, 'bytes:', data.length);
       return parsed;
     } else {
-      if (DEBUG_WS) console.log('[Redis] No data found for:', key);
+      console.log('[Redis LOAD] No data found for:', key);
     }
   } catch (err) {
     console.error('[Redis] Failed to load player:', err.message);
@@ -225,15 +235,22 @@ async function getPlayerAsync(roomId, dateKey, visibleUserId) {
   // First check in-memory cache
   const room = roomStateStore.get(makeRoomKey(roomId, dateKey));
   const cachedPlayer = room?.players.get(visibleUserId);
-  if (cachedPlayer) return cachedPlayer;
+  if (cachedPlayer) {
+    console.log('[getPlayerAsync] Found in cache:', visibleUserId, 'guesses:', cachedPlayer.gameState?.guessCount || 0);
+    return cachedPlayer;
+  }
 
   // Try to load from Redis
+  console.log('[getPlayerAsync] Not in cache, trying Redis for:', visibleUserId);
   const redisPlayer = await loadPlayerFromRedis(roomId, dateKey, visibleUserId);
   if (redisPlayer) {
     // Cache in memory
     const r = getOrCreateRoom(roomId, dateKey);
     r.players.set(visibleUserId, redisPlayer);
     updateLeaderboard(r);
+    console.log('[getPlayerAsync] Cached from Redis:', visibleUserId);
+  } else {
+    console.log('[getPlayerAsync] Not found in Redis either:', visibleUserId);
   }
   return redisPlayer;
 }
@@ -495,6 +512,7 @@ wss.on("connection", (ws, req) => {
             updatedAt: now,
             finishedAt: newGameOver && !playerState.finishedAt ? now : playerState.finishedAt,
           };
+          console.log('[GUESS] Updating player:', visibleUserId, 'guessCount:', newGuessCount, 'boards:', newBoards.map(b => b.guesses.length));
           setPlayer(updatedPlayerState);
 
           // Send updated STATE to player
@@ -805,12 +823,35 @@ app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
   }
 
   let visibleUserIds = [];
+  let playerDetails = [];
 
   // Try Redis first for authoritative list
   if (redis) {
     try {
       const setKey = makeRoomPlayersSetKey(roomId, dateKey);
       visibleUserIds = await redis.smembers(setKey);
+
+      // Also load player details from Redis
+      for (const visibleUserId of visibleUserIds) {
+        const playerKey = makePlayerRedisKey(roomId, dateKey, visibleUserId);
+        const data = await redis.get(playerKey);
+        if (data) {
+          const parsed = JSON.parse(data);
+          playerDetails.push({
+            visibleUserId,
+            guessCount: parsed.gameState?.guessCount || 0,
+            boardGuesses: parsed.gameState?.boards?.map(b => b.guesses?.length || 0) || [],
+            gameOver: parsed.gameState?.gameOver || false,
+            inRedis: true,
+          });
+        } else {
+          playerDetails.push({
+            visibleUserId,
+            inRedis: false,
+            note: 'In roomPlayers set but no player:* key found',
+          });
+        }
+      }
     } catch (err) {
       console.error('Failed to get room players from Redis:', err);
     }
@@ -821,6 +862,15 @@ app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
     const room = roomStateStore.get(makeRoomKey(roomId, dateKey));
     if (room) {
       visibleUserIds = Array.from(room.players.keys());
+      for (const [visibleUserId, player] of room.players) {
+        playerDetails.push({
+          visibleUserId,
+          guessCount: player.gameState?.guessCount || 0,
+          boardGuesses: player.gameState?.boards?.map(b => b.guesses?.length || 0) || [],
+          gameOver: player.gameState?.gameOver || false,
+          source: 'memory',
+        });
+      }
     }
   }
 
@@ -829,6 +879,7 @@ app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
     dateKey,
     count: visibleUserIds.length,
     visibleUserIds,
+    playerDetails,
   });
 });
 
@@ -878,11 +929,15 @@ app.get("/api/debug/persist", async (req, res) => {
     // Test GET player
     try {
       const data = await redis.get(playerKey);
+      const parsed = data ? JSON.parse(data) : null;
       status.tests.playerGet = {
         key: playerKey,
         success: true,
         found: !!data,
-        data: data ? JSON.parse(data) : null,
+        guessCount: parsed?.gameState?.guessCount || 0,
+        boardGuesses: parsed?.gameState?.boards?.map(b => b.guesses?.length || 0) || [],
+        gameOver: parsed?.gameState?.gameOver || false,
+        updatedAt: parsed?.updatedAt ? new Date(parsed.updatedAt).toISOString() : null,
       };
     } catch (err) {
       status.tests.playerGet = { key: playerKey, success: false, error: err.message };
