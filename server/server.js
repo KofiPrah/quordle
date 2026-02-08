@@ -25,13 +25,19 @@ const REDIS_TTL_SECONDS = 60 * 60 * 48; // 48 hours TTL
 
 if (process.env.REDIS_URL) {
   try {
+    console.log('[Redis] Attempting connection to:', process.env.REDIS_URL.replace(/:[^:@]+@/, ':***@'));
     redis = new Redis(process.env.REDIS_URL);
-    redis.on('error', (err) => console.error('Redis error:', err));
-    redis.on('connect', () => console.log('Redis connected'));
+    redis.on('error', (err) => console.error('[Redis] Error:', err.message));
+    redis.on('connect', () => console.log('[Redis] Connected successfully'));
+    redis.on('ready', () => console.log('[Redis] Ready to accept commands'));
+    redis.on('close', () => console.log('[Redis] Connection closed'));
+    redis.on('reconnecting', () => console.log('[Redis] Reconnecting...'));
   } catch (err) {
-    console.error('Failed to connect to Redis:', err);
+    console.error('[Redis] Failed to initialize:', err);
     redis = null;
   }
+} else {
+  console.log('[Redis] No REDIS_URL configured - using in-memory storage only');
 }
 
 // ========== REDIS KEY HELPERS ==========
@@ -82,7 +88,10 @@ function makePlayerKey(roomId, dateKey, visibleUserId) {
 
 /** Save a single player state to Redis with TTL */
 async function persistPlayerToRedis(playerState) {
-  if (!redis) return;
+  if (!redis) {
+    if (DEBUG_WS) console.log('[Redis] Skipping persist - no Redis connection');
+    return;
+  }
   const key = makePlayerRedisKey(playerState.roomId, playerState.dateKey, playerState.visibleUserId);
   const setKey = makeRoomPlayersSetKey(playerState.roomId, playerState.dateKey);
   try {
@@ -91,33 +100,51 @@ async function persistPlayerToRedis(playerState) {
     pipeline.setex(key, REDIS_TTL_SECONDS, JSON.stringify(playerState));
     pipeline.sadd(setKey, playerState.visibleUserId);
     pipeline.expire(setKey, REDIS_TTL_SECONDS);
-    await pipeline.exec();
+    const results = await pipeline.exec();
+    // Check for errors in pipeline results
+    const errors = results?.filter(r => r[0] !== null) || [];
+    if (errors.length > 0) {
+      console.error('[Redis] Pipeline errors:', errors);
+    } else {
+      console.log('[Redis] Persisted player:', key, 'guesses:', playerState.gameState?.guessCount || 0);
+    }
   } catch (err) {
-    console.error('Failed to persist player to Redis:', err);
+    console.error('[Redis] Failed to persist player:', err.message);
   }
 }
 
 /** Load a single player state from Redis */
 async function loadPlayerFromRedis(roomId, dateKey, visibleUserId) {
-  if (!redis) return null;
+  if (!redis) {
+    if (DEBUG_WS) console.log('[Redis] Skipping load - no Redis connection');
+    return null;
+  }
   try {
     const key = makePlayerRedisKey(roomId, dateKey, visibleUserId);
     const data = await redis.get(key);
     if (data) {
-      return JSON.parse(data);
+      const parsed = JSON.parse(data);
+      console.log('[Redis] Loaded player:', key, 'guesses:', parsed.gameState?.guessCount || 0);
+      return parsed;
+    } else {
+      if (DEBUG_WS) console.log('[Redis] No data found for:', key);
     }
   } catch (err) {
-    console.error('Failed to load player from Redis:', err);
+    console.error('[Redis] Failed to load player:', err.message);
   }
   return null;
 }
 
 /** Rebuild leaderboard from Redis by loading all players in the roomPlayers set */
 async function rebuildLeaderboardFromRedis(roomId, dateKey) {
-  if (!redis) return null;
+  if (!redis) {
+    console.log('[Redis] Cannot rebuild leaderboard - no Redis connection');
+    return null;
+  }
   try {
     const setKey = makeRoomPlayersSetKey(roomId, dateKey);
     const visibleUserIds = await redis.smembers(setKey);
+    console.log('[Redis] Rebuilding leaderboard for', setKey, '- found', visibleUserIds?.length || 0, 'players');
     if (!visibleUserIds || visibleUserIds.length === 0) return null;
 
     const room = getOrCreateRoom(roomId, dateKey);
@@ -132,14 +159,17 @@ async function rebuildLeaderboardFromRedis(roomId, dateKey) {
     const players = await Promise.all(playerPromises);
 
     // Populate in-memory cache
+    let loadedCount = 0;
     for (const player of players) {
       if (player) {
         room.players.set(player.visibleUserId, player);
+        loadedCount++;
       }
     }
 
     // Update leaderboard
     updateLeaderboard(room);
+    console.log('[Redis] Rebuilt leaderboard with', loadedCount, 'players from', visibleUserIds.length, 'in set');
     return room;
   } catch (err) {
     console.error('Failed to rebuild leaderboard from Redis:', err);
@@ -364,11 +394,13 @@ wss.on("connection", (ws, req) => {
           let playerState = await getPlayerAsync(roomId, dateKey, visibleUserId);
           if (!playerState) {
             // Create new daily game
+            console.log('[JOIN] Creating new player state for:', visibleUserId);
             const targetWords = getDailyTargets(dateKey);
             const gameState = createGameState(targetWords);
             playerState = createPlayerState(roomId, dateKey, visibleUserId, gameState, cleanProfile);
           } else {
             // Update existing player's profile (in case they changed their display name)
+            console.log('[JOIN] Loaded existing player state for:', visibleUserId, 'guesses:', playerState.gameState?.guessCount || 0);
             playerState.profile = cleanProfile;
             playerState.updatedAt = Date.now();
           }
@@ -821,6 +853,7 @@ app.get("/api/debug/persist", async (req, res) => {
 
   const status = {
     redisConnected: !!redis,
+    redisStatus: redis?.status || 'not initialized',
     redisUrl: process.env.REDIS_URL ? '***configured***' : 'not configured',
     tests: {},
   };
