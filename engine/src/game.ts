@@ -140,12 +140,22 @@ export function getSolvedCount(state: GameState): number {
  * For each guessed letter, looks across all boards and all submitted guesses
  * and assigns the max status using precedence: correct > present > absent.
  * Only letters that appear in submitted guesses will have a status.
+ *
+ * Note: Skips results for guesses made after a board was solved, since those
+ * results are just repeats of the solving guess (not real evaluations).
  */
 export function computeKeyboardMap(state: GameState): Record<string, LetterResult> {
     const statuses: Record<string, LetterResult> = {};
 
     for (const board of state.boards) {
         for (let guessIdx = 0; guessIdx < board.guesses.length; guessIdx++) {
+            // Skip results for guesses made after this board was solved.
+            // solvedOnGuess is 1-indexed, so guessIdx >= solvedOnGuess means
+            // this guess came after the solving guess.
+            if (board.solvedOnGuess !== null && guessIdx >= board.solvedOnGuess) {
+                continue;
+            }
+
             const guess = board.guesses[guessIdx];
             const result = board.results[guessIdx];
 

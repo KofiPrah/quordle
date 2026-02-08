@@ -270,4 +270,30 @@ describe('computeKeyboardMap', () => {
         // N: present in crane, correct in brain, correct in plain, correct in drain
         expect(keyMap['n']).toBe('correct');
     });
+
+    it('marks Q as absent after QUAIL when Q is not in any target', () => {
+        // Bug reproduction: targets [DELTA, BLOCK, SPARE, APPLE], guess QUAIL
+        // Q should be absent since it doesn't appear in any target word
+        let game = createGame({
+            targetWords: ['delta', 'block', 'spare', 'apple'],
+        });
+
+        // First solve board 2 (SPARE) to trigger the bug scenario
+        game = submitGuess(game, 'spare');
+        // Now guess QUAIL - Q should NOT inherit the 'correct' status from SPARE's result
+        game = submitGuess(game, 'quail');
+
+        const keyMap = computeKeyboardMap(game);
+
+        // Q is not in any target word, so it must be absent
+        expect(keyMap['q']).toBe('absent');
+        // U is not in any target word, so it must be absent
+        expect(keyMap['u']).toBe('absent');
+        // A is present in DELTA, SPARE, APPLE and correct in SPARE (pos 2)
+        expect(keyMap['a']).toBe('correct');
+        // I is absent in all targets
+        expect(keyMap['i']).toBe('absent');
+        // L is present in DELTA, BLOCK, APPLE
+        expect(keyMap['l']).toBe('present');
+    });
 });
