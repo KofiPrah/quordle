@@ -17,7 +17,10 @@
   --tile-condensed: clamp(14px, 1.6vw, 22px);
   --tile-gap: clamp(2px, 0.4vw, 4px);
   --board-gap: clamp(4px, 0.8vw, 16px);
-  --key-height: clamp(28px, 3.0vh, 44px);
+  --key-height: clamp(36px, 5vh, 48px);
+  --key-min-width: clamp(28px, 8vw, 36px);
+  --key-font-size: clamp(0.8rem, 2vw, 1rem);
+  --key-padding: clamp(6px, 1.5vw, 10px);
 }
 
 a {
@@ -109,9 +112,13 @@ button:focus-visible {
   align-items: center;
   gap: clamp(0.25rem, 1vh, 0.75rem);
   padding: clamp(0.25rem, 1vh, 1rem);
+  padding-bottom: 0;
   max-width: 100%;
   height: 100vh;
+  height: 100dvh;
+  /* Dynamic viewport height for mobile browsers */
   box-sizing: border-box;
+  overflow: hidden;
 }
 
 .game-title {
@@ -274,22 +281,28 @@ button:focus-visible {
 .keyboard {
   display: flex;
   flex-direction: column;
-  gap: clamp(3px, 0.5vh, 6px);
-  margin-top: clamp(0.25rem, 0.8vh, 1rem);
+  gap: clamp(4px, 0.6vh, 8px);
+  padding: clamp(6px, 1vh, 12px) clamp(4px, 1vw, 8px);
+  margin-top: auto;
   flex-shrink: 0;
+  position: sticky;
+  bottom: 0;
+  background: inherit;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .keyboard-row {
   display: flex;
   justify-content: center;
-  gap: clamp(2px, 0.4vw, 4px);
+  gap: clamp(3px, 0.5vw, 6px);
 }
 
 .key {
-  min-width: clamp(24px, 2.8vw, 32px);
+  min-width: var(--key-min-width);
   height: var(--key-height);
-  padding: 0 clamp(4px, 0.6vw, 8px);
-  font-size: clamp(0.65rem, 1.2vw, 0.9rem);
+  padding: 0 var(--key-padding);
+  font-size: var(--key-font-size);
   font-weight: bold;
   border: none;
   border-radius: 6px;
@@ -297,6 +310,9 @@ button:focus-visible {
   color: #fff;
   cursor: pointer;
   transition: background 0.15s, transform 0.1s;
+  touch-action: manipulation;
+  /* Prevent double-tap zoom on mobile */
+  -webkit-tap-highlight-color: transparent;
 }
 
 .key:hover {
@@ -305,11 +321,12 @@ button:focus-visible {
 
 .key:active {
   transform: scale(0.95);
+  background: #6a6a6a;
 }
 
 .key-wide {
-  min-width: clamp(40px, 5vw, 56px);
-  font-size: clamp(0.55rem, 1vw, 0.75rem);
+  min-width: clamp(48px, 12vw, 64px);
+  font-size: clamp(0.65rem, 1.5vw, 0.85rem);
 }
 
 .key-correct {
@@ -655,5 +672,111 @@ button:focus-visible {
   .leaderboard-avatar-placeholder {
     width: 22px;
     height: 22px;
+  }
+}
+
+/* ========== MOBILE / DISCORD ACTIVITY KEYBOARD ENHANCEMENTS ========== */
+/* Targets mobile-ish viewports: iPhones, Discord Activities with short/narrow views */
+
+/* Mobile narrow viewports (width-based targeting) */
+@media (max-width: 480px) {
+  :root {
+    --tile: clamp(22px, 8vw, 36px);
+    --tile-condensed: clamp(11px, 4vw, 18px);
+    --key-height: clamp(40px, 7vh, 52px);
+    --key-min-width: clamp(26px, 8.5vw, 34px);
+    --key-font-size: clamp(0.85rem, 3.5vw, 1.1rem);
+    --key-padding: clamp(4px, 1vw, 8px);
+  }
+
+  .boards-grid {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .key-wide {
+    min-width: clamp(44px, 14vw, 58px);
+    font-size: clamp(0.6rem, 2.5vw, 0.8rem);
+  }
+}
+
+/* Short viewports (Discord Activities often have limited height) */
+@media (max-height: 600px) {
+  :root {
+    --tile: clamp(18px, 6vw, 32px);
+    --tile-condensed: clamp(10px, 3vw, 16px);
+    --board-gap: clamp(2px, 0.5vw, 8px);
+    --key-height: clamp(38px, 8vh, 48px);
+    --key-min-width: clamp(24px, 8vw, 32px);
+    --key-font-size: clamp(0.75rem, 3vw, 0.95rem);
+  }
+
+  .game-title {
+    font-size: clamp(1rem, 2.5vh, 1.5rem);
+  }
+
+  .current-guess-display {
+    font-size: 0.85rem;
+  }
+
+  .boards-grid {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+}
+
+/* Very short viewports (embedded Discord Activities, landscape phones) */
+@media (max-height: 500px) {
+  :root {
+    --tile: clamp(14px, 5vw, 26px);
+    --tile-condensed: clamp(8px, 2.5vw, 14px);
+    --key-height: clamp(34px, 10vh, 44px);
+  }
+
+  .game-title {
+    font-size: clamp(0.9rem, 2vh, 1.2rem);
+  }
+
+  .quordle-container {
+    gap: clamp(0.15rem, 0.5vh, 0.4rem);
+  }
+
+  .game-banner {
+    padding: 0.4rem 0.8rem;
+  }
+
+  .banner-title {
+    font-size: 1.1rem;
+  }
+
+  .banner-subtitle {
+    font-size: 0.75rem;
+  }
+
+  .current-guess-display {
+    font-size: 0.75rem;
+  }
+
+  /* Hide leaderboard on very short viewports to prioritize game */
+  .leaderboard-panel {
+    display: none;
+  }
+}
+
+/* Combined: narrow AND short (typical Discord Activity viewport) */
+@media (max-width: 480px) and (max-height: 700px) {
+  :root {
+    --tile: clamp(18px, min(6vw, 4vh), 30px);
+    --key-height: clamp(42px, 8vh, 54px);
+  }
+
+  .keyboard {
+    padding: clamp(4px, 0.8vh, 10px) clamp(2px, 0.5vw, 6px);
+    gap: clamp(4px, 0.8vh, 8px);
+  }
+
+  .keyboard-row {
+    gap: clamp(2px, 0.4vw, 5px);
   }
 }
