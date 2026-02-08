@@ -107,13 +107,18 @@ button:focus-visible {
 /* ========== QUORDLE GAME STYLES ========== */
 
 .quordle-container {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+  display: grid;
+  grid-template-columns: 1fr clamp(260px, 22vw, 380px);
+  grid-template-rows: auto 1fr auto auto;
+  grid-template-areas:
+    "header  header"
+    "main    sidebar"
+    "guess   guess"
+    "keyboard keyboard";
   gap: clamp(0.25rem, 1vh, 0.75rem);
   padding: clamp(0.25rem, 1vh, 1rem);
-  padding-bottom: 0;
   max-width: 100%;
+  width: 100%;
   height: 100vh;
   height: 100dvh;
   /* Dynamic viewport height for mobile browsers */
@@ -122,10 +127,11 @@ button:focus-visible {
 }
 
 .game-title {
+  grid-area: header;
   font-size: clamp(1.2rem, 3vh, 2rem);
   margin: 0;
   color: #fff;
-  flex-shrink: 0;
+  text-align: center;
 }
 
 .game-status {
@@ -169,15 +175,16 @@ button:focus-visible {
 }
 
 .boards-grid {
+  grid-area: main;
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: var(--board-gap);
   padding: var(--board-gap);
   background: rgba(255, 255, 255, 0.05);
   border-radius: 12px;
-  flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
+  align-self: start;
 }
 
 .board {
@@ -256,8 +263,10 @@ button:focus-visible {
 }
 
 .current-guess-display {
+  grid-area: guess;
   font-size: 1rem;
   color: #888;
+  text-align: center;
 }
 
 .guess-text {
@@ -279,16 +288,12 @@ button:focus-visible {
 
 /* Keyboard */
 .keyboard {
+  grid-area: keyboard;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: clamp(4px, 0.6vh, 8px);
   padding: clamp(6px, 1vh, 12px) clamp(4px, 1vw, 8px);
-  margin-top: auto;
-  flex-shrink: 0;
-  position: sticky;
-  bottom: 0;
-  background: inherit;
-  width: 100%;
   box-sizing: border-box;
 }
 
@@ -466,18 +471,17 @@ button:focus-visible {
 
 /* ========== GAME LAYOUT WITH LEADERBOARD ========== */
 .game-layout {
-  display: flex;
-  gap: 1.5rem;
-  justify-content: center;
-  align-items: flex-start;
-  flex-wrap: wrap;
+  display: contents;
+  /* Children participate in parent grid */
 }
 
 /* ========== LEADERBOARD PANEL ========== */
 .leaderboard-panel {
-  min-width: 280px;
-  max-width: 360px;
-  flex: 0 1 auto;
+  grid-area: sidebar;
+  min-width: 0;
+  max-width: 100%;
+  overflow-y: auto;
+  max-height: 100%;
 }
 
 .leaderboard {
@@ -610,18 +614,23 @@ button:focus-visible {
 }
 
 /* ========== RESPONSIVE ADJUSTMENTS ========== */
+
+/* Mobile layout: single column, leaderboard above keyboard */
 @media (max-width: 700px) {
-  .game-layout {
-    flex-direction: column;
-    align-items: center;
+  .quordle-container {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto auto auto;
+    grid-template-areas:
+      "header"
+      "main"
+      "sidebar"
+      "guess"
+      "keyboard";
   }
 
   .leaderboard-panel {
-    width: 100%;
-    max-width: 100%;
-    min-width: unset;
-    order: 1;
-    /* Put leaderboard below boards on mobile */
+    max-height: clamp(80px, 15vh, 120px);
+    overflow-y: auto;
   }
 
   .leaderboard {
@@ -653,13 +662,10 @@ button:focus-visible {
   }
 }
 
-/* Collapsible leaderboard on short viewports to keep keyboard visible */
+/* Short viewports on desktop: constrain leaderboard height */
 @media (max-height: 700px) and (min-width: 701px) {
   .leaderboard-panel {
     max-height: 280px;
-    overflow-y: auto;
-    min-width: 240px;
-    max-width: 300px;
   }
 
   .leaderboard-entry {
@@ -689,11 +695,6 @@ button:focus-visible {
     --key-padding: clamp(4px, 1vw, 8px);
   }
 
-  .boards-grid {
-    flex: 1 1 auto;
-    min-height: 0;
-  }
-
   .key-wide {
     min-width: clamp(44px, 14vw, 58px);
     font-size: clamp(0.6rem, 2.5vw, 0.8rem);
@@ -718,12 +719,6 @@ button:focus-visible {
   .current-guess-display {
     font-size: 0.85rem;
   }
-
-  .boards-grid {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow: hidden;
-  }
 }
 
 /* Very short viewports (embedded Discord Activities, landscape phones) */
@@ -734,12 +729,20 @@ button:focus-visible {
     --key-height: clamp(34px, 10vh, 44px);
   }
 
-  .game-title {
-    font-size: clamp(0.9rem, 2vh, 1.2rem);
-  }
-
   .quordle-container {
     gap: clamp(0.15rem, 0.5vh, 0.4rem);
+    /* Collapse to single column and hide sidebar on very short */
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto auto;
+    grid-template-areas:
+      "header"
+      "main"
+      "guess"
+      "keyboard";
+  }
+
+  .game-title {
+    font-size: clamp(0.9rem, 2vh, 1.2rem);
   }
 
   .game-banner {
