@@ -25,6 +25,7 @@ let gameMode = "daily"; // "daily" | "practice"
 // Discord context for server-side persistence
 let discordUserId = null;
 let discordRoomId = null;
+let userProfile = { displayName: 'Player', avatarUrl: null }; // Current user's profile info
 
 // WebSocket connection
 let ws = null;
@@ -32,6 +33,24 @@ let wsReconnectTimeout = null;
 let leaderboard = []; // Current room leaderboard
 
 // ========== WEBSOCKET CONNECTION ==========
+function getUserProfile() {
+  // Extract profile from Discord auth or fallback
+  if (auth?.user) {
+    const user = auth.user;
+    const displayName = user.global_name || user.username || 'Player';
+    let avatarUrl = null;
+
+    // Build avatar URL: https://cdn.discordapp.com/avatars/{user_id}/{avatar_hash}.png
+    if (user.avatar) {
+      const format = user.avatar.startsWith('a_') ? 'gif' : 'png';
+      avatarUrl = `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.${format}`;
+    }
+
+    return { displayName, avatarUrl };
+  }
+  return userProfile;
+}
+
 function connectWebSocket() {
   if (!discordUserId || !discordRoomId) return;
   if (ws && ws.readyState === WebSocket.OPEN) return;
@@ -41,13 +60,15 @@ function connectWebSocket() {
 
   ws.onopen = () => {
     console.log('WebSocket connected');
-    // Send JOIN message
+    // Send JOIN message with profile
     const dateKey = getTodayDateKey();
+    userProfile = getUserProfile();
     ws.send(JSON.stringify({
       type: 'JOIN',
       roomId: discordRoomId,
       dateKey,
-      visibleUserId: discordUserId
+      visibleUserId: discordUserId,
+      profile: userProfile
     }));
   };
 
@@ -293,6 +314,12 @@ function setupDevMode() {
   const urlParams = new URLSearchParams(window.location.search);
   discordRoomId = urlParams.get('room') || 'dev-room';
 
+  // Set dev mode profile
+  userProfile = {
+    displayName: 'Dev Player',
+    avatarUrl: null
+  };
+
   console.log(`Dev mode: userId=${discordUserId}, roomId=${discordRoomId}`);
 }
 
@@ -447,11 +474,22 @@ function renderLeaderboardContent() {
     const statusIcon = entry.gameOver ? (entry.won ? '🏆' : '💀') : '🎮';
     const youBadge = isYou ? ' <span class="you-badge">(You)</span>' : '';
 
+    // Get display name and avatar from profile, with fallback to visibleUserId
+    const profile = entry.profile || {};
+    const displayName = profile.displayName || entry.visibleUserId.slice(0, 8);
+    const avatarUrl = profile.avatarUrl;
+    const avatarHtml = avatarUrl
+      ? `<img src="${avatarUrl}" alt="${displayName}" class="leaderboard-avatar" onerror="this.style.display='none'" />`
+      : `<div class="leaderboard-avatar-placeholder"></div>`;
+
     return `
       <div class="leaderboard-entry ${isYou ? 'leaderboard-entry-you' : ''} ${entry.gameOver ? 'leaderboard-entry-done' : ''}">
         <span class="leaderboard-rank">#${i + 1}</span>
         <span class="leaderboard-status">${statusIcon}</span>
-        <span class="leaderboard-name">${entry.visibleUserId.slice(0, 8)}...${youBadge}</span>
+        <div class="leaderboard-profile">
+          ${avatarHtml}
+          <span class="leaderboard-name">${displayName}${youBadge}</span>
+        </div>
         <span class="leaderboard-score">${entry.solvedCount}/4</span>
         <span class="leaderboard-guesses">${entry.guessCount}g</span>
       </div>

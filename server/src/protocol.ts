@@ -33,9 +33,16 @@ export interface RoomKey {
 /** Game mode - daily only for now */
 export type GameMode = 'daily';
 
+/** User profile display info */
+export interface UserProfile {
+    displayName: string;       // Discord username or display name
+    avatarUrl: string | null;  // Discord avatar URL or null
+}
+
 /** Leaderboard entry for a player in a room */
 export interface LeaderboardEntry {
     visibleUserId: VisibleUserId;
+    profile: UserProfile;
     solvedCount: number;       // 0-4 boards solved
     guessCount: number;        // total guesses made
     gameOver: boolean;
@@ -49,6 +56,7 @@ export interface PlayerState {
     roomId: RoomId;
     dateKey: DateKey;
     mode: GameMode;
+    profile: UserProfile;
     gameState: GameState;
     createdAt: number;         // timestamp
     updatedAt: number;         // timestamp
@@ -73,6 +81,7 @@ export interface JoinMessage {
     roomId: RoomId;
     dateKey: DateKey;
     visibleUserId: VisibleUserId;
+    profile: UserProfile;
 }
 
 export interface GuessMessage {

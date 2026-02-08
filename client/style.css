@@ -518,6 +518,30 @@ button:focus-visible {
   font-size: 0.85rem;
 }
 
+.leaderboard-profile {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.leaderboard-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  object-fit: cover;
+}
+
+.leaderboard-avatar-placeholder {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  flex-shrink: 0;
+}
+
 .leaderboard-name {
   flex: 1;
   overflow: hidden;

@@ -184,6 +184,7 @@ function toLeaderboardEntry(player) {
   const solvedCount = gs.boards.filter(b => b.solved).length;
   return {
     visibleUserId: player.visibleUserId,
+    profile: player.profile || { displayName: player.visibleUserId, avatarUrl: null },
     solvedCount,
     guessCount: gs.guessCount,
     gameOver: gs.gameOver,
@@ -218,13 +219,14 @@ function updateLeaderboard(room) {
 }
 
 /** Create new player state */
-function createPlayerState(roomId, dateKey, visibleUserId, gameState) {
+function createPlayerState(roomId, dateKey, visibleUserId, gameState, profile = { displayName: visibleUserId, avatarUrl: null }) {
   const now = Date.now();
   return {
     visibleUserId,
     roomId,
     dateKey,
     mode: 'daily',
+    profile,
     gameState,
     createdAt: now,
     updatedAt: now,
@@ -282,11 +284,17 @@ wss.on("connection", (ws, req) => {
       switch (message.type) {
         // ===== NEW PROTOCOL =====
         case "JOIN": {
-          const { roomId, dateKey, visibleUserId } = message;
+          const { roomId, dateKey, visibleUserId, profile } = message;
           if (!roomId || !dateKey || !visibleUserId) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing required fields' }));
             return;
           }
+
+          // Validate and sanitize profile
+          const cleanProfile = {
+            displayName: (profile?.displayName || visibleUserId).slice(0, 100),
+            avatarUrl: (profile?.avatarUrl || null),
+          };
 
           currentRoomKey = makeRoomKey(roomId, dateKey);
           currentVisibleUserId = visibleUserId;
@@ -303,7 +311,7 @@ wss.on("connection", (ws, req) => {
             console.log('[WS JOIN] roomId:', roomId, 'dateKey:', dateKey, 'visibleUserId:', visibleUserId);
           }
           if (DEBUG_LEADERBOARD) {
-            console.log('[LEADERBOARD DEBUG] JOIN payload:', JSON.stringify({ roomId, dateKey, visibleUserId }));
+            console.log('[LEADERBOARD DEBUG] JOIN payload:', JSON.stringify({ roomId, dateKey, visibleUserId, profile: cleanProfile }));
             console.log('[LEADERBOARD DEBUG] roomKey:', currentRoomKey);
           }
 
@@ -313,7 +321,11 @@ wss.on("connection", (ws, req) => {
             // Create new daily game
             const targetWords = getDailyTargets(dateKey);
             const gameState = createGameState(targetWords);
-            playerState = createPlayerState(roomId, dateKey, visibleUserId, gameState);
+            playerState = createPlayerState(roomId, dateKey, visibleUserId, gameState, cleanProfile);
+          } else {
+            // Update existing player's profile (in case they changed their display name)
+            playerState.profile = cleanProfile;
+            playerState.updatedAt = Date.now();
           }
           // Always (re-)add player to room to ensure leaderboard is updated
           setPlayer(playerState);
