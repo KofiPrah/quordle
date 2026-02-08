@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ActivityType } from "discord.js";
+import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ActivityType, InteractionType } from "discord.js";
 import dotenv from "dotenv";
 import Redis from "ioredis";
 
@@ -276,6 +276,14 @@ client.once("ready", async () => {
 
 client.on("interactionCreate", async (interaction) => {
     try {
+        // Handle Entry Point command (type 4 = PRIMARY_ENTRY_POINT)
+        // This is the "Launch" button in Activities - when handler is APP_HANDLER
+        if (interaction.type === InteractionType.ApplicationCommand && interaction.commandType === 4) {
+            console.log(`[Bot] Entry Point interaction from ${interaction.user.id}`);
+            await interaction.launchActivity();
+            return;
+        }
+
         if (interaction.isChatInputCommand()) {
             if (interaction.commandName === "quordle") {
                 const subcommand = interaction.options.getSubcommand();
