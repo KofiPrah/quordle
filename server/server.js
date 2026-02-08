@@ -17,6 +17,7 @@ dotenv.config(); // Also try current directory
 
 // Debug flag for WebSocket logging
 const DEBUG_WS = process.env.DEBUG_WS === 'true';
+const DEBUG_LEADERBOARD = process.env.DEBUG_LEADERBOARD === '1' || process.env.DEBUG_LEADERBOARD === 'true';
 
 // Redis client (optional - falls back to in-memory if not configured)
 let redis = null;
@@ -188,6 +189,8 @@ function toLeaderboardEntry(player) {
     gameOver: gs.gameOver,
     won: gs.won,
     finishedAt: player.finishedAt,
+    updatedAt: player.updatedAt,
+    status: gs.gameOver ? (gs.won ? 'won' : 'lost') : 'playing',
   };
 }
 
@@ -299,6 +302,10 @@ wss.on("connection", (ws, req) => {
           if (DEBUG_WS) {
             console.log('[WS JOIN] roomId:', roomId, 'dateKey:', dateKey, 'visibleUserId:', visibleUserId);
           }
+          if (DEBUG_LEADERBOARD) {
+            console.log('[LEADERBOARD DEBUG] JOIN payload:', JSON.stringify({ roomId, dateKey, visibleUserId }));
+            console.log('[LEADERBOARD DEBUG] roomKey:', currentRoomKey);
+          }
 
           // Get or create player state (checks Redis first)
           let playerState = await getPlayerAsync(roomId, dateKey, visibleUserId);
@@ -318,6 +325,11 @@ wss.on("connection", (ws, req) => {
           const room = getOrCreateRoom(roomId, dateKey);
           if (DEBUG_WS) {
             console.log('[WS JOIN] Broadcasting leaderboard, players in room:', room.players.size);
+          }
+          if (DEBUG_LEADERBOARD) {
+            console.log('[LEADERBOARD DEBUG] room.players.size:', room.players.size);
+            console.log('[LEADERBOARD DEBUG] leaderboard payload length:', room.leaderboard.length);
+            console.log('[LEADERBOARD DEBUG] leaderboard:', JSON.stringify(room.leaderboard));
           }
           broadcastToRoomByKey(currentRoomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard });
 
@@ -404,6 +416,11 @@ wss.on("connection", (ws, req) => {
           const roomKey = makeRoomKey(roomId, dateKey);
           if (DEBUG_WS) {
             console.log('[WS GUESS] Broadcasting leaderboard, players in room:', room.players.size);
+          }
+          if (DEBUG_LEADERBOARD) {
+            console.log('[LEADERBOARD DEBUG] GUESS - roomKey:', roomKey);
+            console.log('[LEADERBOARD DEBUG] GUESS - room.players.size:', room.players.size);
+            console.log('[LEADERBOARD DEBUG] GUESS - leaderboard payload length:', room.leaderboard.length);
           }
           broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard });
           break;
@@ -524,6 +541,17 @@ function handleLeave(roomId, dateKey, visibleUserId, ws) {
 
   // Broadcast ROOM_EVENT leave to remaining players
   broadcastToRoomByKey(roomKey, { type: 'ROOM_EVENT', event: 'leave', visibleUserId });
+
+  // Broadcast updated LEADERBOARD to remaining players
+  const room = roomStateStore.get(roomKey);
+  if (room) {
+    if (DEBUG_LEADERBOARD) {
+      console.log('[LEADERBOARD DEBUG] LEAVE - roomKey:', roomKey);
+      console.log('[LEADERBOARD DEBUG] LEAVE - room.players.size:', room.players.size);
+      console.log('[LEADERBOARD DEBUG] LEAVE - leaderboard payload length:', room.leaderboard.length);
+    }
+    broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard });
+  }
 }
 
 /** Broadcast to room using new protocol (roomKey = roomId:dateKey) */

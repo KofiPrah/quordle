@@ -1,8 +1,9 @@
 import { DiscordSDK } from "@discord/embedded-app-sdk";
 import "./style.css";
 
-// API URL - empty string for same-origin (dev), full URL for production
-const API_URL = import.meta.env.VITE_API_URL || '';
+// API URL - empty string for same-origin (required for Discord Activities due to CSP)
+// Discord proxies requests from https://{client_id}.discordsays.com/ to your server
+const API_URL = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, ''); // Strip trailing slashes
 
 // WebSocket URL - derive from API_URL or use same origin
 const WS_URL = API_URL
@@ -93,6 +94,11 @@ function handleServerMessage(message) {
 
     case 'LEADERBOARD':
       // Update leaderboard
+      if (window.DEBUG_LEADERBOARD) {
+        console.log('[LEADERBOARD DEBUG] Received message:', message);
+        console.log('[LEADERBOARD DEBUG] message.leaderboard:', message.leaderboard);
+        console.log('[LEADERBOARD DEBUG] leaderboard length:', message.leaderboard?.length);
+      }
       leaderboard = message.leaderboard || [];
       renderLeaderboard();
       break;
