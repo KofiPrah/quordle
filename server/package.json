@@ -6,9 +6,9 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "start": "node server.js",
+    "start": "node server.js & node bot.js",
+    "start:server": "node server.js",
     "start:bot": "node bot.js",
-    "start:all": "node server.js & node bot.js",
     "dev": "node --watch server.js",
     "dev:bot": "node --watch bot.js",
     "typecheck": "tsc --noEmit",
