@@ -501,7 +501,6 @@ function renderBanner(solvedCount) {
   return `
     <div class="game-status">
       Solved: ${solvedCount}/4 | Guesses: ${gameState.guessCount}/${gameState.maxGuesses}
-      <button class="reset-btn" title="Clear saved progress">Reset</button>
     </div>
   `;
 }
@@ -697,12 +696,6 @@ function setupKeyboardListeners() {
   const newGameBtn = document.querySelector('.new-game-btn');
   if (newGameBtn) {
     newGameBtn.addEventListener('click', startPracticeGame);
-  }
-
-  // Reset button
-  const resetBtn = document.querySelector('.reset-btn');
-  if (resetBtn) {
-    resetBtn.addEventListener('click', resetGame);
   }
 }
 
