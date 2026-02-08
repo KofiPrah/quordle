@@ -23,14 +23,35 @@ if (!DISCORD_BOT_TOKEN) {
 
 // ========== REDIS CLIENT ==========
 let redis = null;
+let redisErrorLogged = false; // Prevent spam
 const REDIS_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days TTL for daily message records
 
 if (REDIS_URL) {
     try {
         console.log("[Bot Redis] Connecting to:", REDIS_URL.replace(/:[^:@]+@/, ":***@"));
-        redis = new Redis(REDIS_URL);
-        redis.on("error", (err) => console.error("[Bot Redis] Error:", err.message));
-        redis.on("connect", () => console.log("[Bot Redis] Connected"));
+        redis = new Redis(REDIS_URL, {
+            maxRetriesPerRequest: 3,
+            retryStrategy: (times) => {
+                if (times > 3) {
+                    if (!redisErrorLogged) {
+                        console.warn("[Bot Redis] Connection failed, using in-memory fallback");
+                        redisErrorLogged = true;
+                    }
+                    return null; // Stop retrying
+                }
+                return Math.min(times * 200, 2000);
+            },
+        });
+        redis.on("error", (err) => {
+            if (!redisErrorLogged) {
+                console.error("[Bot Redis] Error:", err.message);
+                redisErrorLogged = true;
+            }
+        });
+        redis.on("connect", () => {
+            redisErrorLogged = false;
+            console.log("[Bot Redis] Connected");
+        });
         redis.on("ready", () => console.log("[Bot Redis] Ready"));
     } catch (err) {
         console.error("[Bot Redis] Failed to initialize:", err);
@@ -136,9 +157,31 @@ async function registerCommands() {
     const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
 
     try {
+        console.log("[Bot] Fetching existing commands...");
+
+        // Get existing commands (including Entry Point)
+        const existingCommands = await rest.get(Routes.applicationCommands(DISCORD_CLIENT_ID));
+
+        // Find the Entry Point command (type 4) - we must include it in bulk update
+        const entryPointCmd = existingCommands.find(cmd => cmd.type === 4);
+
+        // Build the command list
+        const commandsToRegister = commands.map((cmd) => cmd.toJSON());
+
+        // Include Entry Point if it exists (required by Discord)
+        if (entryPointCmd) {
+            console.log(`[Bot] Including Entry Point command: ${entryPointCmd.name} (id: ${entryPointCmd.id})`);
+            commandsToRegister.push({
+                id: entryPointCmd.id,
+                name: entryPointCmd.name,
+                type: entryPointCmd.type,
+                handler: entryPointCmd.handler,
+            });
+        }
+
         console.log("[Bot] Registering slash commands...");
         await rest.put(Routes.applicationCommands(DISCORD_CLIENT_ID), {
-            body: commands.map((cmd) => cmd.toJSON()),
+            body: commandsToRegister,
         });
         console.log("[Bot] Slash commands registered successfully");
     } catch (err) {
