@@ -245,18 +245,14 @@ async function handleDailyCommand(interaction) {
 }
 
 async function handlePlayButton(interaction) {
-    // Respond ephemerally - do NOT create a new channel message
+    // Launch the Activity directly - no new channel message
     try {
-        // Build the activity launch URL
-        // Discord Activities are launched via a special protocol URL
-        const activityUrl = `https://discord.com/activities/${DISCORD_CLIENT_ID}`;
-
-        await interaction.reply({
-            content: `🎮 **Launch Daily Quordle**\n\n[Click here to start the activity](${activityUrl})\n\nOr start it from the Activities menu in a voice channel!`,
-            ephemeral: true,
-        });
+        // Use Discord's native activity launch (same as official Wordle)
+        await interaction.launchActivity();
+        console.log(`[Bot] Launched activity for user ${interaction.user.id}`);
     } catch (err) {
-        console.error("[Bot] Failed to handle play button:", err);
+        console.error("[Bot] Failed to launch activity:", err);
+        // Fallback: provide instructions if launchActivity fails
         if (!interaction.replied && !interaction.deferred) {
             await interaction.reply({
                 content: "Something went wrong. Try starting the activity from the Activities menu in a voice channel.",
