@@ -4,6 +4,11 @@ import fetch from "node-fetch";
 import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import cors from "cors";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Load .env from parent directory in dev, or current directory in production
 dotenv.config({ path: "../.env" });
@@ -435,6 +440,16 @@ function evaluateGuess(guess, target) {
 
   return result;
 }
+
+// ========== STATIC FILE SERVING ==========
+// Serve built client files from public folder
+const publicPath = path.join(__dirname, 'public');
+app.use(express.static(publicPath));
+
+// SPA fallback - serve index.html for all non-API routes
+app.get('*', (req, res) => {
+  res.sendFile(path.join(publicPath, 'index.html'));
+});
 
 server.listen(port, () => {
   console.log(`Server listening at http://localhost:${port}`);

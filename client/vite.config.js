@@ -3,6 +3,10 @@ import { defineConfig } from 'vite';
 // https://vitejs.dev/config/
 export default defineConfig({
   envDir: '../',
+  build: {
+    outDir: '../server/public',
+    emptyOutDir: true,
+  },
   server: {
     allowedHosts: ['tomorrow-stood-warriors-needs.trycloudflare.com'],
     proxy: {
