@@ -63,6 +63,11 @@ function connectWebSocket() {
 
   ws.onopen = () => {
     console.log('WebSocket connected');
+    // Don't send daily JOIN if we're in practice mode — it would overwrite the practice game
+    if (gameMode === 'practice') {
+      console.log('Skipping daily JOIN — currently in practice mode');
+      return;
+    }
     // Send JOIN message with profile
     const dateKey = getTodayDateKey();
     userProfile = getUserProfile();
@@ -105,6 +110,11 @@ function handleServerMessage(message) {
 
   switch (message.type) {
     case 'STATE':
+      // Ignore daily STATE messages while in practice mode to prevent overwriting the practice game
+      if (gameMode === 'practice') {
+        console.log('Ignoring STATE message — currently in practice mode');
+        break;
+      }
       // Update game state from server
       if (message.playerState && message.playerState.gameState) {
         gameState = message.playerState.gameState;
@@ -443,7 +453,8 @@ async function initDailyFromServer() {
 
     // Also do REST fallback in case WebSocket takes time
     const serverState = await serverJoinGame();
-    if (serverState && serverState.gameState) {
+    // Only apply server state if we're still in daily mode (user may have switched to practice while awaiting)
+    if (serverState && serverState.gameState && gameMode !== 'practice') {
       gameState = serverState.gameState;
       gameMode = serverState.gameMode || "daily";
       guessError = null;
