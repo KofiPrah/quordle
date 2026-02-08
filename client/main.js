@@ -251,7 +251,14 @@ async function serverSubmitGuess(guess) {
   }
 }
 
-const discordSdk = new DiscordSDK(import.meta.env.VITE_DISCORD_CLIENT_ID);
+const DISCORD_CLIENT_ID = import.meta.env.VITE_DISCORD_CLIENT_ID;
+console.log('Discord Client ID:', DISCORD_CLIENT_ID ? 'present' : 'MISSING');
+
+if (!DISCORD_CLIENT_ID) {
+  console.error('VITE_DISCORD_CLIENT_ID is not set! Check your environment variables.');
+}
+
+const discordSdk = new DiscordSDK(DISCORD_CLIENT_ID);
 
 setupDiscordSdk()
   .then(() => {
