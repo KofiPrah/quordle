@@ -18,20 +18,9 @@ const app = express();
 const port = process.env.PORT || 3001;
 const server = createServer(app);
 
-// CORS configuration for cross-origin requests (client on Vercel, server elsewhere)
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',')
-  : ['http://localhost:5173', 'http://localhost:3000'];
-
+// CORS configuration - permissive since client/server are on same origin in production
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps or curl)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
-      return callback(null, true);
-    }
-    return callback(new Error('Not allowed by CORS'));
-  },
+  origin: true, // Allow all origins (same-origin requests will work, external too)
   credentials: true,
 }));
 
