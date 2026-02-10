@@ -1,6 +1,7 @@
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ActivityType, InteractionType } from "discord.js";
 import dotenv from "dotenv";
 import Redis from "ioredis";
+import cron from "node-cron";
 
 // Load .env from parent directory in dev, or current directory in production
 dotenv.config({ path: "../.env" });
@@ -87,6 +88,10 @@ const dailyMessageStore = new Map();
 // Key format: dailyMsg:{guildId}:{channelId}
 // Value: JSON { messageId, dateKey }
 
+// TTLs
+const DEDUP_TTL_SECONDS = 60 * 60 * 48; // 48 hours for dedup keys
+const CHANNEL_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days for active channel tracking
+
 function makeDailyMsgKey(guildId, channelId) {
     return `dailyMsg:${guildId}:${channelId}`;
 }
@@ -124,6 +129,82 @@ async function setDailyMsgRecord(guildId, channelId, messageId, dateKey) {
 
     // Also store in memory for quick access
     dailyMessageStore.set(key, record);
+}
+
+// ========== ACTIVE CHANNEL TRACKING ==========
+// Track which guild:channel pairs are using the Activity for daily reset broadcasts
+
+async function trackActiveChannel(guildId, channelId) {
+    if (!guildId || !channelId) return;
+    if (redis) {
+        try {
+            await redis.sadd("activeChannels", `${guildId}:${channelId}`);
+        } catch (err) {
+            console.error("[Bot] Failed to track active channel:", err.message);
+        }
+    }
+}
+
+async function getActiveChannels() {
+    if (!redis) return [];
+    try {
+        return await redis.smembers("activeChannels");
+    } catch (err) {
+        console.error("[Bot] Failed to get active channels:", err.message);
+        return [];
+    }
+}
+
+// ========== COMPLETION DEDUP ==========
+// Key: dailyFinish:{guildId}:{channelId}:{dateKey}:{userId}
+
+function makeCompletionDedupeKey(guildId, channelId, dateKey, userId) {
+    return `dailyFinish:${guildId}:${channelId}:${dateKey}:${userId}`;
+}
+
+async function hasCompletionBeenPosted(guildId, channelId, dateKey, userId) {
+    if (!redis) return false;
+    try {
+        const val = await redis.get(makeCompletionDedupeKey(guildId, channelId, dateKey, userId));
+        return !!val;
+    } catch (err) {
+        return false;
+    }
+}
+
+async function markCompletionPosted(guildId, channelId, dateKey, userId) {
+    if (!redis) return;
+    try {
+        await redis.setex(makeCompletionDedupeKey(guildId, channelId, dateKey, userId), DEDUP_TTL_SECONDS, "1");
+    } catch (err) {
+        console.error("[Bot] Failed to mark completion posted:", err.message);
+    }
+}
+
+// ========== DAILY RESET DEDUP ==========
+// Key: dailyAnnounced:{guildId}:{channelId}:{dateKey}
+
+function makeResetDedupeKey(guildId, channelId, dateKey) {
+    return `dailyAnnounced:${guildId}:${channelId}:${dateKey}`;
+}
+
+async function hasResetBeenAnnounced(guildId, channelId, dateKey) {
+    if (!redis) return false;
+    try {
+        const val = await redis.get(makeResetDedupeKey(guildId, channelId, dateKey));
+        return !!val;
+    } catch (err) {
+        return false;
+    }
+}
+
+async function markResetAnnounced(guildId, channelId, dateKey) {
+    if (!redis) return;
+    try {
+        await redis.setex(makeResetDedupeKey(guildId, channelId, dateKey), DEDUP_TTL_SECONDS, "1");
+    } catch (err) {
+        console.error("[Bot] Failed to mark reset announced:", err.message);
+    }
 }
 
 // ========== DATE HELPERS ==========
@@ -234,6 +315,146 @@ function buildPlayButton() {
     );
 }
 
+function buildLaunchButton() {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId("quordle_play")
+            .setLabel("🚀 Launch Quordle")
+            .setStyle(ButtonStyle.Primary)
+    );
+}
+
+// ========== COMPLETION ANNOUNCEMENT ==========
+
+function buildCompletionEmbed(event) {
+    const { displayName, avatarUrl, dateKey, won, guessCount, solvedBoards, totalBoards } = event;
+    const resultEmoji = won ? "🏆" : "😔";
+    const resultText = won ? "won" : "lost";
+    const color = won ? 0x2ecc71 : 0xe74c3c; // green or red
+
+    const embed = new EmbedBuilder()
+        .setColor(color)
+        .setTitle(`${resultEmoji} Daily Quordle — ${dateKey}`)
+        .setDescription(`**${displayName}** ${resultText} today's Daily Quordle!`)
+        .addFields(
+            { name: "Boards", value: `${solvedBoards}/${totalBoards}`, inline: true },
+            { name: "Guesses", value: `${guessCount}`, inline: true }
+        )
+        .setTimestamp();
+
+    if (avatarUrl) {
+        embed.setThumbnail(avatarUrl);
+    }
+
+    return embed;
+}
+
+async function handleDailyFinished(event) {
+    const { guildId, channelId, dateKey, visibleUserId, displayName } = event;
+
+    if (!guildId || !channelId) {
+        console.log(`[Bot] DAILY_FINISHED missing guildId/channelId, skipping announcement`);
+        return;
+    }
+
+    // Track this channel as active (for daily reset broadcasts)
+    await trackActiveChannel(guildId, channelId);
+
+    // Dedup check
+    const alreadyPosted = await hasCompletionBeenPosted(guildId, channelId, dateKey, visibleUserId);
+    if (alreadyPosted) {
+        console.log(`[Bot] Already posted completion for ${displayName} in ${channelId} on ${dateKey}`);
+        return;
+    }
+
+    try {
+        const channel = await client.channels.fetch(channelId);
+        if (!channel) {
+            console.log(`[Bot] Channel ${channelId} not found`);
+            return;
+        }
+
+        const embed = buildCompletionEmbed(event);
+        const components = [buildPlayButton()];
+
+        await channel.send({ embeds: [embed], components });
+        await markCompletionPosted(guildId, channelId, dateKey, visibleUserId);
+        console.log(`[Bot] Posted daily completion for ${displayName} in ${guildId}/${channelId}`);
+    } catch (err) {
+        console.error(`[Bot] Failed to post completion:`, err.message);
+    }
+}
+
+// ========== DAILY RESET ANNOUNCEMENT ==========
+
+function buildResetEmbed(dateKey) {
+    const displayDate = formatDateForDisplay(dateKey);
+    return new EmbedBuilder()
+        .setColor(0x5865f2) // Discord blurple
+        .setTitle("🧩 New Daily Quordle is live!")
+        .setDescription(
+            `**${displayDate}**\n\n` +
+            "Can you solve all 4 words in 9 guesses?"
+        )
+        .setTimestamp();
+}
+
+async function announceResetToChannel(guildId, channelId, dateKey) {
+    const alreadyAnnounced = await hasResetBeenAnnounced(guildId, channelId, dateKey);
+    if (alreadyAnnounced) return;
+
+    try {
+        const channel = await client.channels.fetch(channelId);
+        if (!channel) {
+            console.log(`[Bot] Channel ${channelId} not found for reset announcement`);
+            await markResetAnnounced(guildId, channelId, dateKey); // Avoid retrying
+            return;
+        }
+
+        const embed = buildResetEmbed(dateKey);
+        const components = [buildLaunchButton()];
+
+        await channel.send({ embeds: [embed], components });
+        await markResetAnnounced(guildId, channelId, dateKey);
+        console.log(`[Bot] Posted daily reset in ${guildId}/${channelId} for ${dateKey}`);
+    } catch (err) {
+        console.error(`[Bot] Failed to post reset in ${channelId}:`, err.message);
+        // Mark anyway to avoid spamming retries on permission errors
+        await markResetAnnounced(guildId, channelId, dateKey);
+    }
+}
+
+async function announceResetToAllChannels(dateKey) {
+    const members = await getActiveChannels();
+    console.log(`[Bot] Announcing daily reset to ${members.length} channel(s) for ${dateKey}`);
+
+    for (const member of members) {
+        const [guildId, channelId] = member.split(":");
+        if (guildId && channelId) {
+            await announceResetToChannel(guildId, channelId, dateKey);
+        }
+    }
+}
+
+// ========== DAILY RESET CRON ==========
+
+function startDailyCron() {
+    console.log("[Bot] Scheduling daily reset cron at midnight America/Chicago");
+    cron.schedule(
+        "5 0 * * *", // 00:00:05 (5 seconds past midnight for safety)
+        async () => {
+            try {
+                const dateKey = getTodayDateKey();
+                console.log(`[Bot Cron] Firing daily reset for ${dateKey}`);
+                await announceResetToAllChannels(dateKey);
+            } catch (err) {
+                console.error("[Bot Cron] Error during daily reset:", err);
+            }
+        },
+        { timezone: "America/Chicago" }
+    );
+}
+
 // ========== COMMAND HANDLERS ==========
 
 async function handleDailyCommand(interaction) {
@@ -248,6 +469,9 @@ async function handleDailyCommand(interaction) {
         });
         return;
     }
+
+    // Track this channel as active for daily reset broadcasts
+    await trackActiveChannel(guildId, channelId);
 
     // Check for existing daily message record
     const existingRecord = await getDailyMsgRecord(guildId, channelId);
@@ -416,6 +640,8 @@ function setupActivityEventSubscription() {
 
             if (event.type === "ACTIVITY_LEAVE") {
                 await handleActivityLeave(event);
+            } else if (event.type === "DAILY_FINISHED") {
+                await handleDailyFinished(event);
             }
         } catch (err) {
             console.error("[Bot] Failed to handle activity event:", err.message);
@@ -436,6 +662,9 @@ client.once("ready", async () => {
 
     // Start listening for activity events
     setupActivityEventSubscription();
+
+    // Start daily reset cron job
+    startDailyCron();
 });
 
 client.on("interactionCreate", async (interaction) => {
@@ -444,6 +673,17 @@ client.on("interactionCreate", async (interaction) => {
         // This is the "Launch" button in Activities - when handler is APP_HANDLER
         if (interaction.type === InteractionType.ApplicationCommand && interaction.commandType === 4) {
             console.log(`[Bot] Entry Point interaction from ${interaction.user.id}`);
+
+            // Track channel for daily reset broadcasts + lazy announce
+            const epGuildId = interaction.guildId;
+            const epChannelId = interaction.channelId;
+            if (epGuildId && epChannelId) {
+                await trackActiveChannel(epGuildId, epChannelId);
+                // Lazy announce daily reset if not yet posted today
+                const todayKey = getTodayDateKey();
+                announceResetToChannel(epGuildId, epChannelId, todayKey).catch(() => { });
+            }
+
             await interaction.launchActivity();
             return;
         }
@@ -454,6 +694,12 @@ client.on("interactionCreate", async (interaction) => {
                 if (subcommand === "play") {
                     // Instant launch - no channel message
                     console.log(`[Bot] /quordle play from ${interaction.user.id}`);
+
+                    // Track channel for daily reset broadcasts
+                    if (interaction.guildId && interaction.channelId) {
+                        await trackActiveChannel(interaction.guildId, interaction.channelId);
+                    }
+
                     await interaction.launchActivity();
                 } else if (subcommand === "daily") {
                     await handleDailyCommand(interaction);

@@ -68,7 +68,7 @@ function connectWebSocket() {
       console.log('Skipping daily JOIN — currently in practice mode');
       return;
     }
-    // Send JOIN message with profile
+    // Send JOIN message with profile and guild context (for announcements)
     const dateKey = getTodayDateKey();
     userProfile = getUserProfile();
     ws.send(JSON.stringify({
@@ -76,7 +76,8 @@ function connectWebSocket() {
       roomId: discordRoomId,
       dateKey,
       visibleUserId: discordUserId,
-      profile: userProfile
+      profile: userProfile,
+      guildId: discordGuildId,
     }));
   };
 

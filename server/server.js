@@ -69,8 +69,11 @@ app.use(express.json());
 // In-memory storage keyed by roomId:dateKey for room-level state
 // and roomId:dateKey:visibleUserId for player-level state
 
-/** @type {Map<string, {roomId: string, dateKey: string, players: Map<string, object>, leaderboard: Array, lastBroadcastAt: number}>} */
+/** @type {Map<string, {roomId: string, dateKey: string, guildId: string|null, players: Map<string, object>, leaderboard: Array, lastBroadcastAt: number}>} */
 const roomStateStore = new Map();
+
+/** @type {Map<string, string>} roomId -> guildId mapping for announcement channel resolution */
+const roomGuildMap = new Map();
 
 /** @type {Map<string, Set<{ws: WebSocket, visibleUserId: string, roomId: string, dateKey: string}>>} */
 const wsConnectionsByRoom = new Map();
@@ -376,7 +379,7 @@ wss.on("connection", (ws, req) => {
       switch (message.type) {
         // ===== NEW PROTOCOL =====
         case "JOIN": {
-          const { roomId, dateKey, visibleUserId, profile } = message;
+          const { roomId, dateKey, visibleUserId, profile, guildId } = message;
           if (!roomId || !dateKey || !visibleUserId) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing required fields' }));
             return;
@@ -392,6 +395,11 @@ wss.on("connection", (ws, req) => {
           currentVisibleUserId = visibleUserId;
           currentRoomId = roomId;
           currentDateKey = dateKey;
+
+          // Track guildId for this room (needed for announcements)
+          if (guildId) {
+            roomGuildMap.set(roomId, guildId);
+          }
 
           // Add to WebSocket connections for this room
           if (!wsConnectionsByRoom.has(currentRoomKey)) {
@@ -514,6 +522,32 @@ wss.on("connection", (ws, req) => {
           };
           console.log('[GUESS] Updating player:', visibleUserId, 'guessCount:', newGuessCount, 'boards:', newBoards.map(b => b.guesses.length));
           setPlayer(updatedPlayerState);
+
+          // Publish DAILY_FINISHED event if game just ended
+          if (newGameOver && redis) {
+            const solvedCount = newBoards.filter(b => b.solved).length;
+            const resolvedGuildId = roomGuildMap.get(roomId) || null;
+            // roomId === channelId (set by client from discordSdk.channelId)
+            const finishEvent = JSON.stringify({
+              type: 'DAILY_FINISHED',
+              roomId,
+              channelId: roomId,
+              guildId: resolvedGuildId,
+              dateKey,
+              visibleUserId,
+              displayName: playerState.profile?.displayName || visibleUserId,
+              avatarUrl: playerState.profile?.avatarUrl || null,
+              won: allSolved,
+              guessCount: newGuessCount,
+              solvedBoards: solvedCount,
+              totalBoards: 4,
+              timestamp: Date.now(),
+            });
+            redis.publish('activity:events', finishEvent).catch(err => {
+              console.error('[Activity] Failed to publish DAILY_FINISHED:', err.message);
+            });
+            console.log(`[Activity] Published DAILY_FINISHED for ${visibleUserId} in ${roomId} (${allSolved ? 'won' : 'lost'})`);
+          }
 
           // Send updated STATE to player
           ws.send(JSON.stringify({ type: 'STATE', playerState: updatedPlayerState }));
