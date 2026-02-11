@@ -211,12 +211,13 @@ async function markResetAnnounced(guildId, channelId, dateKey) {
 // Use America/Chicago timezone for consistent daily reset
 
 function getTodayDateKey() {
-    const now = new Date();
-    const chicagoTime = new Date(now.toLocaleString("en-US", { timeZone: "America/Chicago" }));
-    const year = chicagoTime.getFullYear();
-    const month = String(chicagoTime.getMonth() + 1).padStart(2, "0");
-    const day = String(chicagoTime.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
+    // en-CA locale gives YYYY-MM-DD format natively
+    return new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/Chicago",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+    }).format(new Date());
 }
 
 function formatDateForDisplay(dateKey) {
@@ -271,12 +272,7 @@ async function registerCommands() {
         // Include Entry Point if it exists (required by Discord)
         if (entryPointCmd) {
             console.log(`[Bot] Including Entry Point command: ${entryPointCmd.name} (id: ${entryPointCmd.id})`);
-            commandsToRegister.push({
-                id: entryPointCmd.id,
-                name: entryPointCmd.name,
-                type: entryPointCmd.type,
-                handler: entryPointCmd.handler,
-            });
+            commandsToRegister.push(entryPointCmd);
         }
 
         console.log("[Bot] Registering slash commands...");
@@ -681,7 +677,9 @@ client.on("interactionCreate", async (interaction) => {
                 await trackActiveChannel(epGuildId, epChannelId);
                 // Lazy announce daily reset if not yet posted today
                 const todayKey = getTodayDateKey();
-                announceResetToChannel(epGuildId, epChannelId, todayKey).catch(() => { });
+                announceResetToChannel(epGuildId, epChannelId, todayKey).catch((err) => {
+                    console.error("[Bot] Lazy announce failed:", err.message);
+                });
             }
 
             await interaction.launchActivity();
