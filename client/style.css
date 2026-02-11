@@ -225,6 +225,7 @@ button:focus-visible {
   padding: var(--tile-gap);
   border-radius: 8px;
   position: relative;
+  align-items: center
 }
 
 .board-solved {
