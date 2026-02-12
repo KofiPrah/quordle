@@ -34,6 +34,7 @@ let userProfile = { displayName: 'Player', avatarUrl: null }; // Current user's 
 let ws = null;
 let wsReconnectTimeout = null;
 let leaderboard = []; // Current room leaderboard
+let initialStateApplied = false; // Prevents double init from WS STATE + REST join race
 
 // ========== WEBSOCKET CONNECTION ==========
 function getUserProfile() {
@@ -118,6 +119,7 @@ function handleServerMessage(message) {
       }
       // Update game state from server
       if (message.playerState && message.playerState.gameState) {
+        initialStateApplied = true;
         gameState = message.playerState.gameState;
         gameMode = message.playerState.mode || 'daily';
         guessError = null;
@@ -454,8 +456,10 @@ async function initDailyFromServer() {
 
     // Also do REST fallback in case WebSocket takes time
     const serverState = await serverJoinGame();
-    // Only apply server state if we're still in daily mode (user may have switched to practice while awaiting)
-    if (serverState && serverState.gameState && gameMode !== 'practice') {
+    // Only apply server state if WS hasn't already delivered it (prevents double init)
+    // and if we're still in daily mode (user may have switched to practice while awaiting)
+    if (serverState && serverState.gameState && gameMode !== 'practice' && !initialStateApplied) {
+      initialStateApplied = true;
       gameState = serverState.gameState;
       gameMode = serverState.gameMode || "daily";
       guessError = null;
@@ -779,6 +783,14 @@ function handleKeyPress(key) {
 }
 
 async function submitGuessWithPersistence(guess) {
+  // Immediately clear currentGuess to prevent double-submit.
+  // In the WS path, state update is async (server responds with STATE),
+  // so without this, a rapid second Enter press would pass the length === 5
+  // guard in handleKeyPress and send the same guess again.
+  gameState = setCurrentGuess(gameState, '');
+  renderApp();
+  setupKeyboardListeners();
+
   // For daily mode with Discord context, use WebSocket (server-authoritative)
   if (gameMode === "daily" && discordUserId && discordRoomId) {
     // Try WebSocket first (preferred, real-time)
@@ -871,6 +883,7 @@ document.addEventListener('keydown', (e) => {
 function startPracticeGame() {
   gameMode = "practice";
   uiScreen = "game";
+  initialStateApplied = false;
   const targetWords = getQuordleWords();
   gameState = createGame({ targetWords });
   guessError = null;
@@ -885,6 +898,7 @@ function resetGame() {
   clearGameStorage();
   gameMode = "daily";
   uiScreen = "game";
+  initialStateApplied = false;
   const dateKey = getTodayDateKey();
   const targetWords = getDailyTargets(dateKey);
   gameState = createGame({ targetWords });
