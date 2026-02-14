@@ -9,6 +9,8 @@ import {
     extractJamo,
     splitCompoundCoda,
     combineCodas,
+    combineVowels,
+    splitCompoundVowel,
 } from '../src/jamo.js';
 import { evaluateGuessSyllable, evaluateGuessKo } from '../src/evaluatorKo.js';
 import { validateGuess, createGame, submitGuess, setCurrentGuess, computeKeyboardMap, computeKeyboardBoardMap } from '../src/game.js';
@@ -116,6 +118,58 @@ describe('jamo: compound codas', () => {
 
     it('returns null for non-combinable codas', () => {
         expect(combineCodas('ㄱ', 'ㄱ')).toBeNull();
+    });
+});
+
+describe('jamo: compound vowels', () => {
+    it('combines ㅜ + ㅓ into ㅝ', () => {
+        expect(combineVowels('ㅜ', 'ㅓ')).toBe('ㅝ');
+    });
+
+    it('combines ㅗ + ㅏ into ㅘ', () => {
+        expect(combineVowels('ㅗ', 'ㅏ')).toBe('ㅘ');
+    });
+
+    it('combines ㅗ + ㅐ into ㅙ', () => {
+        expect(combineVowels('ㅗ', 'ㅐ')).toBe('ㅙ');
+    });
+
+    it('combines ㅗ + ㅣ into ㅚ', () => {
+        expect(combineVowels('ㅗ', 'ㅣ')).toBe('ㅚ');
+    });
+
+    it('combines ㅜ + ㅔ into ㅞ', () => {
+        expect(combineVowels('ㅜ', 'ㅔ')).toBe('ㅞ');
+    });
+
+    it('combines ㅜ + ㅣ into ㅟ', () => {
+        expect(combineVowels('ㅜ', 'ㅣ')).toBe('ㅟ');
+    });
+
+    it('combines ㅡ + ㅣ into ㅢ', () => {
+        expect(combineVowels('ㅡ', 'ㅣ')).toBe('ㅢ');
+    });
+
+    it('returns null for non-combinable vowels', () => {
+        expect(combineVowels('ㅏ', 'ㅓ')).toBeNull();
+    });
+
+    it('splits ㅝ into ㅜ + ㅓ', () => {
+        expect(splitCompoundVowel('ㅝ')).toEqual(['ㅜ', 'ㅓ']);
+    });
+
+    it('splits ㅘ into ㅗ + ㅏ', () => {
+        expect(splitCompoundVowel('ㅘ')).toEqual(['ㅗ', 'ㅏ']);
+    });
+
+    it('returns null for non-compound vowel', () => {
+        expect(splitCompoundVowel('ㅏ')).toBeNull();
+    });
+
+    it('round-trips: 워 decomposes to ㅇ+ㅝ, recomposes to 워', () => {
+        const d = decomposeHangul('워');
+        expect(d).toEqual({ onset: 'ㅇ', vowel: 'ㅝ', coda: null });
+        expect(composeHangul(d.onset, d.vowel, d.coda)).toBe('워');
     });
 });
 

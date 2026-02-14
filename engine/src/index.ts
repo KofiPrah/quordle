@@ -43,6 +43,8 @@ export {
     canBeCoda,
     splitCompoundCoda,
     combineCodas,
+    combineVowels,
+    splitCompoundVowel,
     ONSETS,
     VOWELS,
     CODAS,

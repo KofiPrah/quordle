@@ -174,3 +174,33 @@ const CODA_COMBINATIONS: Record<string, Record<string, string>> = {
 export function combineCodas(first: string, second: string): string | null {
     return CODA_COMBINATIONS[first]?.[second] || null;
 }
+
+// ========== COMPOUND VOWEL HELPERS ==========
+// Two basic vowels that combine into a compound vowel
+// e.g., ㅗ + ㅏ = ㅘ, ㅜ + ㅓ = ㅝ
+
+const VOWEL_COMBINATIONS: Record<string, Record<string, string>> = {
+    'ㅗ': { 'ㅏ': 'ㅘ', 'ㅐ': 'ㅙ', 'ㅣ': 'ㅚ' },
+    'ㅜ': { 'ㅓ': 'ㅝ', 'ㅔ': 'ㅞ', 'ㅣ': 'ㅟ' },
+    'ㅡ': { 'ㅣ': 'ㅢ' },
+};
+
+const COMPOUND_VOWEL_SPLIT: Record<string, [string, string]> = {
+    'ㅘ': ['ㅗ', 'ㅏ'],
+    'ㅙ': ['ㅗ', 'ㅐ'],
+    'ㅚ': ['ㅗ', 'ㅣ'],
+    'ㅝ': ['ㅜ', 'ㅓ'],
+    'ㅞ': ['ㅜ', 'ㅔ'],
+    'ㅟ': ['ㅜ', 'ㅣ'],
+    'ㅢ': ['ㅡ', 'ㅣ'],
+};
+
+/** Try to combine two vowels into a compound vowel. Returns null if not combinable. */
+export function combineVowels(first: string, second: string): string | null {
+    return VOWEL_COMBINATIONS[first]?.[second] || null;
+}
+
+/** Split a compound vowel into its two component vowels. Returns null if not compound. */
+export function splitCompoundVowel(vowel: string): [string, string] | null {
+    return COMPOUND_VOWEL_SPLIT[vowel] || null;
+}

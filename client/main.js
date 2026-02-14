@@ -16,7 +16,7 @@ import { evaluateGuess } from "../engine/src/evaluator.ts";
 import { getQuordleWords, isValidGuess } from "../engine/src/words.ts";
 import { getDailyTargets } from "../engine/src/daily.ts";
 import { getLanguageConfig, isValidGuessForLanguage, getQuordleWordsForLanguage } from "../engine/src/languageConfig.ts";
-import { isHangulSyllable, decomposeHangul, composeHangul, isConsonant, isVowel, canBeOnset, canBeCoda, combineCodas, splitCompoundCoda, ONSETS, VOWELS } from "../engine/src/jamo.ts";
+import { isHangulSyllable, decomposeHangul, composeHangul, isConsonant, isVowel, canBeOnset, canBeCoda, combineCodas, splitCompoundCoda, combineVowels, splitCompoundVowel, ONSETS, VOWELS } from "../engine/src/jamo.ts";
 
 // Will eventually store the authenticated user's access_token
 let auth;
@@ -1000,7 +1000,13 @@ function imeProcessJamo(jamo) {
       return { committed: '', display: compositionDisplayChar() };
     }
     if (imeState.onset && imeState.vowel && !imeState.coda) {
-      // Phase 2: Already have onset+vowel, new vowel — finalize and start new
+      // Phase 2: Already have onset+vowel, new vowel — try compound vowel first
+      const combined = combineVowels(imeState.vowel, jamo);
+      if (combined) {
+        imeState.vowel = combined;
+        return { committed: '', display: compositionDisplayChar() };
+      }
+      // Can't combine — finalize and start new
       const committed = imeFinalize();
       imeState.onset = 'ㅇ';
       imeState.vowel = jamo;
@@ -1043,6 +1049,12 @@ function imeBackspace() {
     return { modified: true, display: compositionDisplayChar() };
   }
   if (imeState.vowel) {
+    // Check if vowel is compound — split it instead of removing entirely
+    const vSplit = splitCompoundVowel(imeState.vowel);
+    if (vSplit) {
+      imeState.vowel = vSplit[0];
+      return { modified: true, display: compositionDisplayChar() };
+    }
     imeState.vowel = null;
     return { modified: true, display: imeState.onset || '' };
   }
