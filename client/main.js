@@ -798,6 +798,7 @@ function renderRow(guess, result, isCurrent = false, isCondensed = false, koResu
     let jamoHintHtml = '';
     if (lang === 'ko' && koResult && koResult[i] && koResult[i].jamoHints && result && result[i] !== 'correct') {
       const h = koResult[i].jamoHints;
+      tileClass += ' tile-with-jamo';
       jamoHintHtml = `
         <div class="jamo-hints">
           <span class="jamo-dot jamo-${h.onset}" title="초성"></span>

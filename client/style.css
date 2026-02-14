@@ -1105,6 +1105,7 @@ button:focus-visible {
   height: 5px;
   border-radius: 50%;
   background: #555;
+  outline: 1.5px solid rgba(0, 0, 0, 0.45);
 }
 
 .jamo-dot-correct {
