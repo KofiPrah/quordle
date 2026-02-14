@@ -207,6 +207,32 @@ async function markResetAnnounced(guildId, channelId, dateKey) {
     }
 }
 
+// ========== LEADERBOARD SUMMARY DEDUP ==========
+// Key: dailySummary:{guildId}:{channelId}:{dateKey}
+
+function makeSummaryDedupeKey(guildId, channelId, dateKey) {
+    return `dailySummary:${guildId}:${channelId}:${dateKey}`;
+}
+
+async function hasSummaryBeenPosted(guildId, channelId, dateKey) {
+    if (!redis) return false;
+    try {
+        const val = await redis.get(makeSummaryDedupeKey(guildId, channelId, dateKey));
+        return !!val;
+    } catch (err) {
+        return false;
+    }
+}
+
+async function markSummaryPosted(guildId, channelId, dateKey) {
+    if (!redis) return;
+    try {
+        await redis.setex(makeSummaryDedupeKey(guildId, channelId, dateKey), DEDUP_TTL_SECONDS, "1");
+    } catch (err) {
+        console.error("[Bot] Failed to mark summary posted:", err.message);
+    }
+}
+
 // ========== DATE HELPERS ==========
 // Use America/Chicago timezone for consistent daily reset
 
@@ -381,6 +407,130 @@ async function handleDailyFinished(event) {
     }
 }
 
+// ========== END-OF-DAY LEADERBOARD SUMMARY ==========
+
+/** Fetch leaderboard for a channel (roomId === channelId) from Redis */
+async function fetchLeaderboardForChannel(channelId, dateKey) {
+    if (!redis) return [];
+
+    const entries = [];
+    for (const language of ["en", "ko"]) {
+        try {
+            const setKey = `roomPlayers:${channelId}:${dateKey}:${language}`;
+            const visibleUserIds = await redis.smembers(setKey);
+            if (!visibleUserIds || visibleUserIds.length === 0) continue;
+
+            // Load all player states in parallel
+            const playerPromises = visibleUserIds.map(async (uid) => {
+                const key = `player:${channelId}:${dateKey}:${language}:${uid}`;
+                const data = await redis.get(key);
+                return data ? JSON.parse(data) : null;
+            });
+
+            const players = await Promise.all(playerPromises);
+            for (const player of players) {
+                if (!player) continue;
+                const gs = player.gameState;
+                const solvedCount = gs.boards.filter(b => b.solved).length;
+                entries.push({
+                    visibleUserId: player.visibleUserId,
+                    displayName: player.profile?.displayName || player.visibleUserId,
+                    avatarUrl: player.profile?.avatarUrl || null,
+                    solvedCount,
+                    guessCount: gs.guessCount,
+                    gameOver: gs.gameOver,
+                    won: gs.won,
+                    finishedAt: player.finishedAt,
+                    language,
+                });
+            }
+        } catch (err) {
+            console.error(`[Bot] Failed to fetch leaderboard for ${channelId}/${dateKey}/${language}:`, err.message);
+        }
+    }
+
+    // Sort: finished > unfinished, more boards > fewer, fewer guesses > more, earlier finish wins ties
+    entries.sort((a, b) => {
+        if (a.gameOver !== b.gameOver) return a.gameOver ? -1 : 1;
+        if (a.solvedCount !== b.solvedCount) return b.solvedCount - a.solvedCount;
+        if (a.guessCount !== b.guessCount) return a.guessCount - b.guessCount;
+        if (a.finishedAt !== null && b.finishedAt !== null) return a.finishedAt - b.finishedAt;
+        return 0;
+    });
+
+    return entries;
+}
+
+function buildLeaderboardSummaryEmbed(dateKey, leaderboard) {
+    const displayDate = formatDateForDisplay(dateKey);
+    const rankEmojis = ["\uD83E\uDD47", "\uD83E\uDD48", "\uD83E\uDD49"]; // 🥇🥈🥉
+
+    let description = "";
+    for (let i = 0; i < leaderboard.length; i++) {
+        const entry = leaderboard[i];
+        const rank = i < 3 ? rankEmojis[i] : `**${i + 1}.**`;
+        const statusEmoji = entry.won ? "\u2705" : entry.gameOver ? "\u274C" : "\u23F3"; // ✅ ❌ ⏳
+        description += `${rank} **${entry.displayName}** — ${entry.solvedCount}/4 boards, ${entry.guessCount} guesses ${statusEmoji}\n`;
+    }
+
+    const totalPlayers = leaderboard.length;
+    const winners = leaderboard.filter(e => e.won).length;
+
+    return new EmbedBuilder()
+        .setColor(0xf1c40f) // Gold
+        .setTitle(`\uD83D\uDCCA Daily Quordle Results — ${displayDate}`)
+        .setDescription(description.trim())
+        .addFields(
+            { name: "Players", value: `${totalPlayers}`, inline: true },
+            { name: "Winners", value: `${winners}`, inline: true }
+        )
+        .setFooter({ text: "Final standings \u2022 Resets at midnight (America/Chicago)" })
+        .setTimestamp();
+}
+
+async function announceLeaderboardSummaryToChannel(guildId, channelId, dateKey) {
+    const alreadyPosted = await hasSummaryBeenPosted(guildId, channelId, dateKey);
+    if (alreadyPosted) return;
+
+    try {
+        const leaderboard = await fetchLeaderboardForChannel(channelId, dateKey);
+        if (leaderboard.length === 0) {
+            console.log(`[Bot] No players for leaderboard summary in ${channelId} on ${dateKey}, skipping`);
+            await markSummaryPosted(guildId, channelId, dateKey);
+            return;
+        }
+
+        const channel = await client.channels.fetch(channelId);
+        if (!channel) {
+            console.log(`[Bot] Channel ${channelId} not found for leaderboard summary`);
+            await markSummaryPosted(guildId, channelId, dateKey);
+            return;
+        }
+
+        const embed = buildLeaderboardSummaryEmbed(dateKey, leaderboard);
+        const components = [buildPlayButton()];
+
+        await channel.send({ embeds: [embed], components });
+        await markSummaryPosted(guildId, channelId, dateKey);
+        console.log(`[Bot] Posted leaderboard summary in ${guildId}/${channelId} for ${dateKey} (${leaderboard.length} players)`);
+    } catch (err) {
+        console.error(`[Bot] Failed to post leaderboard summary in ${channelId}:`, err.message);
+        await markSummaryPosted(guildId, channelId, dateKey);
+    }
+}
+
+async function announceLeaderboardSummaryToAllChannels(dateKey) {
+    const members = await getActiveChannels();
+    console.log(`[Bot] Announcing leaderboard summary to ${members.length} channel(s) for ${dateKey}`);
+
+    for (const member of members) {
+        const [guildId, channelId] = member.split(":");
+        if (guildId && channelId) {
+            await announceLeaderboardSummaryToChannel(guildId, channelId, dateKey);
+        }
+    }
+}
+
 // ========== DAILY RESET ANNOUNCEMENT ==========
 
 function buildResetEmbed(dateKey) {
@@ -435,7 +585,24 @@ async function announceResetToAllChannels(dateKey) {
 // ========== DAILY RESET CRON ==========
 
 function startDailyCron() {
-    console.log("[Bot] Scheduling daily reset cron at midnight America/Chicago");
+    console.log("[Bot] Scheduling daily crons (America/Chicago)");
+
+    // End-of-day leaderboard summary at 23:55
+    cron.schedule(
+        "55 23 * * *", // 23:55:00 — 5 minutes before reset
+        async () => {
+            try {
+                const dateKey = getTodayDateKey();
+                console.log(`[Bot Cron] Firing end-of-day leaderboard summary for ${dateKey}`);
+                await announceLeaderboardSummaryToAllChannels(dateKey);
+            } catch (err) {
+                console.error("[Bot Cron] Error during leaderboard summary:", err);
+            }
+        },
+        { timezone: "America/Chicago" }
+    );
+
+    // Daily reset announcement at 00:00:05
     cron.schedule(
         "5 0 * * *", // 00:00:05 (5 seconds past midnight for safety)
         async () => {
