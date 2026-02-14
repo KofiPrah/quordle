@@ -195,6 +195,50 @@ describe('evaluateGuessKo', () => {
         expect(results[2].syllable).toBe('correct'); // 탕 = 탕
         expect(results[2].jamoHints).toBeNull();
     });
+
+    it('detects onset jamo present as coda in target (cross-position consonant)', () => {
+        // Target: 먹바산 → onsets [ㅁ, ㅂ, ㅅ], codas [ㄱ, null, ㄴ]
+        // Consonant set: {ㅁ, ㅂ, ㅅ, ㄱ, ㄴ}
+        // Guess:  가수날
+        // pos 0: 가 vs 먹 → onset ㄱ vs ㅁ (different)
+        //   OLD: ㄱ not in target onsets [ㅁ,ㅂ,ㅅ] → absent
+        //   NEW: ㄱ in consonant set {ㅁ,ㅂ,ㅅ,ㄱ,ㄴ} → present ✓
+        const results = evaluateGuessKo('가수날', '먹바산');
+        expect(results[0].jamoHints).not.toBeNull();
+        expect(results[0].jamoHints!.onset).toBe('present'); // ㄱ exists as coda of 먹
+    });
+
+    it('detects coda jamo present as onset in target (cross-position consonant)', () => {
+        // Target: 사고미 → onsets [ㅅ, ㄱ, ㅁ], codas [null, null, null]
+        // Consonant set: {ㅅ, ㄱ, ㅁ}
+        // Guess:  밤나딕
+        // pos 0: 밤 vs 사 → coda ㅁ. Target pos has no coda, but ㅁ is target onset → present
+        const results = evaluateGuessKo('밤나딕', '사고미');
+        expect(results[0].jamoHints).not.toBeNull();
+        expect(results[0].jamoHints!.coda).toBe('present'); // ㅁ exists as onset of 미
+    });
+
+    it('detects consonant inside target compound coda', () => {
+        // Target: 닭바사 → 닭 has compound coda ㄺ (= ㄹ + ㄱ)
+        // Consonant set: {ㄷ, ㅂ, ㅅ, ㄺ, ㄹ, ㄱ}  (ㄺ decomposed)
+        // Guess:  라비서
+        // pos 0: 라 vs 닭 → onset ㄹ vs ㄷ → different.
+        //   ㄹ in consonant set? Yes (from decomposed ㄺ) → present
+        const results = evaluateGuessKo('라비서', '닭바사');
+        expect(results[0].jamoHints).not.toBeNull();
+        expect(results[0].jamoHints!.onset).toBe('present'); // ㄹ from compound coda ㄺ
+    });
+
+    it('detects guess compound coda component in target consonants', () => {
+        // Target: 사비거 → onsets [ㅅ, ㅂ, ㄱ], no codas
+        // Consonant set: {ㅅ, ㅂ, ㄱ}
+        // Guess:  닭나다
+        // pos 0: 닭 vs 사 → coda ㄺ (= ㄹ + ㄱ)
+        //   ㄺ not in consonant set, but split → ㄹ (no) or ㄱ (yes!) → present
+        const results = evaluateGuessKo('닭나다', '사비거');
+        expect(results[0].jamoHints).not.toBeNull();
+        expect(results[0].jamoHints!.coda).toBe('present'); // ㄱ component matches target onset
+    });
 });
 
 // ============================================================================
@@ -301,6 +345,29 @@ describe('Korean game: computeKeyboardMap', () => {
         expect(keyMap['ㅂ']).toBeDefined();
         expect(keyMap['ㄴ']).toBeDefined();
         expect(keyMap['ㅏ']).toBeDefined();
+    });
+
+    it('uses jamo-level hints instead of syllable-level for keyboard coloring', () => {
+        // Target words where guessing reveals jamo information.
+        // Board 0 target: 먹바산 → onsets [ㅁ, ㅂ, ㅅ], codas [ㄱ, -, ㄴ]
+        // Guessing 가수날:
+        //   pos 0: 가 vs 먹 → syllable absent, but onset ㄱ is present (target coda)
+        //   pos 1: 수 vs 바 → syllable absent, but onset ㅅ is present (target onset)
+        //   pos 2: 날 vs 산 → syllable absent
+        // OLD keyboard: ㄱ would be 'absent' (from syllable-level absent)
+        // NEW keyboard: ㄱ should be 'present' (from jamo-level hints)
+        const game = createGame({
+            targetWords: ['먹바산', '먹바산', '먹바산', '먹바산'],
+            language: 'ko',
+        });
+
+        const state = submitGuess(game, '가수날');
+        const keyMap = computeKeyboardMap(state);
+
+        // ㄱ is present in target as coda of 먹 — should NOT be marked absent
+        expect(keyMap['ㄱ']).toBe('present');
+        // ㅅ is present in target as onset of 산
+        expect(keyMap['ㅅ']).toBe('present');
     });
 });
 

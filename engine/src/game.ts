@@ -182,6 +182,17 @@ export function computeKeyboardMap(state: GameState): Record<string, LetterResul
     const statuses: Record<string, LetterResult> = {};
     const language = state.language || 'en';
 
+    /** Apply max-precedence status update: correct > present > absent */
+    const applyStatus = (key: string, status: LetterResult) => {
+        if (status === 'correct') {
+            statuses[key] = 'correct';
+        } else if (status === 'present' && statuses[key] !== 'correct') {
+            statuses[key] = 'present';
+        } else if (status === 'absent' && !statuses[key]) {
+            statuses[key] = 'absent';
+        }
+    };
+
     for (const board of state.boards) {
         for (let guessIdx = 0; guessIdx < board.guesses.length; guessIdx++) {
             // Skip results for guesses made after this board was solved.
@@ -195,23 +206,36 @@ export function computeKeyboardMap(state: GameState): Record<string, LetterResul
             const result = board.results[guessIdx];
 
             if (language === 'ko') {
-                // Korean: key by individual jamo extracted from syllable blocks
+                // Korean: use jamo-level hints from koResults for precise keyboard coloring.
+                // This avoids marking a jamo as 'absent' when its syllable is absent but
+                // the individual jamo actually exists in the target word.
+                const koResults = board.koResults;
                 for (let syllIdx = 0; syllIdx < guess.length; syllIdx++) {
                     const ch = guess[syllIdx];
-                    const tileStatus = result[syllIdx];
-                    if (isHangulSyllable(ch)) {
-                        const d = decomposeHangul(ch);
-                        const jamos = [d.onset, d.vowel];
-                        if (d.coda) jamos.push(d.coda);
-                        for (const jamo of jamos) {
-                            if (tileStatus === 'correct') {
-                                statuses[jamo] = 'correct';
-                            } else if (tileStatus === 'present' && statuses[jamo] !== 'correct') {
-                                statuses[jamo] = 'present';
-                            } else if (tileStatus === 'absent' && !statuses[jamo]) {
-                                statuses[jamo] = 'absent';
+                    if (!isHangulSyllable(ch)) continue;
+                    const d = decomposeHangul(ch);
+
+                    if (koResults && koResults[guessIdx]) {
+                        const koResult = koResults[guessIdx][syllIdx];
+                        if (koResult.syllable === 'correct') {
+                            // Whole syllable correct — all jamo are correct
+                            applyStatus(d.onset, 'correct');
+                            applyStatus(d.vowel, 'correct');
+                            if (d.coda) applyStatus(d.coda, 'correct');
+                        } else if (koResult.jamoHints) {
+                            // Use individual jamo hints for precise coloring
+                            applyStatus(d.onset, koResult.jamoHints.onset);
+                            applyStatus(d.vowel, koResult.jamoHints.vowel);
+                            if (d.coda && koResult.jamoHints.coda) {
+                                applyStatus(d.coda, koResult.jamoHints.coda);
                             }
                         }
+                    } else {
+                        // Fallback: use syllable-level status for all jamo
+                        const tileStatus = result[syllIdx];
+                        applyStatus(d.onset, tileStatus);
+                        applyStatus(d.vowel, tileStatus);
+                        if (d.coda) applyStatus(d.coda, tileStatus);
                     }
                 }
             } else {
@@ -219,15 +243,7 @@ export function computeKeyboardMap(state: GameState): Record<string, LetterResul
                 for (let letterIdx = 0; letterIdx < guess.length; letterIdx++) {
                     const letter = guess[letterIdx];
                     const tileStatus = result[letterIdx];
-
-                    // Apply max precedence: correct > present > absent
-                    if (tileStatus === 'correct') {
-                        statuses[letter] = 'correct';
-                    } else if (tileStatus === 'present' && statuses[letter] !== 'correct') {
-                        statuses[letter] = 'present';
-                    } else if (tileStatus === 'absent' && !statuses[letter]) {
-                        statuses[letter] = 'absent';
-                    }
+                    applyStatus(letter, tileStatus);
                 }
             }
         }
