@@ -6,6 +6,7 @@ export type {
     JamoHint,
     KoSyllableResult,
     BoardState,
+    BoardLetterStatuses,
     GameState,
     GameConfig,
     LanguageConfig,
@@ -20,6 +21,7 @@ export {
     getRemainingGuesses,
     getSolvedCount,
     computeKeyboardMap,
+    computeKeyboardBoardMap,
 } from './game.js';
 
 // Evaluator (English)

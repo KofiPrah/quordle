@@ -49,6 +49,13 @@ export interface GameConfig {
     language?: Language;
 }
 
+/**
+ * Per-board letter status for the keyboard 2×2 board indicator.
+ * Index 0–3 corresponds to boards 0–3.
+ * null means the letter has not been evaluated on that board (or board was already solved).
+ */
+export type BoardLetterStatuses = [LetterResult | null, LetterResult | null, LetterResult | null, LetterResult | null];
+
 /** Language-specific configuration */
 export interface LanguageConfig {
     wordLength: number;

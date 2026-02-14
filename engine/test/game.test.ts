@@ -7,6 +7,7 @@ import {
     getRemainingGuesses,
     getSolvedCount,
     computeKeyboardMap,
+    computeKeyboardBoardMap,
 } from '../src/game.js';
 
 describe('createGame', () => {
@@ -295,5 +296,82 @@ describe('computeKeyboardMap', () => {
         expect(keyMap['i']).toBe('absent');
         // L is present in DELTA, BLOCK, APPLE
         expect(keyMap['l']).toBe('present');
+    });
+});
+
+describe('computeKeyboardBoardMap', () => {
+    it('returns per-board statuses independently', () => {
+        // targets: CRANE, BRAIN, PLAIN, DRAIN; guess: TRAIN
+        // Board 0 (crane): t=absent, r=present, a=present, i=absent, n=present
+        // Board 1 (brain): t=absent, r=correct, a=correct, i=correct, n=correct
+        // Board 2 (plain): t=absent, r=absent, a=correct, i=correct, n=correct
+        // Board 3 (drain): t=absent, r=correct, a=correct, i=correct, n=correct
+        let game = createGame({
+            targetWords: ['crane', 'brain', 'plain', 'drain'],
+        });
+
+        game = submitGuess(game, 'train');
+        const boardMap = computeKeyboardBoardMap(game);
+
+        // 't' is absent on all 4 boards
+        expect(boardMap['t']).toEqual(['absent', 'absent', 'absent', 'absent']);
+        // 'r': correct in crane(pos1), correct in brain(pos1), absent in plain, correct in drain(pos1)
+        expect(boardMap['r']).toEqual(['correct', 'correct', 'absent', 'correct']);
+        // 'a': correct in crane(pos2), correct in brain(pos2), correct in plain(pos2), correct in drain(pos2)
+        expect(boardMap['a']).toEqual(['correct', 'correct', 'correct', 'correct']);
+        // 'i': absent in crane, correct in brain(pos3), correct in plain(pos3), correct in drain(pos3)
+        expect(boardMap['i']).toEqual(['absent', 'correct', 'correct', 'correct']);
+        // 'n': present in crane, correct in brain(pos4), correct in plain(pos4), correct in drain(pos4)
+        expect(boardMap['n']).toEqual(['present', 'correct', 'correct', 'correct']);
+    });
+
+    it('returns empty map before any guesses', () => {
+        const game = createGame({
+            targetWords: ['apple', 'beach', 'chair', 'dance'],
+        });
+
+        const boardMap = computeKeyboardBoardMap(game);
+        expect(Object.keys(boardMap)).toHaveLength(0);
+    });
+
+    it('applies max precedence per board across multiple guesses', () => {
+        let game = createGame({
+            targetWords: ['apple', 'beach', 'chair', 'dance'],
+        });
+
+        // First guess: CRANE
+        // Board 0 (apple): c=absent, r=absent, a=present, n=absent, e=present
+        // Board 1 (beach): c=present, r=absent, a=present, n=absent, e=present
+        game = submitGuess(game, 'crane');
+
+        // Second guess: DANCE solves board 3
+        // Board 0 (apple): d=absent, a=present, n=absent, c=absent, e=correct
+        game = submitGuess(game, 'dance');
+
+        const boardMap = computeKeyboardBoardMap(game);
+
+        // 'a' on board 0: present from guess 1, present from guess 2 → present
+        expect(boardMap['a'][0]).toBe('present');
+        // 'e' on board 0: present from guess 1, correct from guess 2 → correct
+        expect(boardMap['e'][0]).toBe('correct');
+        // Board 3 is solved by guess 2 (dance = dance), 'c' goes from present (CRANE) to correct (DANCE)
+        expect(boardMap['c'][3]).toBe('correct');
+    });
+
+    it('skips post-solve guesses for solved boards', () => {
+        let game = createGame({
+            targetWords: ['apple', 'apple', 'apple', 'beach'],
+        });
+
+        // Guess 1: APPLE solves boards 0, 1, 2
+        game = submitGuess(game, 'apple');
+        // Guess 2: BEACH — boards 0-2 are already solved, only board 3 matters
+        game = submitGuess(game, 'beach');
+
+        const boardMap = computeKeyboardBoardMap(game);
+
+        // 'b' was only evaluated on board 3 (correct); boards 0-2 solved before guess 2
+        expect(boardMap['b'][0]).toBeNull();
+        expect(boardMap['b'][3]).toBe('correct');
     });
 });

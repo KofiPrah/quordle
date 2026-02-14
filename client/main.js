@@ -11,7 +11,7 @@ const WS_URL = API_URL
   : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 
 // Import Quordle engine
-import { createGame, submitGuess, setCurrentGuess, validateGuess, getSolvedCount, computeKeyboardMap } from "../engine/src/game.ts";
+import { createGame, submitGuess, setCurrentGuess, validateGuess, getSolvedCount, computeKeyboardMap, computeKeyboardBoardMap } from "../engine/src/game.ts";
 import { evaluateGuess } from "../engine/src/evaluator.ts";
 import { getQuordleWords, isValidGuess } from "../engine/src/words.ts";
 import { getDailyTargets } from "../engine/src/daily.ts";
@@ -788,6 +788,14 @@ function renderCurrentGuess() {
   `;
 }
 
+function renderBoardGrid(boardStatuses, key) {
+  const entry = boardStatuses[key];
+  if (!entry || entry.every(s => s === null)) return '';
+  const dotClass = (status) => status ? `kbd-${status}` : '';
+  return `<span class="key-board-grid">${entry.map((s, i) => `<span class="kbd-dot ${dotClass(s)}" data-board="${i}"></span>`).join('')
+    }</span>`;
+}
+
 function renderKeyboard() {
   const rows = [
     ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
@@ -796,15 +804,18 @@ function renderKeyboard() {
   ];
 
   const letterStates = computeKeyboardMap(gameState);
+  const boardStatuses = computeKeyboardBoardMap(gameState);
 
   return `
     <div class="keyboard">
       ${rows.map(row => `
         <div class="keyboard-row">
           ${row.map(key => {
-    const stateClass = letterStates[key.toLowerCase()] ? `key-${letterStates[key.toLowerCase()]}` : '';
+    const lowerKey = key.toLowerCase();
+    const stateClass = letterStates[lowerKey] ? `key-${letterStates[lowerKey]}` : '';
     const widthClass = key.length > 1 ? 'key-wide' : '';
-    return `<button class="key ${stateClass} ${widthClass}" data-key="${key}">${key}</button>`;
+    const grid = key.length === 1 ? renderBoardGrid(boardStatuses, lowerKey) : '';
+    return `<button class="key ${stateClass} ${widthClass}" data-key="${key}">${grid}${key}</button>`;
   }).join('')}
         </div>
       `).join('')}
@@ -827,6 +838,7 @@ function renderKoreanKeyboard() {
   ];
 
   const jamoStates = computeKeyboardMap(gameState);
+  const boardStatuses = computeKeyboardBoardMap(gameState);
 
   return `
     <div class="keyboard keyboard-ko">
@@ -834,8 +846,10 @@ function renderKoreanKeyboard() {
         <div class="keyboard-row">
           ${row.map(key => {
     const stateClass = jamoStates[key] ? `key-${jamoStates[key]}` : '';
-    const widthClass = (key === 'ENTER' || key === '⌫' || key === '⇧') ? 'key-wide' : '';
-    return `<button class="key ${stateClass} ${widthClass}" data-key="${key}">${key}</button>`;
+    const isSpecial = (key === 'ENTER' || key === '⌫' || key === '⇧');
+    const widthClass = isSpecial ? 'key-wide' : '';
+    const grid = !isSpecial ? renderBoardGrid(boardStatuses, key) : '';
+    return `<button class="key ${stateClass} ${widthClass}" data-key="${key}">${grid}${key}</button>`;
   }).join('')}
         </div>
       `).join('')}

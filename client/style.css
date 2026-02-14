@@ -352,6 +352,7 @@ button:focus-visible {
   touch-action: manipulation;
   /* Prevent double-tap zoom on mobile */
   -webkit-tap-highlight-color: transparent;
+  position: relative;
 }
 
 .key:hover {
@@ -378,6 +379,39 @@ button:focus-visible {
 
 .key-absent {
   background: #374151;
+}
+
+/* ===== 2×2 board indicator grid on keyboard keys ===== */
+.key-board-grid {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+  width: clamp(10px, 2.5vw, 14px);
+  height: clamp(10px, 2.5vw, 14px);
+  pointer-events: none;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.kbd-dot {
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.kbd-correct {
+  background: #22c55e;
+}
+
+.kbd-present {
+  background: #eab308;
+}
+
+.kbd-absent {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .new-game-btn {

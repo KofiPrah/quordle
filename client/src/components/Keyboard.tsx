@@ -1,4 +1,4 @@
-import type { LetterResult } from '../../../engine/src/types';
+import type { LetterResult, BoardLetterStatuses } from '../../../engine/src/types';
 
 const KEYBOARD_ROWS = [
     ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
@@ -11,6 +11,7 @@ interface KeyboardProps {
     onEnter: () => void;
     onBackspace: () => void;
     letterStates?: Map<string, LetterResult>;
+    boardStatuses?: Record<string, BoardLetterStatuses>;
     disabled?: boolean;
 }
 
@@ -20,9 +21,26 @@ const stateStyles: Record<LetterResult, string> = {
     absent: 'bg-gray-500 text-white',
 };
 
+const dotStyles: Record<LetterResult, string> = {
+    correct: 'kbd-correct',
+    present: 'kbd-present',
+    absent: 'kbd-absent',
+};
+
 const defaultStyle = 'bg-gray-200 hover:bg-gray-300';
 
-export function Keyboard({ onKey, onEnter, onBackspace, letterStates, disabled }: KeyboardProps) {
+function BoardGrid({ statuses }: { statuses: BoardLetterStatuses }) {
+    if (statuses.every(s => s === null)) return null;
+    return (
+        <span className="key-board-grid">
+            {statuses.map((s, i) => (
+                <span key={i} className={`kbd-dot ${s ? dotStyles[s] : ''}`} data-board={i} />
+            ))}
+        </span>
+    );
+}
+
+export function Keyboard({ onKey, onEnter, onBackspace, letterStates, boardStatuses, disabled }: KeyboardProps) {
     const handleClick = (key: string) => {
         if (disabled) return;
 
@@ -57,6 +75,9 @@ export function Keyboard({ onKey, onEnter, onBackspace, letterStates, disabled }
                                 ${getKeyStyle(key)}
                             `}
                         >
+                            {key.length === 1 && boardStatuses?.[key] && (
+                                <BoardGrid statuses={boardStatuses[key]} />
+                            )}
                             {key === 'backspace' ? '⌫' : key}
                         </button>
                     ))}

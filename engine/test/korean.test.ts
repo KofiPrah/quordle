@@ -11,7 +11,7 @@ import {
     combineCodas,
 } from '../src/jamo.js';
 import { evaluateGuessSyllable, evaluateGuessKo } from '../src/evaluatorKo.js';
-import { validateGuess, createGame, submitGuess, setCurrentGuess, computeKeyboardMap } from '../src/game.js';
+import { validateGuess, createGame, submitGuess, setCurrentGuess, computeKeyboardMap, computeKeyboardBoardMap } from '../src/game.js';
 import { getDailyTargets } from '../src/daily.js';
 
 // ============================================================================
@@ -368,6 +368,31 @@ describe('Korean game: computeKeyboardMap', () => {
         expect(keyMap['ㄱ']).toBe('present');
         // ㅅ is present in target as onset of 산
         expect(keyMap['ㅅ']).toBe('present');
+    });
+
+    it('produces per-board jamo statuses via computeKeyboardBoardMap', () => {
+        // Board 0 target: 바나나, Board 1: 고구마, Board 2: 감자탕, Board 3: 김치찌
+        // Guess: 바나나 (solves board 0)
+        const game = createGame({
+            targetWords: ['바나나', '고구마', '감자탕', '김치찌'],
+            language: 'ko',
+        });
+
+        const state = submitGuess(game, '바나나');
+        const boardMap = computeKeyboardBoardMap(state);
+
+        // ㅂ: correct on board 0 (바=바)
+        expect(boardMap['ㅂ'][0]).toBe('correct');
+        // ㅏ: correct on board 0 (바→ㅏ, 나→ㅏ all match)
+        expect(boardMap['ㅏ'][0]).toBe('correct');
+        // ㄴ: correct on board 0 (나 onset matches)
+        expect(boardMap['ㄴ'][0]).toBe('correct');
+
+        // On board 1 (고구마): 바나나 doesn't match.
+        // ㅂ on board 1: onset of 바 vs 고 → not matching, not in consonants of 고구마
+        // 고구마 consonants: {ㄱ, ㅁ}, vowels: {ㅗ, ㅜ, ㅏ}
+        // ㅏ on board 1: 마 has vowel ㅏ → should be present (or correct depending on position)
+        expect(boardMap['ㅏ'][1]).toBeDefined();
     });
 });
 

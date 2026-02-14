@@ -1,4 +1,4 @@
-import type { BoardState, GameConfig, GameState, LetterResult, Language } from './types.js';
+import type { BoardState, GameConfig, GameState, LetterResult, Language, BoardLetterStatuses } from './types.js';
 import { evaluateGuess, isSolved } from './evaluator.js';
 import { evaluateGuessKo, evaluateGuessSyllable } from './evaluatorKo.js';
 import { getLanguageConfig } from './languageConfig.js';
@@ -250,4 +250,85 @@ export function computeKeyboardMap(state: GameState): Record<string, LetterResul
     }
 
     return statuses;
+}
+
+/**
+ * Computes per-board keyboard statuses for the 2×2 board indicator on each key.
+ * Returns a map from letter/jamo to a 4-tuple of per-board LetterResult | null.
+ * Each board independently tracks the best status for each letter.
+ * null means the letter hasn't been guessed on that board (or the board was already solved
+ * before the guess was made).
+ */
+export function computeKeyboardBoardMap(state: GameState): Record<string, BoardLetterStatuses> {
+    const boardStatuses: Record<string, BoardLetterStatuses> = {};
+    const language = state.language || 'en';
+
+    const ensure = (key: string): BoardLetterStatuses => {
+        if (!boardStatuses[key]) {
+            boardStatuses[key] = [null, null, null, null];
+        }
+        return boardStatuses[key];
+    };
+
+    /** Apply max-precedence status update for a specific board index */
+    const applyBoardStatus = (key: string, boardIdx: number, status: LetterResult) => {
+        const entry = ensure(key);
+        const current = entry[boardIdx];
+        if (status === 'correct') {
+            entry[boardIdx] = 'correct';
+        } else if (status === 'present' && current !== 'correct') {
+            entry[boardIdx] = 'present';
+        } else if (status === 'absent' && current === null) {
+            entry[boardIdx] = 'absent';
+        }
+    };
+
+    for (let boardIdx = 0; boardIdx < state.boards.length; boardIdx++) {
+        const board = state.boards[boardIdx];
+        for (let guessIdx = 0; guessIdx < board.guesses.length; guessIdx++) {
+            if (board.solvedOnGuess !== null && guessIdx >= board.solvedOnGuess) {
+                continue;
+            }
+
+            const guess = board.guesses[guessIdx];
+            const result = board.results[guessIdx];
+
+            if (language === 'ko') {
+                const koResults = board.koResults;
+                for (let syllIdx = 0; syllIdx < guess.length; syllIdx++) {
+                    const ch = guess[syllIdx];
+                    if (!isHangulSyllable(ch)) continue;
+                    const d = decomposeHangul(ch);
+
+                    if (koResults && koResults[guessIdx]) {
+                        const koResult = koResults[guessIdx][syllIdx];
+                        if (koResult.syllable === 'correct') {
+                            applyBoardStatus(d.onset, boardIdx, 'correct');
+                            applyBoardStatus(d.vowel, boardIdx, 'correct');
+                            if (d.coda) applyBoardStatus(d.coda, boardIdx, 'correct');
+                        } else if (koResult.jamoHints) {
+                            applyBoardStatus(d.onset, boardIdx, koResult.jamoHints.onset);
+                            applyBoardStatus(d.vowel, boardIdx, koResult.jamoHints.vowel);
+                            if (d.coda && koResult.jamoHints.coda) {
+                                applyBoardStatus(d.coda, boardIdx, koResult.jamoHints.coda);
+                            }
+                        }
+                    } else {
+                        const tileStatus = result[syllIdx];
+                        applyBoardStatus(d.onset, boardIdx, tileStatus);
+                        applyBoardStatus(d.vowel, boardIdx, tileStatus);
+                        if (d.coda) applyBoardStatus(d.coda, boardIdx, tileStatus);
+                    }
+                }
+            } else {
+                for (let letterIdx = 0; letterIdx < guess.length; letterIdx++) {
+                    const letter = guess[letterIdx];
+                    const tileStatus = result[letterIdx];
+                    applyBoardStatus(letter, boardIdx, tileStatus);
+                }
+            }
+        }
+    }
+
+    return boardStatuses;
 }
