@@ -370,36 +370,33 @@ button:focus-visible {
 }
 
 .key-correct {
-  background: #22c55e;
+  /* colored via board grid only */
 }
 
 .key-present {
-  background: #eab308;
+  /* colored via board grid only */
 }
 
 .key-absent {
-  background: #374151;
+  /* colored via board grid only */
 }
 
 /* ===== 2×2 board indicator grid on keyboard keys ===== */
 .key-board-grid {
   position: absolute;
-  top: 2px;
-  right: 2px;
+  inset: 2px;
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-template-rows: 1fr 1fr;
-  gap: 1px;
-  width: clamp(10px, 2.5vw, 14px);
-  height: clamp(10px, 2.5vw, 14px);
+  gap: 2px;
   pointer-events: none;
-  border-radius: 2px;
+  border-radius: 4px;
   overflow: hidden;
 }
 
 .kbd-dot {
-  border-radius: 1px;
-  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .kbd-correct {
@@ -411,7 +408,14 @@ button:focus-visible {
 }
 
 .kbd-absent {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Key label sits above the grid */
+.key-label {
+  position: relative;
+  z-index: 1;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
 }
 
 .new-game-btn {

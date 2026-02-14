@@ -11,7 +11,7 @@ const WS_URL = API_URL
   : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 
 // Import Quordle engine
-import { createGame, submitGuess, setCurrentGuess, validateGuess, getSolvedCount, computeKeyboardMap, computeKeyboardBoardMap } from "../engine/src/game.ts";
+import { createGame, submitGuess, setCurrentGuess, validateGuess, getSolvedCount, computeKeyboardBoardMap } from "../engine/src/game.ts";
 import { evaluateGuess } from "../engine/src/evaluator.ts";
 import { getQuordleWords, isValidGuess } from "../engine/src/words.ts";
 import { getDailyTargets } from "../engine/src/daily.ts";
@@ -803,7 +803,6 @@ function renderKeyboard() {
     ['ENTER', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '⌫']
   ];
 
-  const letterStates = computeKeyboardMap(gameState);
   const boardStatuses = computeKeyboardBoardMap(gameState);
 
   return `
@@ -812,10 +811,9 @@ function renderKeyboard() {
         <div class="keyboard-row">
           ${row.map(key => {
     const lowerKey = key.toLowerCase();
-    const stateClass = letterStates[lowerKey] ? `key-${letterStates[lowerKey]}` : '';
     const widthClass = key.length > 1 ? 'key-wide' : '';
     const grid = key.length === 1 ? renderBoardGrid(boardStatuses, lowerKey) : '';
-    return `<button class="key ${stateClass} ${widthClass}" data-key="${key}">${grid}${key}</button>`;
+    return `<button class="key ${widthClass}" data-key="${key}">${grid}<span class="key-label">${key}</span></button>`;
   }).join('')}
         </div>
       `).join('')}
@@ -837,7 +835,6 @@ function renderKoreanKeyboard() {
     ['⇧', 'ㅃ', 'ㅉ', 'ㄸ', 'ㄲ', 'ㅆ'],
   ];
 
-  const jamoStates = computeKeyboardMap(gameState);
   const boardStatuses = computeKeyboardBoardMap(gameState);
 
   return `
@@ -845,11 +842,10 @@ function renderKoreanKeyboard() {
       ${rows.map(row => `
         <div class="keyboard-row">
           ${row.map(key => {
-    const stateClass = jamoStates[key] ? `key-${jamoStates[key]}` : '';
     const isSpecial = (key === 'ENTER' || key === '⌫' || key === '⇧');
     const widthClass = isSpecial ? 'key-wide' : '';
     const grid = !isSpecial ? renderBoardGrid(boardStatuses, key) : '';
-    return `<button class="key ${stateClass} ${widthClass}" data-key="${key}">${grid}${key}</button>`;
+    return `<button class="key ${widthClass}" data-key="${key}">${grid}<span class="key-label">${key}</span></button>`;
   }).join('')}
         </div>
       `).join('')}
