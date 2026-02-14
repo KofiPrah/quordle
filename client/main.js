@@ -82,6 +82,7 @@ function connectWebSocket() {
       visibleUserId: discordUserId,
       profile: userProfile,
       guildId: discordGuildId,
+      language: currentLanguage,
     }));
   };
 
@@ -174,7 +175,8 @@ function sendGuessViaWebSocket(guess) {
     roomId: discordRoomId,
     dateKey,
     visibleUserId: discordUserId,
-    guess
+    guess,
+    language: currentLanguage,
   }));
   return true;
 }
@@ -272,7 +274,7 @@ async function serverJoinGame() {
     const response = await fetch(`${API_URL}/api/game/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ roomId: discordRoomId, userId: discordUserId, dateKey }),
+      body: JSON.stringify({ roomId: discordRoomId, userId: discordUserId, dateKey, language: currentLanguage }),
     });
     if (!response.ok) return null;
     return await response.json();
@@ -289,7 +291,7 @@ async function serverSubmitGuess(guess) {
     const response = await fetch(`${API_URL}/api/game/guess`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ roomId: discordRoomId, userId: discordUserId, guess, dateKey }),
+      body: JSON.stringify({ roomId: discordRoomId, userId: discordUserId, guess, dateKey, language: currentLanguage }),
     });
     if (!response.ok) return null;
     return await response.json();
@@ -1253,6 +1255,21 @@ function switchLanguage(newLang) {
     }
     if (gameState.gameOver) uiScreen = "results";
     else uiScreen = "game";
+
+    // Re-JOIN via WebSocket so the server creates/loads player state for the new language
+    if (ws && ws.readyState === WebSocket.OPEN && discordUserId && discordRoomId) {
+      const dateKey = getTodayDateKey();
+      userProfile = getUserProfile();
+      ws.send(JSON.stringify({
+        type: 'JOIN',
+        roomId: discordRoomId,
+        dateKey,
+        visibleUserId: discordUserId,
+        profile: userProfile,
+        guildId: discordGuildId,
+        language: currentLanguage,
+      }));
+    }
   } else {
     // Practice mode — start fresh for new language
     const targetWords = currentLanguage === 'ko'
