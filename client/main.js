@@ -1187,6 +1187,22 @@ function setupKeyboardListeners() {
   }
 }
 
+// ========== QWERTY → 두벌식 (Dubeolsik) MAPPING ==========
+// Maps physical QWERTY keys to Korean jamo so users can type Korean
+// without switching their OS keyboard layout.
+const QWERTY_TO_JAMO = {
+  // Lowercase (unshifted)
+  'q': 'ㅂ', 'w': 'ㅈ', 'e': 'ㄷ', 'r': 'ㄱ', 't': 'ㅅ',
+  'y': 'ㅛ', 'u': 'ㅕ', 'i': 'ㅑ', 'o': 'ㅐ', 'p': 'ㅔ',
+  'a': 'ㅁ', 's': 'ㄴ', 'd': 'ㅇ', 'f': 'ㄹ', 'g': 'ㅎ',
+  'h': 'ㅗ', 'j': 'ㅓ', 'k': 'ㅏ', 'l': 'ㅣ',
+  'z': 'ㅋ', 'x': 'ㅌ', 'c': 'ㅊ', 'v': 'ㅍ',
+  'b': 'ㅠ', 'n': 'ㅜ', 'm': 'ㅡ',
+  // Uppercase (shifted) — double consonants + compound vowels
+  'Q': 'ㅃ', 'W': 'ㅉ', 'E': 'ㄸ', 'R': 'ㄲ', 'T': 'ㅆ',
+  'O': 'ㅒ', 'P': 'ㅖ',
+};
+
 // Physical keyboard listener
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1196,9 +1212,15 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === 'Backspace') {
     handleKeyPress('BACKSPACE');
   } else if (currentLanguage === 'ko') {
-    // Accept jamo characters from physical Korean keyboard
     const ch = e.key;
-    if (ch.length === 1 && (isConsonant(ch) || isVowel(ch))) {
+    // First, try QWERTY → jamo mapping (for users typing on English keyboard)
+    const mapped = QWERTY_TO_JAMO[ch];
+    if (mapped) {
+      e.preventDefault();
+      handleKeyPress(mapped);
+    }
+    // Also accept raw jamo from a physical Korean keyboard / OS IME
+    else if (ch.length === 1 && (isConsonant(ch) || isVowel(ch))) {
       e.preventDefault();
       handleKeyPress(ch);
     }
