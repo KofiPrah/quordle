@@ -6,6 +6,8 @@ import type {
     RoomState,
     LeaderboardEntry,
     GameMode,
+    Language,
+    UserProfile,
 } from './protocol.js';
 import {
     makeRoomKey,
@@ -115,7 +117,9 @@ export function createPlayerState(
     dateKey: DateKey,
     visibleUserId: VisibleUserId,
     gameState: GameState,
-    mode: GameMode = 'daily'
+    mode: GameMode = 'daily',
+    language: Language = 'en',
+    profile: UserProfile = { displayName: visibleUserId, avatarUrl: null },
 ): PlayerState {
     const now = Date.now();
     return {
@@ -123,6 +127,8 @@ export function createPlayerState(
         roomId,
         dateKey,
         mode,
+        language,
+        profile,
         gameState,
         createdAt: now,
         updatedAt: now,

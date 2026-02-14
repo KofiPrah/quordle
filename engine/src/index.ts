@@ -1,10 +1,14 @@
 // Types
 export type {
+    Language,
     LetterResult,
     GuessResult,
+    JamoHint,
+    KoSyllableResult,
     BoardState,
     GameState,
     GameConfig,
+    LanguageConfig,
 } from './types.js';
 
 // Game logic
@@ -18,10 +22,31 @@ export {
     computeKeyboardMap,
 } from './game.js';
 
-// Evaluator
+// Evaluator (English)
 export { evaluateGuess, isSolved } from './evaluator.js';
 
-// Words and validation
+// Evaluator (Korean)
+export { evaluateGuessKo, evaluateGuessSyllable } from './evaluatorKo.js';
+
+// Jamo utilities
+export {
+    decomposeHangul,
+    composeHangul,
+    isHangulSyllable,
+    isJamo,
+    isConsonant,
+    isVowel,
+    extractJamo,
+    canBeOnset,
+    canBeCoda,
+    splitCompoundCoda,
+    combineCodas,
+    ONSETS,
+    VOWELS,
+    CODAS,
+} from './jamo.js';
+
+// Words and validation (English — backward compat)
 export {
     WORD_LIST,
     GUESS_WORDS,
@@ -31,3 +56,14 @@ export {
     getRandomWords,
     getQuordleWords,
 } from './words.js';
+
+// Language config
+export {
+    getLanguageConfig,
+    isValidGuessForLanguage,
+    isValidWordForLanguage,
+    getQuordleWordsForLanguage,
+} from './languageConfig.js';
+
+// Daily
+export { getDailyTargets } from './daily.js';

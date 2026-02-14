@@ -972,3 +972,139 @@ button:focus-visible {
     gap: clamp(2px, 0.4vw, 5px);
   }
 }
+
+/* ========== KOREAN LANGUAGE MODE ========== */
+
+/* Game header with language toggle */
+.game-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  grid-area: header;
+}
+
+.game-header .game-title {
+  grid-area: unset;
+}
+
+/* Language toggle buttons */
+.lang-toggle {
+  display: flex;
+  gap: 0.25rem;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.lang-btn {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #888;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+  white-space: nowrap;
+}
+
+.lang-btn:hover {
+  color: #ccc;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.lang-btn-active {
+  background: #5865f2;
+  color: #fff;
+}
+
+.lang-btn-active:hover {
+  background: #4752c4;
+  color: #fff;
+}
+
+/* Korean font for tiles, keyboard, and answer words */
+.lang-ko {
+  font-family: 'Noto Sans KR', Inter, system-ui, sans-serif;
+}
+
+.lang-ko .tile {
+  font-size: clamp(0.85rem, 2.2vw, 1.3rem);
+  text-transform: none;
+}
+
+.lang-ko .row-condensed .tile {
+  font-size: clamp(0.55rem, 1.4vw, 0.9rem);
+}
+
+.lang-ko .key {
+  font-family: 'Noto Sans KR', Inter, system-ui, sans-serif;
+  font-size: clamp(0.85rem, 2.2vw, 1.1rem);
+}
+
+.lang-ko .answer-word {
+  font-family: 'Noto Sans KR', monospace;
+  letter-spacing: 0.15em;
+}
+
+/* Jamo hint dots (sub-syllable feedback for Korean) */
+.jamo-hints {
+  display: flex;
+  justify-content: center;
+  gap: 2px;
+  margin-top: 1px;
+  min-height: 6px;
+}
+
+.jamo-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #555;
+}
+
+.jamo-dot-correct {
+  background: #22c55e;
+}
+
+.jamo-dot-present {
+  background: #eab308;
+}
+
+.jamo-dot-absent {
+  background: #4b5563;
+}
+
+/* Tile with jamo hints needs slightly more height */
+.tile-with-jamo {
+  flex-direction: column;
+  height: calc(var(--tile) + 8px);
+  padding-bottom: 2px;
+}
+
+.row-condensed .tile-with-jamo {
+  height: calc(var(--tile-condensed) + 6px);
+}
+
+/* Korean keyboard: shift row for doubled consonants */
+.ko-shift-row {
+  display: flex;
+  justify-content: center;
+  gap: clamp(3px, 0.5vw, 6px);
+}
+
+.key-shift {
+  min-width: clamp(38px, 10vw, 50px);
+  font-size: clamp(0.7rem, 1.8vw, 0.9rem);
+  background: #3a3a3a;
+}
+
+.key-shift:hover {
+  background: #4a4a4a;
+}
+
+.key-shift.active {
+  background: #5865f2;
+}

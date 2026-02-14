@@ -1,8 +1,10 @@
-import type { BoardState, GameConfig, GameState, LetterResult } from './types.js';
+import type { BoardState, GameConfig, GameState, LetterResult, Language } from './types.js';
 import { evaluateGuess, isSolved } from './evaluator.js';
+import { evaluateGuessKo, evaluateGuessSyllable } from './evaluatorKo.js';
+import { getLanguageConfig } from './languageConfig.js';
+import { decomposeHangul, isHangulSyllable } from './jamo.js';
 
 const DEFAULT_MAX_GUESSES = 9;
-const WORD_LENGTH = 5;
 
 /**
  * Creates an initial board state for a single word
@@ -21,7 +23,7 @@ function createBoardState(targetWord: string): BoardState {
  * Creates a new Quordle game state
  */
 export function createGame(config: GameConfig): GameState {
-    const { targetWords, maxGuesses = DEFAULT_MAX_GUESSES } = config;
+    const { targetWords, maxGuesses = DEFAULT_MAX_GUESSES, language = 'en' } = config;
 
     return {
         boards: [
@@ -35,19 +37,21 @@ export function createGame(config: GameConfig): GameState {
         maxGuesses,
         gameOver: false,
         won: false,
+        language,
     };
 }
 
 /**
  * Validates a guess before submission
  */
-export function validateGuess(guess: string): { valid: boolean; error?: string } {
-    if (guess.length !== WORD_LENGTH) {
-        return { valid: false, error: `Guess must be ${WORD_LENGTH} letters` };
+export function validateGuess(guess: string, language: Language = 'en'): { valid: boolean; error?: string } {
+    const config = getLanguageConfig(language);
+    if (guess.length !== config.wordLength) {
+        return { valid: false, error: `Guess must be ${config.wordLength} ${language === 'ko' ? 'syllables' : 'letters'}` };
     }
 
-    if (!/^[a-zA-Z]+$/.test(guess)) {
-        return { valid: false, error: 'Guess must contain only letters' };
+    if (!config.validateCharRegex.test(guess)) {
+        return { valid: false, error: language === 'ko' ? 'Guess must contain only Korean syllables' : 'Guess must contain only letters' };
     }
 
     return { valid: true };
@@ -62,32 +66,53 @@ export function submitGuess(state: GameState, guess: string): GameState {
         return state;
     }
 
-    const validation = validateGuess(guess);
+    const language = state.language || 'en';
+    const validation = validateGuess(guess, language);
     if (!validation.valid) {
         return state;
     }
 
-    const normalizedGuess = guess.toLowerCase();
+    const normalizedGuess = language === 'ko' ? guess : guess.toLowerCase();
     const newBoards = state.boards.map((board) => {
         if (board.solved) {
             // Board already solved, just add the guess for display
+            const prevResult = board.results[board.results.length - 1];
+            const prevKoResult = board.koResults?.[board.koResults.length - 1];
             return {
                 ...board,
                 guesses: [...board.guesses, normalizedGuess],
-                results: [...board.results, board.results[board.results.length - 1]], // Repeat last result
+                results: [...board.results, prevResult], // Repeat last result
+                ...(language === 'ko' && prevKoResult ? {
+                    koResults: [...(board.koResults || []), prevKoResult],
+                } : {}),
             };
         }
 
-        const result = evaluateGuess(normalizedGuess, board.targetWord);
-        const solved = isSolved(result);
-
-        return {
-            ...board,
-            guesses: [...board.guesses, normalizedGuess],
-            results: [...board.results, result],
-            solved,
-            solvedOnGuess: solved ? state.guessCount + 1 : null,
-        };
+        if (language === 'ko') {
+            // Korean: use syllable-level evaluator for main results, plus jamo hints
+            const syllableResult = evaluateGuessSyllable(normalizedGuess, board.targetWord);
+            const koResult = evaluateGuessKo(normalizedGuess, board.targetWord);
+            const solved = isSolved(syllableResult);
+            return {
+                ...board,
+                guesses: [...board.guesses, normalizedGuess],
+                results: [...board.results, syllableResult],
+                koResults: [...(board.koResults || []), koResult],
+                solved,
+                solvedOnGuess: solved ? state.guessCount + 1 : null,
+            };
+        } else {
+            // English: use standard evaluator
+            const result = evaluateGuess(normalizedGuess, board.targetWord);
+            const solved = isSolved(result);
+            return {
+                ...board,
+                guesses: [...board.guesses, normalizedGuess],
+                results: [...board.results, result],
+                solved,
+                solvedOnGuess: solved ? state.guessCount + 1 : null,
+            };
+        }
     }) as [BoardState, BoardState, BoardState, BoardState];
 
     const newGuessCount = state.guessCount + 1;
@@ -113,7 +138,16 @@ export function setCurrentGuess(state: GameState, guess: string): GameState {
         return state;
     }
 
-    const limited = guess.slice(0, WORD_LENGTH).toLowerCase().replace(/[^a-z]/g, '');
+    const language = state.language || 'en';
+    const config = getLanguageConfig(language);
+    let limited: string;
+
+    if (language === 'ko') {
+        // Korean: allow composed Hangul syllables, limit to wordLength syllable blocks
+        limited = guess.replace(config.filterCharRegex, '').slice(0, config.wordLength);
+    } else {
+        limited = guess.slice(0, config.wordLength).toLowerCase().replace(config.filterCharRegex, '');
+    }
 
     return {
         ...state,
@@ -146,6 +180,7 @@ export function getSolvedCount(state: GameState): number {
  */
 export function computeKeyboardMap(state: GameState): Record<string, LetterResult> {
     const statuses: Record<string, LetterResult> = {};
+    const language = state.language || 'en';
 
     for (const board of state.boards) {
         for (let guessIdx = 0; guessIdx < board.guesses.length; guessIdx++) {
@@ -159,17 +194,40 @@ export function computeKeyboardMap(state: GameState): Record<string, LetterResul
             const guess = board.guesses[guessIdx];
             const result = board.results[guessIdx];
 
-            for (let letterIdx = 0; letterIdx < guess.length; letterIdx++) {
-                const letter = guess[letterIdx];
-                const tileStatus = result[letterIdx];
+            if (language === 'ko') {
+                // Korean: key by individual jamo extracted from syllable blocks
+                for (let syllIdx = 0; syllIdx < guess.length; syllIdx++) {
+                    const ch = guess[syllIdx];
+                    const tileStatus = result[syllIdx];
+                    if (isHangulSyllable(ch)) {
+                        const d = decomposeHangul(ch);
+                        const jamos = [d.onset, d.vowel];
+                        if (d.coda) jamos.push(d.coda);
+                        for (const jamo of jamos) {
+                            if (tileStatus === 'correct') {
+                                statuses[jamo] = 'correct';
+                            } else if (tileStatus === 'present' && statuses[jamo] !== 'correct') {
+                                statuses[jamo] = 'present';
+                            } else if (tileStatus === 'absent' && !statuses[jamo]) {
+                                statuses[jamo] = 'absent';
+                            }
+                        }
+                    }
+                }
+            } else {
+                // English: key by letter character
+                for (let letterIdx = 0; letterIdx < guess.length; letterIdx++) {
+                    const letter = guess[letterIdx];
+                    const tileStatus = result[letterIdx];
 
-                // Apply max precedence: correct > present > absent
-                if (tileStatus === 'correct') {
-                    statuses[letter] = 'correct';
-                } else if (tileStatus === 'present' && statuses[letter] !== 'correct') {
-                    statuses[letter] = 'present';
-                } else if (tileStatus === 'absent' && !statuses[letter]) {
-                    statuses[letter] = 'absent';
+                    // Apply max precedence: correct > present > absent
+                    if (tileStatus === 'correct') {
+                        statuses[letter] = 'correct';
+                    } else if (tileStatus === 'present' && statuses[letter] !== 'correct') {
+                        statuses[letter] = 'present';
+                    } else if (tileStatus === 'absent' && !statuses[letter]) {
+                        statuses[letter] = 'absent';
+                    }
                 }
             }
         }

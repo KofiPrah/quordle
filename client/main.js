@@ -15,6 +15,8 @@ import { createGame, submitGuess, setCurrentGuess, validateGuess, getSolvedCount
 import { evaluateGuess } from "../engine/src/evaluator.ts";
 import { getQuordleWords, isValidGuess } from "../engine/src/words.ts";
 import { getDailyTargets } from "../engine/src/daily.ts";
+import { getLanguageConfig, isValidGuessForLanguage, getQuordleWordsForLanguage } from "../engine/src/languageConfig.ts";
+import { isHangulSyllable, decomposeHangul, composeHangul, isConsonant, isVowel, canBeOnset, canBeCoda, combineCodas, splitCompoundCoda, ONSETS, VOWELS } from "../engine/src/jamo.ts";
 
 // Will eventually store the authenticated user's access_token
 let auth;
@@ -22,6 +24,7 @@ let gameState;
 let guessError = null; // Error message for invalid guesses
 let gameMode = "daily"; // "daily" | "practice"
 let uiScreen = "game"; // "game" | "results"
+let currentLanguage = localStorage.getItem('quordle_language') || 'en'; // 'en' | 'ko'
 
 // Discord context for server-side persistence
 let discordUserId = null;
@@ -198,15 +201,16 @@ function showToast(message, duration = 3000) {
 }
 
 // ========== LOCAL STORAGE PERSISTENCE ==========
-const STORAGE_KEY_DAILY = "quordle_daily";
-const STORAGE_KEY_PRACTICE = "quordle_practice";
+function getStorageKeyDaily() { return `quordle_daily_${currentLanguage}`; }
+function getStorageKeyPractice() { return `quordle_practice_${currentLanguage}`; }
 
 function saveGameState() {
   try {
-    const key = gameMode === "daily" ? STORAGE_KEY_DAILY : STORAGE_KEY_PRACTICE;
+    const key = gameMode === "daily" ? getStorageKeyDaily() : getStorageKeyPractice();
     const payload = {
       gameState,
       gameMode,
+      language: currentLanguage,
       dateKey: gameMode === "daily" ? getTodayDateKey() : null,
     };
     localStorage.setItem(key, JSON.stringify(payload));
@@ -218,7 +222,7 @@ function saveGameState() {
 function loadGameState() {
   // Try to restore daily first
   try {
-    const dailyData = localStorage.getItem(STORAGE_KEY_DAILY);
+    const dailyData = localStorage.getItem(getStorageKeyDaily());
     if (dailyData) {
       const parsed = JSON.parse(dailyData);
       const todayKey = getTodayDateKey();
@@ -236,7 +240,7 @@ function loadGameState() {
 
 function loadPracticeState() {
   try {
-    const practiceData = localStorage.getItem(STORAGE_KEY_PRACTICE);
+    const practiceData = localStorage.getItem(getStorageKeyPractice());
     if (practiceData) {
       const parsed = JSON.parse(practiceData);
       if (parsed.gameState) {
@@ -253,8 +257,8 @@ function loadPracticeState() {
 
 function clearGameStorage() {
   try {
-    localStorage.removeItem(STORAGE_KEY_DAILY);
-    localStorage.removeItem(STORAGE_KEY_PRACTICE);
+    localStorage.removeItem(getStorageKeyDaily());
+    localStorage.removeItem(getStorageKeyPractice());
   } catch (e) {
     console.warn("Failed to clear game storage:", e);
   }
@@ -484,8 +488,8 @@ async function initDailyFromServer() {
   // No valid save, start fresh daily
   gameMode = "daily";
   const dateKey = getTodayDateKey();
-  const targetWords = getDailyTargets(dateKey);
-  gameState = createGame({ targetWords });
+  const targetWords = getDailyTargets(dateKey, currentLanguage);
+  gameState = createGame({ targetWords, language: currentLanguage });
   guessError = null;
   saveGameState();
   renderApp();
@@ -506,6 +510,7 @@ const renderGame = renderApp;
 function renderGameScreen() {
   const app = document.querySelector('#app');
   const solvedCount = gameState.boards.filter(b => b.solved).length;
+  const lang = currentLanguage;
 
   // Minimal status bar when game is over (full results on Results screen)
   const statusHtml = gameState.gameOver
@@ -517,9 +522,20 @@ function renderGameScreen() {
         Solved: ${solvedCount}/4 | Guesses: ${gameState.guessCount}/${gameState.maxGuesses}
       </div>`;
 
+  // Language toggle
+  const langToggle = `
+    <div class="lang-toggle">
+      <button class="lang-btn ${lang === 'en' ? 'lang-btn-active' : ''}" data-lang="en">🇺🇸 EN</button>
+      <button class="lang-btn ${lang === 'ko' ? 'lang-btn-active' : ''}" data-lang="ko">🇰🇷 KO</button>
+    </div>
+  `;
+
   app.innerHTML = `
-    <div class="quordle-container">
-      <h1 class="game-title">Quordle${gameMode === 'practice' ? ' <span class="mode-badge">Practice</span>' : ''}</h1>
+    <div class="quordle-container ${lang === 'ko' ? 'lang-ko' : 'lang-en'}">
+      <div class="game-header">
+        <h1 class="game-title">Quordle${gameMode === 'practice' ? ' <span class="mode-badge">Practice</span>' : ''}</h1>
+        ${langToggle}
+      </div>
       
       ${statusHtml}
       
@@ -535,7 +551,7 @@ function renderGameScreen() {
       
       ${renderCurrentGuess()}
       
-      ${renderKeyboard()}
+      ${currentLanguage === 'ko' ? renderKoreanKeyboard() : renderKeyboard()}
     </div>
   `;
 }
@@ -546,16 +562,25 @@ function renderResultsScreen() {
   const icon = gameState.won ? '🎉' : '💔';
   const message = gameState.won ? 'You Won!' : 'Game Over';
   const bannerClass = gameState.won ? 'results-won' : 'results-lost';
+  const lang = currentLanguage;
+
+  // Language toggle
+  const langToggle = `
+    <div class="lang-toggle">
+      <button class="lang-btn ${lang === 'en' ? 'lang-btn-active' : ''}" data-lang="en">🇺🇸 EN</button>
+      <button class="lang-btn ${lang === 'ko' ? 'lang-btn-active' : ''}" data-lang="ko">🇰🇷 KO</button>
+    </div>
+  `;
 
   // Answers reveal (always show on results)
   const answersHtml = `
     <div class="answers-reveal">
-      <div class="answers-title">Answers</div>
+      <div class="answers-title">${lang === 'ko' ? '정답' : 'Answers'}</div>
       <div class="answers-list">
         ${gameState.boards.map((board, i) => `
           <div class="answer-item ${board.solved ? 'answer-solved' : 'answer-missed'}">
             <span class="answer-number">#${i + 1}</span>
-            <span class="answer-word">${board.targetWord.toUpperCase()}</span>
+            <span class="answer-word">${lang === 'ko' ? board.targetWord : board.targetWord.toUpperCase()}</span>
             ${board.solved ? '<span class="answer-status">✓</span>' : '<span class="answer-status">✗</span>'}
           </div>
         `).join('')}
@@ -571,8 +596,11 @@ function renderResultsScreen() {
     : '';
 
   app.innerHTML = `
-    <div class="quordle-container">
-      <h1 class="game-title">Quordle${gameMode === 'practice' ? ' <span class="mode-badge">Practice</span>' : ''}</h1>
+    <div class="quordle-container ${lang === 'ko' ? 'lang-ko' : 'lang-en'}">
+      <div class="game-header">
+        <h1 class="game-title">Quordle${gameMode === 'practice' ? ' <span class="mode-badge">Practice</span>' : ''}</h1>
+        ${langToggle}
+      </div>
       
       <div class="results-screen">
         <div class="results-card ${bannerClass}">
@@ -596,7 +624,7 @@ function renderResultsScreen() {
           ${gameMode === 'daily' ? practiceBtn : newPracticeBtn}
         </div>
 
-        ${gameMode === 'daily' ? '<div class="results-footer">Come back tomorrow for the next Daily</div>' : ''}
+        ${gameMode === 'daily' ? `<div class="results-footer">${lang === 'ko' ? '내일 다시 도전하세요!' : 'Come back tomorrow for the next Daily'}</div>` : ''}
       </div>
       
       <div class="keyboard-spacer"></div>
@@ -662,6 +690,9 @@ function renderLeaderboardContent() {
 function renderBoard(board, index) {
   const rows = [];
   const currentGuessIndex = gameState.guessCount; // 0-based index for current input row
+  const lang = currentLanguage;
+  const wordLen = getLanguageConfig(lang).wordLength;
+  const emptyStr = ' '.repeat(wordLen);
 
   // Determine solve row index (0-based) if board is solved
   const solveRowIndex = board.solvedOnGuess !== null ? board.solvedOnGuess - 1 : null;
@@ -670,21 +701,26 @@ function renderBoard(board, index) {
   for (let i = 0; i < board.guesses.length; i++) {
     // If board is solved and this row is after the solve, show condensed empty
     if (solveRowIndex !== null && i > solveRowIndex) {
-      rows.push(renderRow('     ', null, false, true)); // condensed empty
+      rows.push(renderRow(emptyStr, null, false, true, null)); // condensed empty
     } else {
-      rows.push(renderRow(board.guesses[i], board.results[i], false, true)); // condensed with result
+      const koResult = (lang === 'ko' && board.koResults) ? board.koResults[i] : null;
+      rows.push(renderRow(board.guesses[i], board.results[i], false, true, koResult)); // condensed with result
     }
   }
 
   // Current guess row (full tiles, only if board not solved and game not over)
   if (!board.solved && !gameState.gameOver && board.guesses.length < gameState.maxGuesses) {
-    rows.push(renderRow(gameState.currentGuess.padEnd(5, ' '), null, true, false)); // full tiles
+    // Pad current guess for display
+    const displayGuess = lang === 'ko'
+      ? (gameState.currentGuess + compositionDisplayChar()).padEnd(wordLen, ' ')
+      : gameState.currentGuess.padEnd(wordLen, ' ');
+    rows.push(renderRow(displayGuess, null, true, false, null)); // full tiles
   }
 
   // Empty rows after current (condensed empty)
   const emptyRowStart = board.solved || gameState.gameOver ? board.guesses.length : board.guesses.length + 1;
   for (let i = emptyRowStart; i < gameState.maxGuesses; i++) {
-    rows.push(renderRow('     ', null, false, true)); // condensed empty
+    rows.push(renderRow(emptyStr, null, false, true, null)); // condensed empty
   }
 
   const solvedClass = board.solved ? 'board-solved' : '';
@@ -696,16 +732,37 @@ function renderBoard(board, index) {
   `;
 }
 
-function renderRow(guess, result, isCurrent = false, isCondensed = false) {
-  const letters = guess.split('');
-  const tiles = letters.map((letter, i) => {
+function renderRow(guess, result, isCurrent = false, isCondensed = false, koResult = null) {
+  const lang = currentLanguage;
+  const wordLen = getLanguageConfig(lang).wordLength;
+  // For Korean, split by character. For English, split by letter.
+  const chars = lang === 'ko' ? Array.from(guess.padEnd(wordLen, ' ')) : guess.padEnd(wordLen, ' ').split('');
+
+  const tiles = chars.map((ch, i) => {
     let tileClass = 'tile';
     if (result) {
       tileClass += ` tile-${result[i]}`;
-    } else if (isCurrent && letter.trim()) {
+    } else if (isCurrent && ch.trim()) {
       tileClass += ' tile-filled';
     }
-    return `<div class="${tileClass}">${letter.trim().toUpperCase()}</div>`;
+
+    // Display character
+    const display = lang === 'ko' ? ch.trim() : ch.trim().toUpperCase();
+
+    // Jamo hint indicators (Korean only, for non-correct scored tiles)
+    let jamoHintHtml = '';
+    if (lang === 'ko' && koResult && koResult[i] && koResult[i].jamoHints && result && result[i] !== 'correct') {
+      const h = koResult[i].jamoHints;
+      jamoHintHtml = `
+        <div class="jamo-hints">
+          <span class="jamo-dot jamo-${h.onset}" title="초성"></span>
+          <span class="jamo-dot jamo-${h.vowel}" title="중성"></span>
+          ${h.coda !== null ? `<span class="jamo-dot jamo-${h.coda}" title="종성"></span>` : ''}
+        </div>
+      `;
+    }
+
+    return `<div class="${tileClass}">${display}${jamoHintHtml}</div>`;
   }).join('');
 
   const rowClass = isCondensed ? 'row row-condensed' : 'row';
@@ -714,12 +771,16 @@ function renderRow(guess, result, isCurrent = false, isCondensed = false) {
 
 function renderCurrentGuess() {
   if (gameState.gameOver) return '';
+  const lang = currentLanguage;
+  const displayText = lang === 'ko'
+    ? (gameState.currentGuess + compositionDisplayChar()) || '—'
+    : (gameState.currentGuess.toUpperCase() || '—');
   const errorHtml = guessError
     ? `<div class="guess-error">${guessError}</div>`
     : '';
   return `
     <div class="current-guess-display">
-      Current: <span class="guess-text">${gameState.currentGuess.toUpperCase() || '—'}</span>
+      Current: <span class="guess-text">${displayText}</span>
       ${errorHtml}
     </div>
   `;
@@ -749,35 +810,273 @@ function renderKeyboard() {
   `;
 }
 
+// ========== KOREAN KEYBOARD (두벌식) ==========
+function renderKoreanKeyboard() {
+  // Standard 2-set (두벌식) layout:
+  // Row 1: ㅂ ㅈ ㄷ ㄱ ㅅ ㅛ ㅕ ㅑ ㅐ ㅔ
+  // Row 2: ㅁ ㄴ ㅇ ㄹ ㅎ ㅗ ㅓ ㅏ ㅣ
+  // Row 3: ENTER ㅋ ㅌ ㅊ ㅍ ㅠ ㅜ ㅡ ⌫
+  // Row 4 (doubles): ㅃ ㅉ ㄸ ㄲ ㅆ (toggled via ⇧)
+  const rows = [
+    ['ㅂ', 'ㅈ', 'ㄷ', 'ㄱ', 'ㅅ', 'ㅛ', 'ㅕ', 'ㅑ', 'ㅐ', 'ㅔ'],
+    ['ㅁ', 'ㄴ', 'ㅇ', 'ㄹ', 'ㅎ', 'ㅗ', 'ㅓ', 'ㅏ', 'ㅣ'],
+    ['ENTER', 'ㅋ', 'ㅌ', 'ㅊ', 'ㅍ', 'ㅠ', 'ㅜ', 'ㅡ', '⌫'],
+    ['⇧', 'ㅃ', 'ㅉ', 'ㄸ', 'ㄲ', 'ㅆ'],
+  ];
+
+  const jamoStates = computeKeyboardMap(gameState);
+
+  return `
+    <div class="keyboard keyboard-ko">
+      ${rows.map(row => `
+        <div class="keyboard-row">
+          ${row.map(key => {
+    const stateClass = jamoStates[key] ? `key-${jamoStates[key]}` : '';
+    const widthClass = (key === 'ENTER' || key === '⌫' || key === '⇧') ? 'key-wide' : '';
+    return `<button class="key ${stateClass} ${widthClass}" data-key="${key}">${key}</button>`;
+  }).join('')}
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+// ========== HANGUL IME COMPOSITION ENGINE ==========
+// State machine for composing Korean syllables from jamo input.
+// Composition phases:
+//   0: empty
+//   1: onset only (ㄱ displayed as standalone jamo)
+//   2: onset + vowel → composed syllable (가)
+//   3: onset + vowel + coda → composed syllable with coda (간)
+//   4: onset + vowel + compound coda → composed syllable with compound coda (갈ㅂ→값)
+
+let imeState = {
+  onset: null,    // onset jamo or null
+  vowel: null,    // vowel jamo or null
+  coda: null,     // coda jamo or null (single or compound)
+};
+
+function imeReset() {
+  imeState = { onset: null, vowel: null, coda: null };
+}
+
+/** Get the currently composing character for display (partial syllable or jamo) */
+function compositionDisplayChar() {
+  if (!imeState.onset && !imeState.vowel) return '';
+  if (imeState.onset && !imeState.vowel) return imeState.onset; // standalone jamo
+  if (imeState.onset && imeState.vowel) {
+    return composeHangul(imeState.onset, imeState.vowel, imeState.coda);
+  }
+  return '';
+}
+
+/** Finalize the current composition: append the composed syllable to currentGuess */
+function imeFinalize() {
+  const ch = compositionDisplayChar();
+  imeReset();
+  return ch;
+}
+
+/**
+ * Process a jamo keypress through the IME.
+ * Returns { committed: string, display: string } where:
+ *   - committed: fully composed syllable(s) to append to gameState.currentGuess
+ *   - display: the current in-progress composition character (for display only)
+ */
+function imeProcessJamo(jamo) {
+  const wordLen = getLanguageConfig('ko').wordLength;
+  const currentLen = gameState.currentGuess.length;
+
+  if (isConsonant(jamo)) {
+    if (!imeState.onset && !imeState.vowel) {
+      // Phase 0 → 1: Start with onset
+      imeState.onset = jamo;
+      return { committed: '', display: jamo };
+    }
+    if (imeState.onset && !imeState.vowel) {
+      // Phase 1: Already have onset, new consonant replaces it
+      // (or if doubles entry like ㄱ→ㄲ, handled by shift key sending ㄲ directly)
+      const fin = imeState.onset;
+      imeReset();
+      imeState.onset = jamo;
+      // If we're at word limit, don't commit the previous standalone onset
+      if (currentLen >= wordLen) {
+        imeReset();
+        return { committed: '', display: '' };
+      }
+      return { committed: fin, display: jamo };
+    }
+    if (imeState.onset && imeState.vowel && !imeState.coda) {
+      // Phase 2 → 3: Add coda
+      if (canBeCoda(jamo)) {
+        imeState.coda = jamo;
+        return { committed: '', display: compositionDisplayChar() };
+      } else {
+        // Not a valid coda — finalize current, start new onset
+        const committed = imeFinalize();
+        imeState.onset = jamo;
+        return { committed, display: jamo };
+      }
+    }
+    if (imeState.onset && imeState.vowel && imeState.coda) {
+      // Phase 3 → try compound coda, or finalize + new onset
+      const compound = combineCodas(imeState.coda, jamo);
+      if (compound && canBeCoda(compound)) {
+        imeState.coda = compound;
+        return { committed: '', display: compositionDisplayChar() };
+      }
+      // Can't combine — finalize current syllable, start new one
+      const committed = imeFinalize();
+      imeState.onset = jamo;
+      return { committed, display: jamo };
+    }
+  }
+
+  if (isVowel(jamo)) {
+    if (!imeState.onset && !imeState.vowel) {
+      // Phase 0: vowel without onset — Korean syllables need onset, use ㅇ (silent)
+      imeState.onset = 'ㅇ';
+      imeState.vowel = jamo;
+      return { committed: '', display: compositionDisplayChar() };
+    }
+    if (imeState.onset && !imeState.vowel) {
+      // Phase 1 → 2: onset + vowel = composed syllable
+      imeState.vowel = jamo;
+      return { committed: '', display: compositionDisplayChar() };
+    }
+    if (imeState.onset && imeState.vowel && !imeState.coda) {
+      // Phase 2: Already have onset+vowel, new vowel — finalize and start new
+      const committed = imeFinalize();
+      imeState.onset = 'ㅇ';
+      imeState.vowel = jamo;
+      return { committed, display: compositionDisplayChar() };
+    }
+    if (imeState.onset && imeState.vowel && imeState.coda) {
+      // Phase 3: onset+vowel+coda, new vowel → coda becomes next onset
+      // Check for compound coda split first
+      const split = splitCompoundCoda(imeState.coda);
+      let nextOnset;
+      if (split) {
+        // Compound coda: first part stays, second becomes next onset
+        imeState.coda = split[0];
+        nextOnset = split[1];
+      } else {
+        // Simple coda moves to become next onset
+        nextOnset = imeState.coda;
+        imeState.coda = null;
+      }
+      const committed = imeFinalize();
+      imeState.onset = canBeOnset(nextOnset) ? nextOnset : 'ㅇ';
+      imeState.vowel = jamo;
+      return { committed, display: compositionDisplayChar() };
+    }
+  }
+
+  return { committed: '', display: '' };
+}
+
+/** Handle backspace in Korean IME mode */
+function imeBackspace() {
+  if (imeState.coda) {
+    // Remove coda (or shrink compound coda)
+    const split = splitCompoundCoda(imeState.coda);
+    if (split) {
+      imeState.coda = split[0]; // Keep first part of compound
+    } else {
+      imeState.coda = null;
+    }
+    return { modified: true, display: compositionDisplayChar() };
+  }
+  if (imeState.vowel) {
+    imeState.vowel = null;
+    return { modified: true, display: imeState.onset || '' };
+  }
+  if (imeState.onset) {
+    imeState.onset = null;
+    return { modified: true, display: '' };
+  }
+  return { modified: false, display: '' };
+}
+
 function handleKeyPress(key) {
   if (gameState.gameOver) return;
 
-  if (key === 'ENTER') {
-    if (gameState.currentGuess.length === 5) {
-      // Validate against word list using engine's isValidGuess
-      if (!isValidGuess(gameState.currentGuess)) {
-        guessError = 'Not in word list';
-        renderApp();
-        setupKeyboardListeners();
-        return;
+  const lang = currentLanguage;
+  const wordLen = getLanguageConfig(lang).wordLength;
+
+  if (lang === 'ko') {
+    // ===== Korean mode =====
+    if (key === 'ENTER') {
+      // Finalize any IME composition first
+      const finalChar = imeFinalize();
+      if (finalChar) {
+        gameState = setCurrentGuess(gameState, gameState.currentGuess + finalChar);
       }
-      const validation = validateGuess(gameState.currentGuess);
-      if (validation.valid) {
-        guessError = null;
-        submitGuessWithPersistence(gameState.currentGuess);
+      if (gameState.currentGuess.length === wordLen) {
+        if (!isValidGuessForLanguage(gameState.currentGuess, 'ko')) {
+          guessError = '단어 목록에 없습니다';
+          renderApp();
+          setupKeyboardListeners();
+          return;
+        }
+        const validation = validateGuess(gameState.currentGuess, 'ko');
+        if (validation.valid) {
+          guessError = null;
+          submitGuessWithPersistence(gameState.currentGuess);
+        }
       }
-    }
-  } else if (key === '⌫' || key === 'BACKSPACE') {
-    guessError = null; // Clear error on input change
-    gameState = setCurrentGuess(gameState, gameState.currentGuess.slice(0, -1));
-    renderApp();
-    setupKeyboardListeners();
-  } else if (key.length === 1 && /^[A-Z]$/i.test(key)) {
-    if (gameState.currentGuess.length < 5) {
-      guessError = null; // Clear error on input change
-      gameState = setCurrentGuess(gameState, gameState.currentGuess + key.toLowerCase());
+    } else if (key === '⌫' || key === 'BACKSPACE') {
+      guessError = null;
+      const result = imeBackspace();
+      if (!result.modified) {
+        // IME was empty, remove last committed syllable
+        gameState = setCurrentGuess(gameState, gameState.currentGuess.slice(0, -1));
+      }
       renderApp();
       setupKeyboardListeners();
+    } else if (key === '⇧') {
+      // Shift key — handled by the double consonant keys directly
+      return;
+    } else if (isConsonant(key) || isVowel(key)) {
+      // Check if we'd exceed word length with committed chars
+      const { committed, display } = imeProcessJamo(key);
+      if (committed) {
+        if (gameState.currentGuess.length < wordLen) {
+          gameState = setCurrentGuess(gameState, gameState.currentGuess + committed);
+        }
+      }
+      guessError = null;
+      renderApp();
+      setupKeyboardListeners();
+    }
+  } else {
+    // ===== English mode =====
+    if (key === 'ENTER') {
+      if (gameState.currentGuess.length === wordLen) {
+        if (!isValidGuess(gameState.currentGuess)) {
+          guessError = 'Not in word list';
+          renderApp();
+          setupKeyboardListeners();
+          return;
+        }
+        const validation = validateGuess(gameState.currentGuess);
+        if (validation.valid) {
+          guessError = null;
+          submitGuessWithPersistence(gameState.currentGuess);
+        }
+      }
+    } else if (key === '⌫' || key === 'BACKSPACE') {
+      guessError = null;
+      gameState = setCurrentGuess(gameState, gameState.currentGuess.slice(0, -1));
+      renderApp();
+      setupKeyboardListeners();
+    } else if (key.length === 1 && /^[A-Z]$/i.test(key)) {
+      if (gameState.currentGuess.length < wordLen) {
+        guessError = null;
+        gameState = setCurrentGuess(gameState, gameState.currentGuess + key.toLowerCase());
+        renderApp();
+        setupKeyboardListeners();
+      }
     }
   }
 }
@@ -824,6 +1123,16 @@ function setupKeyboardListeners() {
   document.querySelectorAll('.key').forEach(btn => {
     btn.addEventListener('click', () => {
       handleKeyPress(btn.dataset.key);
+    });
+  });
+
+  // Language toggle buttons
+  document.querySelectorAll('.lang-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const newLang = btn.dataset.lang;
+      if (newLang && newLang !== currentLanguage) {
+        switchLanguage(newLang);
+      }
     });
   });
 
@@ -874,6 +1183,13 @@ document.addEventListener('keydown', (e) => {
     handleKeyPress('ENTER');
   } else if (e.key === 'Backspace') {
     handleKeyPress('BACKSPACE');
+  } else if (currentLanguage === 'ko') {
+    // Accept jamo characters from physical Korean keyboard
+    const ch = e.key;
+    if (ch.length === 1 && (isConsonant(ch) || isVowel(ch))) {
+      e.preventDefault();
+      handleKeyPress(ch);
+    }
   } else if (/^[a-zA-Z]$/.test(e.key)) {
     handleKeyPress(e.key.toUpperCase());
   }
@@ -884,8 +1200,11 @@ function startPracticeGame() {
   gameMode = "practice";
   uiScreen = "game";
   initialStateApplied = false;
-  const targetWords = getQuordleWords();
-  gameState = createGame({ targetWords });
+  imeReset();
+  const targetWords = currentLanguage === 'ko'
+    ? getQuordleWordsForLanguage('ko')
+    : getQuordleWords();
+  gameState = createGame({ targetWords, language: currentLanguage });
   guessError = null;
   saveGameState(); // Save new practice game
   renderApp();
@@ -899,12 +1218,52 @@ function resetGame() {
   gameMode = "daily";
   uiScreen = "game";
   initialStateApplied = false;
+  imeReset();
   const dateKey = getTodayDateKey();
-  const targetWords = getDailyTargets(dateKey);
-  gameState = createGame({ targetWords });
+  const targetWords = getDailyTargets(dateKey, currentLanguage);
+  gameState = createGame({ targetWords, language: currentLanguage });
   guessError = null;
   saveGameState();
   renderApp();
   setupKeyboardListeners();
 }
 window.resetGame = resetGame; // Keep for backwards compat
+
+// Switch language mode
+function switchLanguage(newLang) {
+  if (newLang === currentLanguage) return;
+
+  // Save current game before switching
+  saveGameState();
+
+  // Switch language
+  currentLanguage = newLang;
+  localStorage.setItem('quordle_language', newLang);
+  imeReset();
+  guessError = null;
+
+  // Try to load existing game for the new language
+  if (gameMode === 'daily') {
+    if (!loadGameState()) {
+      // No saved daily for this language, create new one
+      const dateKey = getTodayDateKey();
+      const targetWords = getDailyTargets(dateKey, currentLanguage);
+      gameState = createGame({ targetWords, language: currentLanguage });
+      saveGameState();
+    }
+    if (gameState.gameOver) uiScreen = "results";
+    else uiScreen = "game";
+  } else {
+    // Practice mode — start fresh for new language
+    const targetWords = currentLanguage === 'ko'
+      ? getQuordleWordsForLanguage('ko')
+      : getQuordleWords();
+    gameState = createGame({ targetWords, language: currentLanguage });
+    uiScreen = "game";
+    saveGameState();
+  }
+
+  renderApp();
+  setupKeyboardListeners();
+}
+window.switchLanguage = switchLanguage;

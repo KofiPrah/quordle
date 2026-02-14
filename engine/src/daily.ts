@@ -1,4 +1,5 @@
-import { WORD_LIST } from './words.js';
+import { getLanguageConfig } from './languageConfig.js';
+import type { Language } from './types.js';
 
 /**
  * Converts a dateKey string to a numeric seed.
@@ -76,15 +77,19 @@ function selectDistinctIndices(length: number, count: number, random: () => numb
  * // Always returns the same 4 words for '2026-02-07'
  * ```
  */
-export function getDailyTargets(dateKey: string): [string, string, string, string] {
-    const seed = dateKeyToSeed(dateKey);
+export function getDailyTargets(dateKey: string, language: Language = 'en'): [string, string, string, string] {
+    // Append language suffix to seed input so each language gets unique daily words.
+    // English omits suffix for backward compatibility (same dailies as before).
+    const seedInput = language === 'en' ? dateKey : `${dateKey}:${language}`;
+    const seed = dateKeyToSeed(seedInput);
     const random = mulberry32(seed);
-    const indices = selectDistinctIndices(WORD_LIST.length, 4, random);
+    const wordList = getLanguageConfig(language).answerWords;
+    const indices = selectDistinctIndices(wordList.length, 4, random);
 
     return [
-        WORD_LIST[indices[0]],
-        WORD_LIST[indices[1]],
-        WORD_LIST[indices[2]],
-        WORD_LIST[indices[3]],
+        wordList[indices[0]],
+        wordList[indices[1]],
+        wordList[indices[2]],
+        wordList[indices[3]],
     ];
 }

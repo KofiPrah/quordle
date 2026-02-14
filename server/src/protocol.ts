@@ -4,6 +4,9 @@ import type { BoardState, GameState } from '@quordle/engine';
 // Keys
 // ============================================================================
 
+/** Supported languages */
+export type Language = 'en' | 'ko';
+
 /** Unique identifier for a Discord Activity instance (room) */
 export type RoomId = string;
 
@@ -18,12 +21,14 @@ export interface PlayerKey {
     roomId: RoomId;
     dateKey: DateKey;
     visibleUserId: VisibleUserId;
+    language?: Language;
 }
 
 /** Composite key for room state storage */
 export interface RoomKey {
     roomId: RoomId;
     dateKey: DateKey;
+    language?: Language;
 }
 
 // ============================================================================
@@ -32,6 +37,9 @@ export interface RoomKey {
 
 /** Game mode - daily only for now */
 export type GameMode = 'daily';
+
+/** Default language */
+export const DEFAULT_LANGUAGE: Language = 'en';
 
 /** User profile display info */
 export interface UserProfile {
@@ -56,6 +64,7 @@ export interface PlayerState {
     roomId: RoomId;
     dateKey: DateKey;
     mode: GameMode;
+    language: Language;
     profile: UserProfile;
     gameState: GameState;
     createdAt: number;         // timestamp
@@ -82,6 +91,7 @@ export interface JoinMessage {
     dateKey: DateKey;
     visibleUserId: VisibleUserId;
     profile: UserProfile;
+    language?: Language;
 }
 
 export interface GuessMessage {
@@ -90,6 +100,7 @@ export interface GuessMessage {
     dateKey: DateKey;
     visibleUserId: VisibleUserId;
     guess: string;
+    language?: Language;
 }
 
 export interface LeaveMessage {
@@ -284,6 +295,7 @@ export function toLeaderboardEntry(player: PlayerState): LeaderboardEntry {
     const solvedCount = gs.boards.filter((b: BoardState) => b.solved).length;
     return {
         visibleUserId: player.visibleUserId,
+        profile: player.profile,
         solvedCount,
         guessCount: gs.guessCount,
         gameOver: gs.gameOver,
