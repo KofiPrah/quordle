@@ -56,6 +56,12 @@ export function Keyboard({ onKey, onEnter, onBackspace, letterStates, boardStatu
     const getKeyStyle = (key: string) => {
         if (key === 'enter' || key === 'backspace') return defaultStyle;
         const state = letterStates?.get(key);
+        if (state === 'absent') {
+            const bs = boardStatuses?.[key];
+            if (bs && bs.every(s => s === 'absent')) {
+                return 'bg-[#155E75] text-white';
+            }
+        }
         return state ? stateStyles[state] : defaultStyle;
     };
 
