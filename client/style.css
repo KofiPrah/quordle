@@ -692,6 +692,10 @@ button:focus-visible {
   text-align: left;
 }
 
+.leaderboard+.leaderboard {
+  margin-top: 1rem;
+}
+
 .leaderboard-title {
   margin: 0 0 0.75rem 0;
   font-size: 1rem;

@@ -36,7 +36,8 @@ let userProfile = { displayName: 'Player', avatarUrl: null }; // Current user's 
 // WebSocket connection
 let ws = null;
 let wsReconnectTimeout = null;
-let leaderboard = []; // Current room leaderboard
+let leaderboardEn = []; // English room leaderboard
+let leaderboardKo = []; // Korean room leaderboard
 let initialStateApplied = false; // Prevents double init from WS STATE + REST join race
 
 // ========== WEBSOCKET CONNECTION ==========
@@ -135,13 +136,22 @@ function handleServerMessage(message) {
       break;
 
     case 'LEADERBOARD':
-      // Update leaderboard
+      // Update leaderboard for the appropriate language
       if (window.DEBUG_LEADERBOARD) {
         console.log('[LEADERBOARD DEBUG] Received message:', message);
         console.log('[LEADERBOARD DEBUG] message.leaderboard:', message.leaderboard);
         console.log('[LEADERBOARD DEBUG] leaderboard length:', message.leaderboard?.length);
       }
-      leaderboard = message.leaderboard || [];
+      {
+        const lbLang = message.language || currentLanguage;
+        if (lbLang === 'ko') {
+          leaderboardKo = message.leaderboard || [];
+        } else {
+          leaderboardEn = message.leaderboard || [];
+        }
+      }
+      // Also fetch the other language's leaderboard via REST
+      fetchOtherLanguageLeaderboard();
       renderLeaderboard();
       break;
 
@@ -641,17 +651,29 @@ function renderLeaderboard() {
   }
 }
 
-function renderLeaderboardContent() {
-  if (!leaderboard || leaderboard.length === 0) {
-    return `
-      <div class="leaderboard">
-        <h3 class="leaderboard-title">Leaderboard</h3>
-        <div class="leaderboard-empty">No players yet</div>
-      </div>
-    `;
-  }
+/** Fetch the other language's leaderboard via REST API */
+function fetchOtherLanguageLeaderboard() {
+  if (!discordRoomId) return;
+  const dateKey = getTodayDateKey();
+  const otherLang = currentLanguage === 'ko' ? 'en' : 'ko';
+  const url = `${API_URL}/api/room/${discordRoomId}/${dateKey}/leaderboard?language=${otherLang}`;
+  fetch(url)
+    .then(res => res.ok ? res.json() : null)
+    .then(data => {
+      if (data && data.leaderboard) {
+        if (otherLang === 'ko') {
+          leaderboardKo = data.leaderboard;
+        } else {
+          leaderboardEn = data.leaderboard;
+        }
+        renderLeaderboard();
+      }
+    })
+    .catch(err => console.warn('Failed to fetch other language leaderboard:', err));
+}
 
-  const entries = leaderboard.map((entry, i) => {
+function renderLeaderboardEntries(leaderboard) {
+  return leaderboard.map((entry, i) => {
     const isYou = entry.visibleUserId === discordUserId;
     const statusIcon = entry.gameOver ? (entry.won ? '🏆' : '💀') : '🎮';
     const youBadge = isYou ? ' <span class="you-badge">(You)</span>' : '';
@@ -677,13 +699,34 @@ function renderLeaderboardContent() {
       </div>
     `;
   }).join('');
+}
 
+function renderSingleLeaderboard(title, leaderboard) {
+  if (!leaderboard || leaderboard.length === 0) {
+    return `
+      <div class="leaderboard">
+        <h3 class="leaderboard-title">${title}</h3>
+        <div class="leaderboard-empty">No players yet</div>
+      </div>
+    `;
+  }
   return `
     <div class="leaderboard">
-      <h3 class="leaderboard-title">Leaderboard</h3>
-      ${entries}
+      <h3 class="leaderboard-title">${title}</h3>
+      ${renderLeaderboardEntries(leaderboard)}
     </div>
   `;
+}
+
+function renderLeaderboardContent() {
+  const enHtml = renderSingleLeaderboard('🇺🇸 English Leaderboard', leaderboardEn);
+  const koHtml = renderSingleLeaderboard('🇰🇷 Korean Leaderboard', leaderboardKo);
+
+  // Show the current language's leaderboard first
+  if (currentLanguage === 'ko') {
+    return koHtml + enHtml;
+  }
+  return enHtml + koHtml;
 }
 
 // renderBanner removed — game status is now inline in renderGameScreen,

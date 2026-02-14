@@ -449,7 +449,7 @@ wss.on("connection", (ws, req) => {
             console.log('[LEADERBOARD DEBUG] leaderboard payload length:', room.leaderboard.length);
             console.log('[LEADERBOARD DEBUG] leaderboard:', JSON.stringify(room.leaderboard));
           }
-          broadcastToRoomByKey(currentRoomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard });
+          broadcastToRoomByKey(currentRoomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard, language });
 
           // Broadcast ROOM_EVENT join to everyone in room (including joiner)
           broadcastToRoomByKey(currentRoomKey, { type: 'ROOM_EVENT', event: 'join', visibleUserId });
@@ -569,7 +569,7 @@ wss.on("connection", (ws, req) => {
             console.log('[LEADERBOARD DEBUG] GUESS - room.players.size:', room.players.size);
             console.log('[LEADERBOARD DEBUG] GUESS - leaderboard payload length:', room.leaderboard.length);
           }
-          broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard });
+          broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard, language });
           break;
         }
 
@@ -944,12 +944,13 @@ app.post("/api/activity/leave", async (req, res) => {
 // GET leaderboard for a room (rebuilds from Redis if cache empty)
 app.get("/api/room/:roomId/:dateKey/leaderboard", async (req, res) => {
   const { roomId, dateKey } = req.params;
+  const language = (req.query.language === 'ko') ? 'ko' : 'en';
   if (!roomId || !dateKey) {
     return res.status(400).json({ error: "roomId and dateKey required" });
   }
 
   // Try to rebuild from Redis if room not in memory
-  const room = await getOrCreateRoomAsync(roomId, dateKey);
+  const room = await getOrCreateRoomAsync(roomId, dateKey, language);
   res.json({ leaderboard: room.leaderboard });
 });
 

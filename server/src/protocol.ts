@@ -128,6 +128,7 @@ export interface StateMessage {
 export interface LeaderboardMessage {
     type: 'LEADERBOARD';
     leaderboard: LeaderboardEntry[];
+    language?: Language;
 }
 
 export interface RoomEventMessage {
@@ -347,8 +348,8 @@ export function createStateMessage(playerState: PlayerState): StateMessage {
 }
 
 /** Create leaderboard message helper */
-export function createLeaderboardMessage(leaderboard: LeaderboardEntry[]): LeaderboardMessage {
-    return { type: 'LEADERBOARD', leaderboard };
+export function createLeaderboardMessage(leaderboard: LeaderboardEntry[], language?: Language): LeaderboardMessage {
+    return { type: 'LEADERBOARD', leaderboard, language };
 }
 
 /** Create room event message helper */
