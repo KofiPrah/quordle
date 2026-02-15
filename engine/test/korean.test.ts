@@ -345,7 +345,7 @@ describe('Korean game: createGame', () => {
         expect(game.boards).toHaveLength(4);
         expect(game.language).toBe('ko');
         expect(game.boards[0].targetWord).toBe('바다');
-        expect(game.maxGuesses).toBe(7);
+        expect(game.maxGuesses).toBe(9);
     });
 });
 

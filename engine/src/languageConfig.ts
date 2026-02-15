@@ -32,7 +32,7 @@ const EN_CONFIG: LanguageConfig = {
 // ========== KOREAN CONFIG ==========
 const KO_CONFIG: LanguageConfig = {
     wordLength: 2,
-    maxGuesses: 7,
+    maxGuesses: 9,
     validateCharRegex: /^[\uAC00-\uD7A3]+$/,      // composed Hangul syllables only
     filterCharRegex: /[^\uAC00-\uD7A3]/g,           // strip non-Hangul
     answerWords: KO_ANSWER_WORDS,
