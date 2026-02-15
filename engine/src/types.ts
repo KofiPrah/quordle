@@ -59,6 +59,7 @@ export type BoardLetterStatuses = [LetterResult | null, LetterResult | null, Let
 /** Language-specific configuration */
 export interface LanguageConfig {
     wordLength: number;
+    maxGuesses: number;
     validateCharRegex: RegExp;
     filterCharRegex: RegExp;
     answerWords: readonly string[];

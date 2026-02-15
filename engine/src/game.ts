@@ -23,7 +23,9 @@ function createBoardState(targetWord: string): BoardState {
  * Creates a new Quordle game state
  */
 export function createGame(config: GameConfig): GameState {
-    const { targetWords, maxGuesses = DEFAULT_MAX_GUESSES, language = 'en' } = config;
+    const language = config.language ?? 'en';
+    const langConfig = getLanguageConfig(language);
+    const { targetWords, maxGuesses = langConfig.maxGuesses ?? DEFAULT_MAX_GUESSES } = config;
 
     return {
         boards: [

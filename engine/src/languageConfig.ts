@@ -7,12 +7,12 @@ import koGuessWordsText from './koGuessWords.txt?raw';
 const KO_ANSWER_WORDS: readonly string[] = koWordsText
     .split('\n')
     .map(w => w.trim())
-    .filter(w => w.length === 3 && /^[\uAC00-\uD7A3]+$/.test(w));
+    .filter(w => w.length === 2 && /^[\uAC00-\uD7A3]+$/.test(w));
 
 const KO_GUESS_WORDS_LIST: readonly string[] = koGuessWordsText
     .split('\n')
     .map(w => w.trim())
-    .filter(w => w.length === 3 && /^[\uAC00-\uD7A3]+$/.test(w));
+    .filter(w => w.length === 2 && /^[\uAC00-\uD7A3]+$/.test(w));
 
 const koGuessWordsSet = new Set([...KO_GUESS_WORDS_LIST, ...KO_ANSWER_WORDS]);
 const koAnswerWordsSet = new Set(KO_ANSWER_WORDS);
@@ -22,6 +22,7 @@ const enGuessWordsSet = new Set([...GUESS_WORDS, ...WORD_LIST]);
 
 const EN_CONFIG: LanguageConfig = {
     wordLength: 5,
+    maxGuesses: 9,
     validateCharRegex: /^[a-zA-Z]+$/,
     filterCharRegex: /[^a-z]/g,
     answerWords: WORD_LIST,
@@ -30,7 +31,8 @@ const EN_CONFIG: LanguageConfig = {
 
 // ========== KOREAN CONFIG ==========
 const KO_CONFIG: LanguageConfig = {
-    wordLength: 3,
+    wordLength: 2,
+    maxGuesses: 7,
     validateCharRegex: /^[\uAC00-\uD7A3]+$/,      // composed Hangul syllables only
     filterCharRegex: /[^\uAC00-\uD7A3]/g,           // strip non-Hangul
     answerWords: KO_ANSWER_WORDS,
