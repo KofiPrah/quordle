@@ -375,6 +375,7 @@ wss.on("connection", (ws, req) => {
   let currentVisibleUserId = null;
   let currentRoomId = null;
   let currentDateKey = null;
+  let currentLanguage = 'en';
 
   ws.on("message", async (data) => {
     try {
@@ -396,10 +397,29 @@ wss.on("connection", (ws, req) => {
             avatarUrl: (profile?.avatarUrl || null),
           };
 
-          currentRoomKey = makeRoomKey(roomId, dateKey, language);
+          const newRoomKey = makeRoomKey(roomId, dateKey, language);
+
+          // If switching languages (or rooms), remove ws from old room's connection set
+          if (currentRoomKey && currentRoomKey !== newRoomKey) {
+            const oldConns = wsConnectionsByRoom.get(currentRoomKey);
+            if (oldConns) {
+              for (const client of oldConns) {
+                if (client.ws === ws) {
+                  oldConns.delete(client);
+                  break;
+                }
+              }
+              if (oldConns.size === 0) {
+                wsConnectionsByRoom.delete(currentRoomKey);
+              }
+            }
+          }
+
+          currentRoomKey = newRoomKey;
           currentVisibleUserId = visibleUserId;
           currentRoomId = roomId;
           currentDateKey = dateKey;
+          currentLanguage = language;
 
           // Track guildId for this room (needed for announcements)
           if (guildId) {
@@ -582,11 +602,12 @@ wss.on("connection", (ws, req) => {
         }
 
         case "LEAVE": {
-          const { roomId, dateKey, visibleUserId } = message;
+          const { roomId, dateKey, visibleUserId, language: leaveLang } = message;
           if (!roomId || !dateKey || !visibleUserId) {
             return;
           }
-          handleLeave(roomId, dateKey, visibleUserId, ws);
+          const leaveLanguage = (leaveLang === 'ko') ? 'ko' : currentLanguage;
+          handleLeave(roomId, dateKey, visibleUserId, ws, leaveLanguage);
           break;
         }
 
@@ -646,7 +667,7 @@ wss.on("connection", (ws, req) => {
   ws.on("close", () => {
     // Handle new protocol disconnect
     if (currentRoomKey && currentVisibleUserId) {
-      handleLeave(currentRoomId, currentDateKey, currentVisibleUserId, ws);
+      handleLeave(currentRoomId, currentDateKey, currentVisibleUserId, ws, currentLanguage);
     }
 
     // Handle legacy protocol disconnect
@@ -679,8 +700,8 @@ wss.on("connection", (ws, req) => {
 });
 
 /** Handle player leaving (LEAVE message or disconnect) */
-function handleLeave(roomId, dateKey, visibleUserId, ws) {
-  const roomKey = makeRoomKey(roomId, dateKey);
+function handleLeave(roomId, dateKey, visibleUserId, ws, language = 'en') {
+  const roomKey = makeRoomKey(roomId, dateKey, language);
   const connections = wsConnectionsByRoom.get(roomKey);
   if (connections) {
     for (const client of connections) {
@@ -705,7 +726,7 @@ function handleLeave(roomId, dateKey, visibleUserId, ws) {
       console.log('[LEADERBOARD DEBUG] LEAVE - room.players.size:', room.players.size);
       console.log('[LEADERBOARD DEBUG] LEAVE - leaderboard payload length:', room.leaderboard.length);
     }
-    broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard });
+    broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard, language });
   }
 }
 
@@ -825,7 +846,7 @@ function getWordLengthForLanguage(language) {
 
 /** Get max guesses for a given language */
 function getMaxGuessesForLanguage(language) {
-  return language === 'ko' ? 7 : 9;
+  return language === 'ko' ? 9 : 9;
 }
 
 /** Validate guess format for a given language */
