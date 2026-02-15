@@ -939,7 +939,7 @@ function imeFinalize() {
  *   - committed: fully composed syllable(s) to append to gameState.currentGuess
  *   - display: the current in-progress composition character (for display only)
  */
-function imeProcessJamo(abjamo) {
+function imeProcessJamo(jamo) {
   const wordLen = getLanguageConfig('ko').wordLength;
   const currentLen = gameState.currentGuess.length;
 
