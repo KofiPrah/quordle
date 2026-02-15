@@ -277,6 +277,11 @@ const commands = [
             subcommand
                 .setName("daily")
                 .setDescription("Post today's Daily Quordle challenge to this channel")
+        )
+        .addSubcommand((subcommand) =>
+            subcommand
+                .setName("results")
+                .setDescription("Show today's Daily Quordle leaderboard results")
         ),
 ];
 
@@ -464,9 +469,10 @@ async function fetchLeaderboardForChannel(channelId, dateKey) {
     return entries;
 }
 
-function buildLeaderboardSummaryEmbed(dateKey, leaderboard) {
+function buildLeaderboardSummaryEmbed(dateKey, leaderboard, language = 'en') {
     const displayDate = formatDateForDisplay(dateKey);
     const rankEmojis = ["\uD83E\uDD47", "\uD83E\uDD48", "\uD83E\uDD49"]; // 🥇🥈🥉
+    const langLabel = language === 'ko' ? '🇰🇷 Korean' : '🇺🇸 English';
 
     let description = "";
     for (let i = 0; i < leaderboard.length; i++) {
@@ -481,7 +487,7 @@ function buildLeaderboardSummaryEmbed(dateKey, leaderboard) {
 
     return new EmbedBuilder()
         .setColor(0xf1c40f) // Gold
-        .setTitle(`\uD83D\uDCCA Daily Quordle Results — ${displayDate}`)
+        .setTitle(`\uD83D\uDCCA Daily Quordle Results — ${langLabel} — ${displayDate}`)
         .setDescription(description.trim())
         .addFields(
             { name: "Players", value: `${totalPlayers}`, inline: true },
@@ -510,12 +516,26 @@ async function announceLeaderboardSummaryToChannel(guildId, channelId, dateKey) 
             return;
         }
 
-        const embed = buildLeaderboardSummaryEmbed(dateKey, leaderboard);
         const components = [buildPlayButton()];
 
-        await channel.send({ embeds: [embed], components });
+        // Group entries by language and send a separate embed per language
+        const byLanguage = {};
+        for (const entry of leaderboard) {
+            const lang = entry.language || 'en';
+            if (!byLanguage[lang]) byLanguage[lang] = [];
+            byLanguage[lang].push(entry);
+        }
+
+        const embeds = [];
+        for (const lang of ['en', 'ko']) {
+            if (byLanguage[lang] && byLanguage[lang].length > 0) {
+                embeds.push(buildLeaderboardSummaryEmbed(dateKey, byLanguage[lang], lang));
+            }
+        }
+
+        await channel.send({ embeds, components });
         await markSummaryPosted(guildId, channelId, dateKey);
-        console.log(`[Bot] Posted leaderboard summary in ${guildId}/${channelId} for ${dateKey} (${leaderboard.length} players)`);
+        console.log(`[Bot] Posted leaderboard summary in ${guildId}/${channelId} for ${dateKey} (${leaderboard.length} players, ${embeds.length} language(s))`);
     } catch (err) {
         console.error(`[Bot] Failed to post leaderboard summary in ${channelId}:`, err.message);
         await markSummaryPosted(guildId, channelId, dateKey);
@@ -701,6 +721,56 @@ async function handleDailyCommand(interaction) {
     }
 }
 
+async function handleResultsCommand(interaction) {
+    const channelId = interaction.channelId;
+    const guildId = interaction.guildId;
+    const dateKey = getTodayDateKey();
+
+    if (!guildId) {
+        await interaction.reply({
+            content: "This command can only be used in a server.",
+            ephemeral: true,
+        });
+        return;
+    }
+
+    await interaction.deferReply();
+
+    try {
+        const leaderboard = await fetchLeaderboardForChannel(channelId, dateKey);
+        if (leaderboard.length === 0) {
+            await interaction.editReply({
+                content: "No one has played today's Daily Quordle yet! Use `/quordle play` to start.",
+            });
+            return;
+        }
+
+        // Group entries by language and build a separate embed per language
+        const byLanguage = {};
+        for (const entry of leaderboard) {
+            const lang = entry.language || 'en';
+            if (!byLanguage[lang]) byLanguage[lang] = [];
+            byLanguage[lang].push(entry);
+        }
+
+        const embeds = [];
+        for (const lang of ['en', 'ko']) {
+            if (byLanguage[lang] && byLanguage[lang].length > 0) {
+                embeds.push(buildLeaderboardSummaryEmbed(dateKey, byLanguage[lang], lang));
+            }
+        }
+
+        const components = [buildPlayButton()];
+        await interaction.editReply({ embeds, components });
+        console.log(`[Bot] /quordle results in ${guildId}/${channelId} for ${dateKey} (${leaderboard.length} players, ${embeds.length} language(s))`);
+    } catch (err) {
+        console.error("[Bot] Failed to handle results command:", err);
+        await interaction.editReply({
+            content: "Failed to fetch leaderboard results. Please try again.",
+        });
+    }
+}
+
 async function handlePlayButton(interaction) {
     // Launch the Activity directly - no new channel message
     try {
@@ -871,6 +941,8 @@ client.on("interactionCreate", async (interaction) => {
                     await interaction.launchActivity();
                 } else if (subcommand === "daily") {
                     await handleDailyCommand(interaction);
+                } else if (subcommand === "results") {
+                    await handleResultsCommand(interaction);
                 }
             }
         } else if (interaction.isButton()) {
