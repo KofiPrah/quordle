@@ -7,6 +7,7 @@ import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 import Redis from "ioredis";
+import { evaluateGuessKo } from "@quordle/engine";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -487,18 +488,24 @@ wss.on("connection", (ws, req) => {
           const oldGameState = playerState.gameState;
           const newBoards = oldGameState.boards.map((board) => {
             if (board.solved) {
+              const prevKoResult = board.koResults?.[board.koResults.length - 1];
               return {
                 ...board,
                 guesses: [...board.guesses, normalizedGuess],
                 results: [...board.results, board.results[board.results.length - 1] || []],
+                ...(language === 'ko' && prevKoResult ? {
+                  koResults: [...(board.koResults || []), prevKoResult],
+                } : {}),
               };
             }
             const result = evaluateGuess(normalizedGuess, board.targetWord);
             const solved = result.every(r => r === 'correct');
+            const koResult = language === 'ko' ? evaluateGuessKo(normalizedGuess, board.targetWord) : undefined;
             return {
               ...board,
               guesses: [...board.guesses, normalizedGuess],
               results: [...board.results, result],
+              ...(koResult ? { koResults: [...(board.koResults || []), koResult] } : {}),
               solved,
               solvedOnGuess: solved ? oldGameState.guessCount + 1 : board.solvedOnGuess,
             };
@@ -1208,20 +1215,26 @@ app.post("/api/game/guess", async (req, res) => {
     // Apply guess to all boards
     const newBoards = gameState.boards.map((board) => {
       if (board.solved) {
+        const prevKoResult = board.koResults?.[board.koResults.length - 1];
         return {
           ...board,
           guesses: [...board.guesses, normalizedGuess],
           results: [...board.results, board.results[board.results.length - 1]],
+          ...(language === 'ko' && prevKoResult ? {
+            koResults: [...(board.koResults || []), prevKoResult],
+          } : {}),
         };
       }
 
       const result = evaluateGuess(normalizedGuess, board.targetWord);
       const solved = result.every(r => r === 'correct');
+      const koResult = language === 'ko' ? evaluateGuessKo(normalizedGuess, board.targetWord) : undefined;
 
       return {
         ...board,
         guesses: [...board.guesses, normalizedGuess],
         results: [...board.results, result],
+        ...(koResult ? { koResults: [...(board.koResults || []), koResult] } : {}),
         solved,
         solvedOnGuess: solved ? gameState.guessCount + 1 : null,
       };
