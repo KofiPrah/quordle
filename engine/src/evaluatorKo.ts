@@ -48,111 +48,154 @@ export function evaluateGuessSyllable(guess: string, target: string): GuessResul
 }
 
 /**
- * Layer 2: For a single non-green syllable position, compute jamo-level hints.
- *
- * Improvements over basic syllable matching:
- * - Cross-position consonant matching: onset jamo can match target codas and
- *   vice versa, since they represent the same consonant letter.
- * - Compound coda decomposition: target compound codas (e.g. ㄺ = ㄹ+ㄱ) are
- *   broken into components so individual consonants can be detected.
- *   Guess compound codas are also decomposed for 'present' checking.
- */
-function computeJamoHints(
-    guessSyllable: string,
-    targetSyllable: string,
-    allTargetVowelSet: Set<string>,
-    allTargetConsonantSet: Set<string>,
-): JamoHint {
-    if (!isHangulSyllable(guessSyllable) || !isHangulSyllable(targetSyllable)) {
-        return { onset: 'absent', vowel: 'absent', coda: null };
-    }
-
-    const g = decomposeHangul(guessSyllable);
-    const t = decomposeHangul(targetSyllable);
-
-    // Check onset — same-position match is 'correct', any consonant match is 'present'
-    let onsetResult: LetterResult = 'absent';
-    if (g.onset === t.onset) {
-        onsetResult = 'correct';
-    } else if (allTargetConsonantSet.has(g.onset)) {
-        onsetResult = 'present';
-    }
-
-    // Check vowel — same-position match is 'correct', any vowel match is 'present'
-    let vowelResult: LetterResult = 'absent';
-    if (g.vowel === t.vowel) {
-        vowelResult = 'correct';
-    } else if (allTargetVowelSet.has(g.vowel)) {
-        vowelResult = 'present';
-    }
-
-    // Check coda — cross-position consonant matching + compound coda decomposition
-    let codaResult: LetterResult | null = null;
-    if (g.coda !== null || t.coda !== null) {
-        if (g.coda === null) {
-            codaResult = 'absent'; // guess has no coda but target does
-        } else if (g.coda === t.coda) {
-            codaResult = 'correct';
-        } else if (allTargetConsonantSet.has(g.coda)) {
-            codaResult = 'present';
-        } else {
-            // Decompose guess compound coda and check if any component matches
-            const split = splitCompoundCoda(g.coda);
-            if (split && (allTargetConsonantSet.has(split[0]) || allTargetConsonantSet.has(split[1]))) {
-                codaResult = 'present';
-            } else {
-                codaResult = 'absent';
-            }
-        }
-    }
-
-    return { onset: onsetResult, vowel: vowelResult, coda: codaResult };
-}
-
-/**
  * Full Korean evaluation: syllable-level results + jamo hints for non-green syllables.
+ *
+ * Uses a two-pass counting algorithm (mirroring the English evaluator) to prevent
+ * over-counting jamo. Each target jamo is counted, then consumed as green/yellow
+ * matches are assigned — so a single ㄱ in the target can only produce one dot.
+ *
+ * Cross-position consonant matching is preserved: onset jamo can match target codas
+ * and vice versa. Compound codas are decomposed into individual consonant components
+ * for both target counting and guess matching.
  */
 export function evaluateGuessKo(guess: string, target: string): KoSyllableResult[] {
     const syllableResults = evaluateGuessSyllable(guess, target);
 
-    // Build target jamo sets for cross-position 'present' checking.
-    // Consonant set includes onsets, codas, AND decomposed compound coda components.
-    const allTargetVowelSet = new Set<string>();
-    const allTargetConsonantSet = new Set<string>();
+    // Helpers for count maps
+    const inc = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) || 0) + 1);
+    const dec = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) || 0) - 1);
+    const has = (m: Map<string, number>, k: string) => (m.get(k) || 0) > 0;
+
+    // --- Build target jamo count maps ---
+    // Compound codas are decomposed into individual consonant components.
+    const consonantCounts = new Map<string, number>();
+    const vowelCounts = new Map<string, number>();
 
     for (const ch of target) {
         if (isHangulSyllable(ch)) {
             const d = decomposeHangul(ch);
-            allTargetConsonantSet.add(d.onset);
-            allTargetVowelSet.add(d.vowel);
+            inc(consonantCounts, d.onset);
+            inc(vowelCounts, d.vowel);
             if (d.coda) {
-                allTargetConsonantSet.add(d.coda);
-                // Decompose compound codas so individual components are matchable
                 const split = splitCompoundCoda(d.coda);
                 if (split) {
-                    allTargetConsonantSet.add(split[0]);
-                    allTargetConsonantSet.add(split[1]);
+                    inc(consonantCounts, split[0]);
+                    inc(consonantCounts, split[1]);
+                } else {
+                    inc(consonantCounts, d.coda);
                 }
             }
         }
     }
 
-    const results: KoSyllableResult[] = [];
+    // --- Pre-consume jamo from syllable-level green matches ---
+    // A fully-correct syllable uses up all its target jamo from the pools.
     for (let i = 0; i < guess.length; i++) {
-        if (syllableResults[i] === 'correct') {
-            // Green syllable — no jamo hints needed
-            results.push({ syllable: 'correct', jamoHints: null });
-        } else {
-            // Non-green — compute jamo-level hints with cross-position matching
-            const jamoHints = computeJamoHints(
-                guess[i],
-                target[i],
-                allTargetVowelSet,
-                allTargetConsonantSet,
-            );
-            results.push({ syllable: syllableResults[i], jamoHints });
+        if (syllableResults[i] === 'correct' && isHangulSyllable(target[i])) {
+            const d = decomposeHangul(target[i]);
+            dec(consonantCounts, d.onset);
+            dec(vowelCounts, d.vowel);
+            if (d.coda) {
+                const split = splitCompoundCoda(d.coda);
+                if (split) {
+                    dec(consonantCounts, split[0]);
+                    dec(consonantCounts, split[1]);
+                } else {
+                    dec(consonantCounts, d.coda);
+                }
+            }
         }
     }
 
-    return results;
+    // --- Initialise jamo hints for every position ---
+    const hints: (JamoHint | null)[] = [];
+    for (let i = 0; i < guess.length; i++) {
+        if (syllableResults[i] === 'correct') {
+            hints.push(null);
+        } else if (isHangulSyllable(guess[i]) && isHangulSyllable(target[i])) {
+            const g = decomposeHangul(guess[i]);
+            const t = decomposeHangul(target[i]);
+            hints.push({
+                onset: 'absent',
+                vowel: 'absent',
+                coda: (g.coda !== null || t.coda !== null) ? 'absent' : null,
+            });
+        } else {
+            hints.push({ onset: 'absent', vowel: 'absent', coda: null });
+        }
+    }
+
+    // --- Pass 1: green jamo (same-position match) — decrement counts ---
+    for (let i = 0; i < guess.length; i++) {
+        if (!hints[i] || !isHangulSyllable(guess[i]) || !isHangulSyllable(target[i])) continue;
+
+        const g = decomposeHangul(guess[i]);
+        const t = decomposeHangul(target[i]);
+        const h = hints[i]!;
+
+        if (g.onset === t.onset) {
+            h.onset = 'correct';
+            dec(consonantCounts, g.onset);
+        }
+        if (g.vowel === t.vowel) {
+            h.vowel = 'correct';
+            dec(vowelCounts, g.vowel);
+        }
+        if (g.coda !== null && t.coda !== null && g.coda === t.coda) {
+            h.coda = 'correct';
+            const split = splitCompoundCoda(g.coda);
+            if (split) {
+                dec(consonantCounts, split[0]);
+                dec(consonantCounts, split[1]);
+            } else {
+                dec(consonantCounts, g.coda);
+            }
+        }
+    }
+
+    // --- Pass 2: yellow jamo (cross-position match) — decrement counts ---
+    for (let i = 0; i < guess.length; i++) {
+        if (!hints[i] || !isHangulSyllable(guess[i])) continue;
+
+        const g = decomposeHangul(guess[i]);
+        const h = hints[i]!;
+
+        // Onset
+        if (h.onset !== 'correct' && has(consonantCounts, g.onset)) {
+            h.onset = 'present';
+            dec(consonantCounts, g.onset);
+        }
+
+        // Vowel
+        if (h.vowel !== 'correct' && has(vowelCounts, g.vowel)) {
+            h.vowel = 'present';
+            dec(vowelCounts, g.vowel);
+        }
+
+        // Coda
+        if (h.coda !== null && h.coda !== 'correct' && g.coda !== null) {
+            if (has(consonantCounts, g.coda)) {
+                h.coda = 'present';
+                dec(consonantCounts, g.coda);
+            } else {
+                // Decompose guess compound coda — check if any component matches
+                const split = splitCompoundCoda(g.coda);
+                if (split) {
+                    const has0 = has(consonantCounts, split[0]);
+                    const has1 = has(consonantCounts, split[1]);
+                    if (has0 || has1) {
+                        h.coda = 'present';
+                        if (has0) dec(consonantCounts, split[0]);
+                        if (has1) dec(consonantCounts, split[1]);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Build final results ---
+    return hints.map((h, i) => ({
+        syllable: syllableResults[i],
+        jamoHints: syllableResults[i] === 'correct' ? null : h,
+    }));
 }

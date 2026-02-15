@@ -284,6 +284,54 @@ describe('evaluateGuessKo', () => {
     });
 });
 
+describe('evaluateGuessKo: jamo count limiting (no over-counting)', () => {
+    it('limits duplicate consonant to one yellow (target=기사, guess=생각)', () => {
+        // target 기사: consonants {ㄱ:1, ㅅ:1}
+        // guess 생각: 생(ㅅ,ㅐ,ㅇ), 각(ㄱ,ㅏ,ㄱ)
+        // Only one ㄱ in target → only one ㄱ should be yellow
+        const results = evaluateGuessKo('생각', '기사');
+        // pos 1 (각): onset ㄱ → present (consumes the one ㄱ)
+        expect(results[1].jamoHints!.onset).toBe('present');
+        // pos 1 (각): coda ㄱ → absent (no more ㄱ remaining)
+        expect(results[1].jamoHints!.coda).toBe('absent');
+        // pos 0 (생): onset ㅅ → present (target has ㅅ)
+        expect(results[0].jamoHints!.onset).toBe('present');
+    });
+
+    it('green jamo consumes from pool (target=기사, guess=김치)', () => {
+        // target 기사: vowels {ㅣ:1, ㅏ:1}
+        // guess 김치: 김(ㄱ,ㅣ,ㅁ), 치(ㅊ,ㅣ,null)
+        // 김 onset ㄱ=ㄱ → correct; 김 vowel ㅣ=ㅣ → correct (green, consumes ㅣ)
+        // 치 vowel ㅣ → only 1 ㅣ in target, already consumed → absent
+        const results = evaluateGuessKo('김치', '기사');
+        expect(results[0].jamoHints!.onset).toBe('correct');
+        expect(results[0].jamoHints!.vowel).toBe('correct');
+        expect(results[1].jamoHints!.vowel).toBe('absent');
+    });
+
+    it('allows multiple yellows when target has multiple instances', () => {
+        // target 기각: 기(ㄱ,ㅣ,null), 각(ㄱ,ㅏ,ㄱ) → consonants {ㄱ:3}
+        // guess 국밥: 국(ㄱ,ㅜ,ㄱ), 밥(ㅂ,ㅏ,ㅂ)
+        // pos 0: onset ㄱ=ㄱ → correct. coda ㄱ vs null → present (plenty of ㄱ left)
+        // pos 1: onset ㅂ → absent. vowel ㅏ=ㅏ → correct.
+        const results = evaluateGuessKo('국밥', '기각');
+        expect(results[0].jamoHints!.onset).toBe('correct');
+        expect(results[0].jamoHints!.coda).toBe('present');
+        expect(results[1].jamoHints!.onset).toBe('absent');
+        expect(results[1].jamoHints!.vowel).toBe('correct');
+    });
+
+    it('syllable-level green consumes jamo from pool', () => {
+        // target 나무: 나(ㄴ,ㅏ,null), 무(ㅁ,ㅜ,null)
+        // guess 나방: 나=나 → syllable green (consumes ㄴ, ㅏ from pool)
+        // 방(ㅂ,ㅏ,ㅇ) vs 무: vowel ㅏ should be absent (already consumed)
+        const results = evaluateGuessKo('나방', '나무');
+        expect(results[0].syllable).toBe('correct');
+        expect(results[0].jamoHints).toBeNull();
+        expect(results[1].jamoHints!.vowel).toBe('absent');
+    });
+});
+
 // ============================================================================
 // Game engine (Korean mode)
 // ============================================================================
