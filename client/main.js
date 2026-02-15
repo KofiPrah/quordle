@@ -801,9 +801,9 @@ function renderRow(guess, result, isCurrent = false, isCondensed = false, koResu
       tileClass += ' tile-with-jamo';
       jamoHintHtml = `
         <div class="jamo-hints">
-          <span class="jamo-dot jamo-${h.onset}" title="초성"></span>
-          <span class="jamo-dot jamo-${h.vowel}" title="중성"></span>
-          ${h.coda !== null ? `<span class="jamo-dot jamo-${h.coda}" title="종성"></span>` : ''}
+          <span class="jamo-dot jamo-dot-${h.onset}" title="초성"></span>
+          <span class="jamo-dot jamo-dot-${h.vowel}" title="중성"></span>
+          ${h.coda !== null ? `<span class="jamo-dot jamo-dot-${h.coda}" title="종성"></span>` : ''}
         </div>
       `;
     }

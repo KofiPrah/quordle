@@ -547,12 +547,13 @@ wss.on("connection", (ws, req) => {
               guessCount: newGuessCount,
               solvedBoards: solvedCount,
               totalBoards: 4,
+              language,
               timestamp: Date.now(),
             });
             redis.publish('activity:events', finishEvent).catch(err => {
               console.error('[Activity] Failed to publish DAILY_FINISHED:', err.message);
             });
-            console.log(`[Activity] Published DAILY_FINISHED for ${visibleUserId} in ${roomId} (${allSolved ? 'won' : 'lost'})`);
+            console.log(`[Activity] Published DAILY_FINISHED for ${visibleUserId} in ${roomId} lang=${language} (${allSolved ? 'won' : 'lost'})`);
           }
 
           // Send updated STATE to player

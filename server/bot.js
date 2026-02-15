@@ -158,24 +158,24 @@ async function getActiveChannels() {
 // ========== COMPLETION DEDUP ==========
 // Key: dailyFinish:{guildId}:{channelId}:{dateKey}:{userId}
 
-function makeCompletionDedupeKey(guildId, channelId, dateKey, userId) {
-    return `dailyFinish:${guildId}:${channelId}:${dateKey}:${userId}`;
+function makeCompletionDedupeKey(guildId, channelId, dateKey, userId, language = 'en') {
+    return `dailyFinish:${guildId}:${channelId}:${dateKey}:${language}:${userId}`;
 }
 
-async function hasCompletionBeenPosted(guildId, channelId, dateKey, userId) {
+async function hasCompletionBeenPosted(guildId, channelId, dateKey, userId, language = 'en') {
     if (!redis) return false;
     try {
-        const val = await redis.get(makeCompletionDedupeKey(guildId, channelId, dateKey, userId));
+        const val = await redis.get(makeCompletionDedupeKey(guildId, channelId, dateKey, userId, language));
         return !!val;
     } catch (err) {
         return false;
     }
 }
 
-async function markCompletionPosted(guildId, channelId, dateKey, userId) {
+async function markCompletionPosted(guildId, channelId, dateKey, userId, language = 'en') {
     if (!redis) return;
     try {
-        await redis.setex(makeCompletionDedupeKey(guildId, channelId, dateKey, userId), DEDUP_TTL_SECONDS, "1");
+        await redis.setex(makeCompletionDedupeKey(guildId, channelId, dateKey, userId, language), DEDUP_TTL_SECONDS, "1");
     } catch (err) {
         console.error("[Bot] Failed to mark completion posted:", err.message);
     }
@@ -349,18 +349,20 @@ function buildLaunchButton() {
 // ========== COMPLETION ANNOUNCEMENT ==========
 
 function buildCompletionEmbed(event) {
-    const { displayName, avatarUrl, dateKey, won, guessCount, solvedBoards, totalBoards } = event;
+    const { displayName, avatarUrl, dateKey, won, guessCount, solvedBoards, totalBoards, language } = event;
+    const isKorean = language === 'ko';
     const resultEmoji = won ? "🏆" : "😔";
     const resultText = won ? "won" : "lost";
     const color = won ? 0x2ecc71 : 0xe74c3c; // green or red
+    const gameLabel = isKorean ? "Daily Quordle 🇰🇷" : "Daily Quordle";
 
     const embed = new EmbedBuilder()
         .setColor(color)
-        .setTitle(`${resultEmoji} Daily Quordle — ${dateKey}`)
-        .setDescription(`**${displayName}** ${resultText} today's Daily Quordle!`)
+        .setTitle(`${resultEmoji} ${gameLabel} — ${dateKey}`)
+        .setDescription(`**${displayName}** ${resultText} today's ${gameLabel}!`)
         .addFields(
-            { name: "Boards", value: `${solvedBoards}/${totalBoards}`, inline: true },
-            { name: "Guesses", value: `${guessCount}`, inline: true }
+            { name: isKorean ? "보드" : "Boards", value: `${solvedBoards}/${totalBoards}`, inline: true },
+            { name: isKorean ? "추측" : "Guesses", value: `${guessCount}`, inline: true }
         )
         .setTimestamp();
 
@@ -372,7 +374,8 @@ function buildCompletionEmbed(event) {
 }
 
 async function handleDailyFinished(event) {
-    const { guildId, channelId, dateKey, visibleUserId, displayName } = event;
+    const { guildId, channelId, dateKey, visibleUserId, displayName, language } = event;
+    const lang = language || 'en';
 
     if (!guildId || !channelId) {
         console.log(`[Bot] DAILY_FINISHED missing guildId/channelId, skipping announcement`);
@@ -382,10 +385,10 @@ async function handleDailyFinished(event) {
     // Track this channel as active (for daily reset broadcasts)
     await trackActiveChannel(guildId, channelId);
 
-    // Dedup check
-    const alreadyPosted = await hasCompletionBeenPosted(guildId, channelId, dateKey, visibleUserId);
+    // Dedup check (language-aware so en and ko completions are tracked separately)
+    const alreadyPosted = await hasCompletionBeenPosted(guildId, channelId, dateKey, visibleUserId, lang);
     if (alreadyPosted) {
-        console.log(`[Bot] Already posted completion for ${displayName} in ${channelId} on ${dateKey}`);
+        console.log(`[Bot] Already posted completion for ${displayName} in ${channelId} on ${dateKey} (${lang})`);
         return;
     }
 
@@ -400,8 +403,8 @@ async function handleDailyFinished(event) {
         const components = [buildPlayButton()];
 
         await channel.send({ embeds: [embed], components });
-        await markCompletionPosted(guildId, channelId, dateKey, visibleUserId);
-        console.log(`[Bot] Posted daily completion for ${displayName} in ${guildId}/${channelId}`);
+        await markCompletionPosted(guildId, channelId, dateKey, visibleUserId, lang);
+        console.log(`[Bot] Posted daily completion for ${displayName} in ${guildId}/${channelId} (${lang})`);
     } catch (err) {
         console.error(`[Bot] Failed to post completion:`, err.message);
     }
