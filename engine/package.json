@@ -8,6 +8,10 @@
         ".": {
             "import": "./dist/index.js",
             "types": "./dist/index.d.ts"
+        },
+        "./evaluatorKo": {
+            "import": "./dist/evaluatorKo.js",
+            "types": "./dist/evaluatorKo.d.ts"
         }
     },
     "scripts": {

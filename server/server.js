@@ -7,7 +7,7 @@ import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 import Redis from "ioredis";
-import { evaluateGuessKo } from "@quordle/engine";
+import { evaluateGuessKo } from "@quordle/engine/evaluatorKo";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
