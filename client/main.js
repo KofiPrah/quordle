@@ -519,19 +519,63 @@ function renderApp() {
 // Keep backward compat alias
 const renderGame = renderApp;
 
+function getCurrentGuessDisplayText() {
+  const lang = currentLanguage;
+  const display = lang === 'ko'
+    ? `${gameState.currentGuess}${compositionDisplayChar()}`
+    : gameState.currentGuess.toUpperCase();
+  return display || '-';
+}
+
+function renderResultsLinkButton() {
+  return `
+    <button class="results-link-btn" type="button" aria-label="View results" title="View results">
+      <span class="results-link-icon" aria-hidden="true">
+        <svg viewBox="0 0 16 16" focusable="false">
+          <rect x="2" y="13" width="12" height="1" rx="0.5" fill="currentColor"></rect>
+          <rect x="3" y="8" width="2.25" height="4.5" rx="1" fill="currentColor"></rect>
+          <rect x="6.875" y="5.5" width="2.25" height="7" rx="1" fill="currentColor"></rect>
+          <rect x="10.75" y="2.5" width="2.25" height="10" rx="1" fill="currentColor"></rect>
+        </svg>
+      </span>
+      <span class="results-link-label">Results</span>
+    </button>
+  `;
+}
+
 function renderGameScreen() {
   const app = document.querySelector('#app');
   const solvedCount = gameState.boards.filter(b => b.solved).length;
   const lang = currentLanguage;
+  const currentGuessDisplay = getCurrentGuessDisplayText();
+  const errorHtml = guessError ? `<div class="guess-error">${guessError}</div>` : '';
 
-  // Minimal status bar when game is over (full results on Results screen)
+  // Single compact status row for both active and finished games.
   const statusHtml = gameState.gameOver
-    ? `<div class="game-status game-status-done">
-        ${gameState.won ? '🎉' : '💔'} ${gameState.won ? 'Won' : 'Lost'} · ${solvedCount}/4 · ${gameState.guessCount} guesses
-        <button class="results-link-btn">View Results →</button>
+    ? `<div class="game-status-wrap">
+        <div class="game-status game-status-done">
+          <div class="game-status-main">
+            <span class="game-status-badge ${gameState.won ? 'game-status-badge-won' : 'game-status-badge-lost'}">${gameState.won ? 'Won' : 'Lost'}</span>
+            <div class="game-status-metrics">
+              <span class="game-stat-pill"><strong>${solvedCount}/4</strong><span>Solved</span></span>
+              <span class="game-stat-pill"><strong>${gameState.guessCount}</strong><span>Guesses</span></span>
+            </div>
+          </div>
+          ${renderResultsLinkButton()}
+        </div>
       </div>`
-    : `<div class="game-status">
-        Solved: ${solvedCount}/4 | Guesses: ${gameState.guessCount}/${gameState.maxGuesses}
+    : `<div class="game-status-wrap">
+        <div class="game-status game-status-live">
+          <div class="game-status-main">
+            <span class="game-status-label">Current</span>
+            <span class="guess-text">${currentGuessDisplay}</span>
+          </div>
+          <div class="game-status-metrics">
+            <span class="game-stat-pill"><strong>${solvedCount}/4</strong><span>Solved</span></span>
+            <span class="game-stat-pill"><strong>${gameState.guessCount}/${gameState.maxGuesses}</strong><span>Guesses</span></span>
+          </div>
+        </div>
+        ${errorHtml}
       </div>`;
 
   // Language toggle
@@ -560,9 +604,7 @@ function renderGameScreen() {
           ${renderLeaderboardContent()}
         </div>
       </div>
-      
-      ${renderCurrentGuess()}
-      
+
       ${currentLanguage === 'ko' ? renderKoreanKeyboard() : renderKeyboard()}
     </div>
   `;
@@ -571,7 +613,7 @@ function renderGameScreen() {
 function renderResultsScreen() {
   const app = document.querySelector('#app');
   const solvedCount = gameState.boards.filter(b => b.solved).length;
-  const icon = gameState.won ? '🎉' : '💔';
+  const icon = gameState.won ? 'Solved' : 'Finished';
   const message = gameState.won ? 'You Won!' : 'Game Over';
   const bannerClass = gameState.won ? 'results-won' : 'results-lost';
   const lang = currentLanguage;
@@ -675,7 +717,10 @@ function fetchOtherLanguageLeaderboard() {
 function renderLeaderboardEntries(leaderboard) {
   return leaderboard.map((entry, i) => {
     const isYou = entry.visibleUserId === discordUserId;
-    const statusIcon = entry.gameOver ? (entry.won ? '🏆' : '💀') : '🎮';
+    const statusLabel = entry.gameOver ? (entry.won ? 'Won' : 'Lost') : 'Playing';
+    const statusClass = entry.gameOver
+      ? (entry.won ? 'leaderboard-status-won' : 'leaderboard-status-lost')
+      : 'leaderboard-status-live';
     const youBadge = isYou ? ' <span class="you-badge">(You)</span>' : '';
 
     // Get display name and avatar from profile, with fallback to visibleUserId
@@ -689,7 +734,7 @@ function renderLeaderboardEntries(leaderboard) {
     return `
       <div class="leaderboard-entry ${isYou ? 'leaderboard-entry-you' : ''} ${entry.gameOver ? 'leaderboard-entry-done' : ''}">
         <span class="leaderboard-rank">#${i + 1}</span>
-        <span class="leaderboard-status">${statusIcon}</span>
+        <span class="leaderboard-status ${statusClass}" title="${statusLabel}" aria-label="${statusLabel}"></span>
         <div class="leaderboard-profile">
           ${avatarHtml}
           <span class="leaderboard-name">${displayName}${youBadge}</span>
@@ -719,8 +764,8 @@ function renderSingleLeaderboard(title, leaderboard) {
 }
 
 function renderLeaderboardContent() {
-  const enHtml = renderSingleLeaderboard('🇺🇸 English Leaderboard', leaderboardEn);
-  const koHtml = renderSingleLeaderboard('🇰🇷 Korean Leaderboard', leaderboardKo);
+  const enHtml = renderSingleLeaderboard('English Leaderboard', leaderboardEn);
+  const koHtml = renderSingleLeaderboard('Korean Leaderboard', leaderboardKo);
 
   // Show the current language's leaderboard first
   if (currentLanguage === 'ko') {
@@ -813,23 +858,6 @@ function renderRow(guess, result, isCurrent = false, isCondensed = false, koResu
 
   const rowClass = isCondensed ? 'row row-condensed' : 'row';
   return `<div class="${rowClass}">${tiles}</div>`;
-}
-
-function renderCurrentGuess() {
-  if (gameState.gameOver) return '';
-  const lang = currentLanguage;
-  const displayText = lang === 'ko'
-    ? (gameState.currentGuess + compositionDisplayChar()) || '—'
-    : (gameState.currentGuess.toUpperCase() || '—');
-  const errorHtml = guessError
-    ? `<div class="guess-error">${guessError}</div>`
-    : '';
-  return `
-    <div class="current-guess-display">
-      Current: <span class="guess-text">${displayText}</span>
-      ${errorHtml}
-    </div>
-  `;
 }
 
 function renderBoardGrid(boardStatuses, key) {
