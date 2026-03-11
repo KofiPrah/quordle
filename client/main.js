@@ -318,19 +318,37 @@ if (!DISCORD_CLIENT_ID) {
   console.error('VITE_DISCORD_CLIENT_ID is not set! Check your environment variables.');
 }
 
-const discordSdk = new DiscordSDK(DISCORD_CLIENT_ID);
+function hasDiscordActivityContext() {
+  const params = new URLSearchParams(window.location.search);
+  return params.has('frame_id') && params.has('instance_id') && params.has('platform');
+}
 
-setupDiscordSdk()
-  .then(() => {
-    console.log("Discord SDK is authenticated");
-    initQuordleGame();
-  })
-  .catch((err) => {
-    console.error("Discord SDK init failed:", err);
-    // Dev mode fallback - use localStorage-persisted random IDs
-    setupDevMode();
-    initQuordleGame();
-  });
+let discordSdk = null;
+
+if (DISCORD_CLIENT_ID && hasDiscordActivityContext()) {
+  try {
+    discordSdk = new DiscordSDK(DISCORD_CLIENT_ID);
+  } catch (err) {
+    console.error("Discord SDK construction failed:", err);
+  }
+}
+
+if (discordSdk) {
+  setupDiscordSdk()
+    .then(() => {
+      console.log("Discord SDK is authenticated");
+      initQuordleGame();
+    })
+    .catch((err) => {
+      console.error("Discord SDK init failed:", err);
+      // Dev mode fallback - use localStorage-persisted random IDs
+      setupDevMode();
+      initQuordleGame();
+    });
+} else {
+  setupDevMode();
+  initQuordleGame();
+}
 
 function setupDevMode() {
   console.log("Running in dev mode (no Discord SDK)");
@@ -357,6 +375,10 @@ function setupDevMode() {
 }
 
 async function setupDiscordSdk() {
+  if (!discordSdk) {
+    throw new Error("Discord SDK is unavailable outside the Discord activity iframe");
+  }
+
   await discordSdk.ready();
   console.log("Discord SDK is ready");
 

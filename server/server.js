@@ -22,17 +22,59 @@ const DEBUG_LEADERBOARD = process.env.DEBUG_LEADERBOARD === '1' || process.env.D
 
 // Redis client (optional - falls back to in-memory if not configured)
 let redis = null;
+let redisErrorLogged = false;
 const REDIS_TTL_SECONDS = 60 * 60 * 48; // 48 hours TTL
+
+function hasRedisConnection() {
+  return !!redis && redis.status === 'ready';
+}
 
 if (process.env.REDIS_URL) {
   try {
     console.log('[Redis] Attempting connection to:', process.env.REDIS_URL.replace(/:[^:@]+@/, ':***@'));
-    redis = new Redis(process.env.REDIS_URL);
-    redis.on('error', (err) => console.error('[Redis] Error:', err.message));
-    redis.on('connect', () => console.log('[Redis] Connected successfully'));
-    redis.on('ready', () => console.log('[Redis] Ready to accept commands'));
-    redis.on('close', () => console.log('[Redis] Connection closed'));
-    redis.on('reconnecting', () => console.log('[Redis] Reconnecting...'));
+    const redisClient = new Redis(process.env.REDIS_URL, {
+      maxRetriesPerRequest: 3,
+      retryStrategy: (times) => {
+        if (times > 1) {
+          if (!redisErrorLogged) {
+            console.warn('[Redis] Connection failed, using in-memory storage only');
+            redisErrorLogged = true;
+          }
+          return null;
+        }
+        return Math.min(times * 200, 2000);
+      },
+    });
+    redis = redisClient;
+
+    const disableRedis = () => {
+      if (redis === redisClient) {
+        redis = null;
+      }
+      redisClient.disconnect();
+    };
+
+    redisClient.on('error', (err) => {
+      if (!redisErrorLogged) {
+        console.error('[Redis] Error:', err.message);
+        redisErrorLogged = true;
+      }
+      if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED/.test(err.message)) {
+        console.warn('[Redis] Host unreachable, using in-memory storage only');
+        disableRedis();
+      }
+    });
+    redisClient.on('connect', () => console.log('[Redis] Connected successfully'));
+    redisClient.on('ready', () => {
+      redisErrorLogged = false;
+      console.log('[Redis] Ready to accept commands');
+    });
+    redisClient.on('close', () => console.log('[Redis] Connection closed'));
+    redisClient.on('reconnecting', () => {
+      if (!redisErrorLogged) {
+        console.log('[Redis] Reconnecting...');
+      }
+    });
   } catch (err) {
     console.error('[Redis] Failed to initialize:', err);
     redis = null;
@@ -92,7 +134,7 @@ function makePlayerKey(roomId, dateKey, visibleUserId, language = 'en') {
 
 /** Save a single player state to Redis with TTL */
 async function persistPlayerToRedis(playerState) {
-  if (!redis) {
+  if (!hasRedisConnection()) {
     console.log('[Redis] Skipping persist - no Redis connection');
     return;
   }
@@ -127,7 +169,7 @@ async function persistPlayerToRedis(playerState) {
 
 /** Load a single player state from Redis */
 async function loadPlayerFromRedis(roomId, dateKey, visibleUserId, language = 'en') {
-  if (!redis) {
+  if (!hasRedisConnection()) {
     console.log('[Redis] Skipping load - no Redis connection');
     return null;
   }
@@ -152,7 +194,7 @@ async function loadPlayerFromRedis(roomId, dateKey, visibleUserId, language = 'e
 
 /** Rebuild leaderboard from Redis by loading all players in the roomPlayers set */
 async function rebuildLeaderboardFromRedis(roomId, dateKey, language = 'en') {
-  if (!redis) {
+  if (!hasRedisConnection()) {
     console.log('[Redis] Cannot rebuild leaderboard - no Redis connection');
     return null;
   }
@@ -198,7 +240,7 @@ async function getOrCreateRoomAsync(roomId, dateKey, language = 'en') {
   let room = roomStateStore.get(key);
 
   // If room exists in memory but is empty, try to rebuild from Redis
-  if ((!room || room.players.size === 0) && redis) {
+  if ((!room || room.players.size === 0) && hasRedisConnection()) {
     const rebuilt = await rebuildLeaderboardFromRedis(roomId, dateKey, language);
     if (rebuilt && rebuilt.players.size > 0) {
       return rebuilt;
@@ -557,7 +599,7 @@ wss.on("connection", (ws, req) => {
           setPlayer(updatedPlayerState);
 
           // Publish DAILY_FINISHED event if game just ended
-          if (newGameOver && redis) {
+          if (newGameOver && hasRedisConnection()) {
             const solvedCount = newBoards.filter(b => b.solved).length;
             const resolvedGuildId = roomGuildMap.get(roomId) || null;
             // roomId === channelId (set by client from discordSdk.channelId)
@@ -946,7 +988,7 @@ app.post("/api/activity/leave", async (req, res) => {
     }
 
     // Publish leave event to Redis for bot to pick up
-    if (redis) {
+    if (hasRedisConnection()) {
       const leaveEvent = JSON.stringify({
         type: 'ACTIVITY_LEAVE',
         userId,
@@ -993,7 +1035,7 @@ app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
   let playerDetails = [];
 
   // Try Redis first for authoritative list
-  if (redis) {
+  if (hasRedisConnection()) {
     try {
       const setKey = makeRoomPlayersSetKey(roomId, dateKey);
       visibleUserIds = await redis.smembers(setKey);
@@ -1070,13 +1112,13 @@ app.get("/api/debug/persist", async (req, res) => {
   const { roomId, dateKey, visibleUserId } = req.query;
 
   const status = {
-    redisConnected: !!redis,
+    redisConnected: hasRedisConnection(),
     redisStatus: redis?.status || 'not initialized',
     redisUrl: process.env.REDIS_URL ? '***configured***' : 'not configured',
     tests: {},
   };
 
-  if (!redis) {
+  if (!hasRedisConnection()) {
     return res.json({ ...status, message: 'Redis not configured' });
   }
 

@@ -8,10 +8,16 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    allowedHosts: ['tomorrow-stood-warriors-needs.trycloudflare.com'],
+    allowedHosts: true,
     proxy: {
       '/api': {
         target: 'http://localhost:3001',
+        changeOrigin: true,
+        secure: false,
+        ws: true,
+      },
+      '/ws': {
+        target: 'ws://localhost:3001',
         changeOrigin: true,
         secure: false,
         ws: true,

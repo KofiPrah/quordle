@@ -1077,7 +1077,7 @@ button:focus-visible {
     overflow-y: auto;
   }
 
-  .leaderboard + .leaderboard {
+  .leaderboard+.leaderboard {
     margin-top: 0;
   }
 
@@ -1229,7 +1229,7 @@ button:focus-visible {
     overflow-y: auto;
   }
 
-  .leaderboard + .leaderboard {
+  .leaderboard+.leaderboard {
     margin-top: 0;
   }
 
