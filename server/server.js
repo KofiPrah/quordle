@@ -380,29 +380,61 @@ const gameStateStore = {
   /** @type {Map<string, object>} */
   _store: new Map(),
 
-  _makeKey(roomId, dateKey, userId) {
+  _makeKey(roomId, dateKey, userId, language = 'en') {
+    return `${roomId}:${dateKey}:${language}:${userId}`;
+  },
+
+  _makeLegacyKey(roomId, dateKey, userId) {
     return `${roomId}:${dateKey}:${userId}`;
   },
 
-  async get(roomId, dateKey, userId) {
+  _matchesLanguage(state, language) {
+    if (!state || typeof state !== 'object') return false;
+    const stateLanguage = state.language || state.gameState?.language || 'en';
+    return stateLanguage === language;
+  },
+
+  async get(roomId, dateKey, userId, language = 'en') {
     // First check new room store
-    const player = getPlayer(roomId, dateKey, userId);
+    const player = getPlayer(roomId, dateKey, userId, language);
     if (player) {
-      return { gameState: player.gameState, gameMode: player.mode, dateKey: player.dateKey };
+      return {
+        gameState: player.gameState,
+        gameMode: player.mode,
+        dateKey: player.dateKey,
+        language: player.language || language,
+      };
     }
-    // Fallback to legacy store
-    const key = this._makeKey(roomId, dateKey, userId);
-    return this._store.get(key) || null;
+
+    // Fallback to language-aware legacy store
+    const key = this._makeKey(roomId, dateKey, userId, language);
+    const stored = this._store.get(key);
+    if (stored) {
+      return stored;
+    }
+
+    // Backward compatibility for older in-memory keys created before language isolation.
+    const legacyKey = this._makeLegacyKey(roomId, dateKey, userId);
+    const legacyState = this._store.get(legacyKey);
+    if (legacyState && this._matchesLanguage(legacyState, language)) {
+      this._store.set(key, legacyState);
+      this._store.delete(legacyKey);
+      return legacyState;
+    }
+
+    return null;
   },
 
-  async set(roomId, dateKey, userId, state) {
-    const key = this._makeKey(roomId, dateKey, userId);
-    this._store.set(key, state);
+  async set(roomId, dateKey, userId, state, language = 'en') {
+    const key = this._makeKey(roomId, dateKey, userId, language);
+    this._store.set(key, { ...state, language });
+    this._store.delete(this._makeLegacyKey(roomId, dateKey, userId));
   },
 
-  async delete(roomId, dateKey, userId) {
-    const key = this._makeKey(roomId, dateKey, userId);
+  async delete(roomId, dateKey, userId, language = 'en') {
+    const key = this._makeKey(roomId, dateKey, userId, language);
     this._store.delete(key);
+    this._store.delete(this._makeLegacyKey(roomId, dateKey, userId));
   },
 };
 
@@ -1224,7 +1256,7 @@ app.post("/api/game/join", async (req, res) => {
     const dateKey = (clientDateKey && /^\d{4}-\d{2}-\d{2}$/.test(clientDateKey))
       ? clientDateKey
       : getTodayDateKey();
-    let state = await gameStateStore.get(roomId, dateKey, userId);
+    let state = await gameStateStore.get(roomId, dateKey, userId, language);
 
     if (!state) {
       // Create new daily game
@@ -1235,7 +1267,7 @@ app.post("/api/game/join", async (req, res) => {
         dateKey,
         language,
       };
-      await gameStateStore.set(roomId, dateKey, userId, state);
+      await gameStateStore.set(roomId, dateKey, userId, state, language);
     }
 
     res.json(state);
@@ -1258,7 +1290,7 @@ app.post("/api/game/guess", async (req, res) => {
     const dateKey = (clientDateKey && /^\d{4}-\d{2}-\d{2}$/.test(clientDateKey))
       ? clientDateKey
       : getTodayDateKey();
-    let state = await gameStateStore.get(roomId, dateKey, userId);
+    let state = await gameStateStore.get(roomId, dateKey, userId, language);
 
     if (!state) {
       return res.status(404).json({ error: "No game found. Call /api/game/join first." });
@@ -1317,8 +1349,8 @@ app.post("/api/game/guess", async (req, res) => {
       won: allSolved,
     };
 
-    state = { ...state, gameState: newGameState };
-    await gameStateStore.set(roomId, dateKey, userId, state);
+    state = { ...state, gameState: { ...newGameState, language }, language };
+    await gameStateStore.set(roomId, dateKey, userId, state, language);
 
     res.json(state);
   } catch (err) {

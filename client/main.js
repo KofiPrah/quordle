@@ -39,6 +39,25 @@ let wsReconnectTimeout = null;
 let leaderboardEn = []; // English room leaderboard
 let leaderboardKo = []; // Korean room leaderboard
 let initialStateApplied = false; // Prevents double init from WS STATE + REST join race
+const SESSION_TIMEOUT_MS = 45 * 60 * 1000;
+const KEY_ENTER = "ENTER";
+const KEY_BACKSPACE = "BACKSPACE";
+const KEY_SHIFT = "SHIFT";
+const KOREAN_SHIFT_MAP = Object.freeze({
+  'ㅂ': 'ㅃ',
+  'ㅈ': 'ㅉ',
+  'ㄷ': 'ㄸ',
+  'ㄱ': 'ㄲ',
+  'ㅅ': 'ㅆ',
+  'ㅐ': 'ㅒ',
+  'ㅔ': 'ㅖ',
+});
+const KOREAN_SHIFT_OUTPUTS = new Set(Object.values(KOREAN_SHIFT_MAP));
+let lastActivityAt = Date.now();
+let inactivityTimer = null;
+let expiredSessionSnapshot = null;
+let koreanShiftActive = false;
+let activityTrackingBound = false;
 
 // ========== WEBSOCKET CONNECTION ==========
 function getUserProfile() {
@@ -59,6 +78,23 @@ function getUserProfile() {
   return userProfile;
 }
 
+function joinCurrentDailyRoom() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!discordUserId || !discordRoomId || gameMode === 'practice') return;
+
+  const dateKey = getTodayDateKey();
+  userProfile = getUserProfile();
+  ws.send(JSON.stringify({
+    type: 'JOIN',
+    roomId: discordRoomId,
+    dateKey,
+    visibleUserId: discordUserId,
+    profile: userProfile,
+    guildId: discordGuildId,
+    language: currentLanguage,
+  }));
+}
+
 function connectWebSocket() {
   if (!discordUserId || !discordRoomId) return;
   if (ws && ws.readyState === WebSocket.OPEN) return;
@@ -73,18 +109,7 @@ function connectWebSocket() {
       console.log('Skipping daily JOIN — currently in practice mode');
       return;
     }
-    // Send JOIN message with profile and guild context (for announcements)
-    const dateKey = getTodayDateKey();
-    userProfile = getUserProfile();
-    ws.send(JSON.stringify({
-      type: 'JOIN',
-      roomId: discordRoomId,
-      dateKey,
-      visibleUserId: discordUserId,
-      profile: userProfile,
-      guildId: discordGuildId,
-      language: currentLanguage,
-    }));
+    joinCurrentDailyRoom();
   };
 
   ws.onmessage = (event) => {
@@ -124,11 +149,21 @@ function handleServerMessage(message) {
       }
       // Update game state from server
       if (message.playerState && message.playerState.gameState) {
+        const nextLanguage = message.playerState.language || currentLanguage;
+        const normalizedState = normalizeRestoredGameState(message.playerState.gameState, nextLanguage);
+        if (!normalizedState) {
+          console.warn('Ignoring invalid STATE payload from server');
+          break;
+        }
         initialStateApplied = true;
-        gameState = message.playerState.gameState;
-        gameMode = message.playerState.mode || 'daily';
-        guessError = null;
-        if (gameState.gameOver) uiScreen = "results";
+        restoreSavedPayload({
+          gameState: normalizedState,
+          gameMode: message.playerState.mode || 'daily',
+          language: nextLanguage,
+          dateKey: message.playerState.dateKey || getTodayDateKey(),
+          lastActiveAt: Date.now(),
+          savedAt: Date.now(),
+        }, { markActive: true });
         saveGameState();
         renderApp();
         setupKeyboardListeners();
@@ -213,17 +248,124 @@ function showToast(message, duration = 3000) {
 }
 
 // ========== LOCAL STORAGE PERSISTENCE ==========
-function getStorageKeyDaily() { return `quordle_daily_${currentLanguage}`; }
-function getStorageKeyPractice() { return `quordle_practice_${currentLanguage}`; }
+function getStorageKeyDaily(language = currentLanguage) { return `quordle_daily_${language}`; }
+function getStorageKeyPractice(language = currentLanguage) { return `quordle_practice_${language}`; }
+function getStorageKeyForMode(mode, language = currentLanguage) {
+  return mode === "daily" ? getStorageKeyDaily(language) : getStorageKeyPractice(language);
+}
 
-function saveGameState() {
+function getSavedStateTimestamp(payload) {
+  const ts = Number(payload?.lastActiveAt ?? payload?.savedAt);
+  return Number.isFinite(ts) ? ts : Date.now();
+}
+
+function normalizeRestoredGameState(state, language = currentLanguage) {
+  if (!state || typeof state !== 'object' || !Array.isArray(state.boards) || state.boards.length !== 4) {
+    return null;
+  }
+
+  const languageConfig = getLanguageConfig(language);
+  const boards = state.boards.map((board) => {
+    if (!board || typeof board.targetWord !== 'string' || !Array.isArray(board.guesses) || !Array.isArray(board.results)) {
+      return null;
+    }
+    return {
+      ...board,
+      guesses: board.guesses,
+      results: board.results,
+      solved: Boolean(board.solved),
+      solvedOnGuess: Number.isInteger(board.solvedOnGuess) ? board.solvedOnGuess : null,
+    };
+  });
+
+  if (boards.some((board) => board === null)) {
+    return null;
+  }
+
+  let currentGuess = typeof state.currentGuess === 'string' ? state.currentGuess : '';
+  if (language === 'ko') {
+    currentGuess = currentGuess.replace(languageConfig.filterCharRegex, '').slice(0, languageConfig.wordLength);
+  } else {
+    currentGuess = currentGuess.toLowerCase().replace(languageConfig.filterCharRegex, '').slice(0, languageConfig.wordLength);
+  }
+
+  const maxGuesses = Number.isFinite(state.maxGuesses) ? state.maxGuesses : languageConfig.maxGuesses;
+  const guessCount = Number.isFinite(state.guessCount) ? state.guessCount : 0;
+  const allSolved = boards.every((board) => board.solved);
+
+  return {
+    ...state,
+    boards,
+    currentGuess,
+    maxGuesses,
+    guessCount,
+    gameOver: allSolved || guessCount >= maxGuesses,
+    won: allSolved,
+    language,
+  };
+}
+
+function readSavedPayload(mode, language = currentLanguage) {
   try {
-    const key = gameMode === "daily" ? getStorageKeyDaily() : getStorageKeyPractice();
+    const raw = localStorage.getItem(getStorageKeyForMode(mode, language));
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || !parsed.gameState) {
+      return null;
+    }
+
+    const payloadLanguage = parsed.language || parsed.gameState?.language || language;
+    if (payloadLanguage !== language) {
+      return null;
+    }
+
+    if (mode === "daily" && parsed.dateKey !== getTodayDateKey()) {
+      return null;
+    }
+
+    const normalizedState = normalizeRestoredGameState(parsed.gameState, language);
+    if (!normalizedState) {
+      return null;
+    }
+
+    return {
+      ...parsed,
+      gameMode: mode,
+      language,
+      gameState: normalizedState,
+      lastActiveAt: getSavedStateTimestamp(parsed),
+      savedAt: Number.isFinite(Number(parsed.savedAt)) ? Number(parsed.savedAt) : Date.now(),
+    };
+  } catch (e) {
+    console.warn(`Failed to load ${mode} game state:`, e);
+    return null;
+  }
+}
+
+function hasSavedPayloadExpired(payload) {
+  return Date.now() - getSavedStateTimestamp(payload) >= SESSION_TIMEOUT_MS;
+}
+
+function setUiScreenFromGameState() {
+  uiScreen = gameState?.gameOver ? "results" : "game";
+}
+
+function saveGameState({ overrideState = gameState, overrideMode = gameMode, overrideLanguage = currentLanguage } = {}) {
+  if (!overrideState) return;
+
+  try {
+    const key = getStorageKeyForMode(overrideMode, overrideLanguage);
     const payload = {
-      gameState,
-      gameMode,
-      language: currentLanguage,
-      dateKey: gameMode === "daily" ? getTodayDateKey() : null,
+      gameState: {
+        ...overrideState,
+        language: overrideLanguage,
+      },
+      gameMode: overrideMode,
+      language: overrideLanguage,
+      dateKey: overrideMode === "daily" ? getTodayDateKey() : null,
+      lastActiveAt,
+      savedAt: Date.now(),
     };
     localStorage.setItem(key, JSON.stringify(payload));
   } catch (e) {
@@ -231,49 +373,138 @@ function saveGameState() {
   }
 }
 
+function restoreSavedPayload(payload, { markActive = false } = {}) {
+  if (!payload?.gameState) return false;
+
+  currentLanguage = payload.language || currentLanguage;
+  localStorage.setItem('quordle_language', currentLanguage);
+  gameState = payload.gameState;
+  gameMode = payload.gameMode || "daily";
+  guessError = null;
+  expiredSessionSnapshot = null;
+  koreanShiftActive = false;
+  imeReset();
+  lastActivityAt = markActive ? Date.now() : getSavedStateTimestamp(payload);
+  setUiScreenFromGameState();
+  return true;
+}
+
 function loadGameState() {
-  // Try to restore daily first
-  try {
-    const dailyData = localStorage.getItem(getStorageKeyDaily());
-    if (dailyData) {
-      const parsed = JSON.parse(dailyData);
-      const todayKey = getTodayDateKey();
-      if (parsed.dateKey === todayKey && parsed.gameState) {
-        gameState = parsed.gameState;
-        gameMode = "daily";
-        return true;
-      }
-    }
-  } catch (e) {
-    console.warn("Failed to load daily game state:", e);
+  const payload = readSavedPayload("daily");
+  if (!payload) {
+    return "missing";
   }
-  return false;
+  if (hasSavedPayloadExpired(payload)) {
+    expiredSessionSnapshot = payload;
+    return "expired";
+  }
+  return restoreSavedPayload(payload, { markActive: true }) ? "restored" : "missing";
 }
 
 function loadPracticeState() {
-  try {
-    const practiceData = localStorage.getItem(getStorageKeyPractice());
-    if (practiceData) {
-      const parsed = JSON.parse(practiceData);
-      if (parsed.gameState) {
-        gameState = parsed.gameState;
-        gameMode = "practice";
-        return true;
-      }
-    }
-  } catch (e) {
-    console.warn("Failed to load practice game state:", e);
+  const payload = readSavedPayload("practice");
+  if (!payload) {
+    return "missing";
   }
-  return false;
+  if (hasSavedPayloadExpired(payload)) {
+    expiredSessionSnapshot = payload;
+    return "expired";
+  }
+  return restoreSavedPayload(payload, { markActive: true }) ? "restored" : "missing";
 }
 
-function clearGameStorage() {
+function clearGameStorage(language = currentLanguage) {
   try {
-    localStorage.removeItem(getStorageKeyDaily());
-    localStorage.removeItem(getStorageKeyPractice());
+    localStorage.removeItem(getStorageKeyDaily(language));
+    localStorage.removeItem(getStorageKeyPractice(language));
   } catch (e) {
     console.warn("Failed to clear game storage:", e);
   }
+}
+
+function expireCurrentSession() {
+  if (!gameState || uiScreen === "expired") {
+    return;
+  }
+
+  saveGameState();
+  expiredSessionSnapshot = readSavedPayload(gameMode, currentLanguage) || {
+    gameState: normalizeRestoredGameState(gameState, currentLanguage),
+    gameMode,
+    language: currentLanguage,
+    dateKey: gameMode === "daily" ? getTodayDateKey() : null,
+    lastActiveAt,
+    savedAt: Date.now(),
+  };
+
+  guessError = null;
+  koreanShiftActive = false;
+  imeReset();
+  uiScreen = "expired";
+  renderApp();
+  setupKeyboardListeners();
+}
+
+function scheduleInactivityTimeout() {
+  if (inactivityTimer) {
+    clearTimeout(inactivityTimer);
+    inactivityTimer = null;
+  }
+
+  if (!gameState || uiScreen === "expired") {
+    return;
+  }
+
+  const msRemaining = SESSION_TIMEOUT_MS - (Date.now() - lastActivityAt);
+  if (msRemaining <= 0) {
+    expireCurrentSession();
+    return;
+  }
+
+  inactivityTimer = setTimeout(() => {
+    inactivityTimer = null;
+    expireCurrentSession();
+  }, msRemaining);
+}
+
+function touchActivity() {
+  if (!gameState || uiScreen === "expired") {
+    return;
+  }
+
+  lastActivityAt = Date.now();
+  scheduleInactivityTimeout();
+}
+
+function setupActivityTracking() {
+  if (activityTrackingBound) return;
+  activityTrackingBound = true;
+
+  const markActive = () => {
+    if (document.visibilityState === 'hidden' || uiScreen === "expired") {
+      return;
+    }
+    touchActivity();
+  };
+
+  window.addEventListener('pointerdown', markActive, { passive: true });
+  window.addEventListener('touchstart', markActive, { passive: true });
+  document.addEventListener('keydown', (event) => {
+    if (event.ctrlKey || event.metaKey || event.altKey || uiScreen === "expired") {
+      return;
+    }
+    touchActivity();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || !gameState || uiScreen === "expired") {
+      return;
+    }
+    if (Date.now() - lastActivityAt >= SESSION_TIMEOUT_MS) {
+      expireCurrentSession();
+      return;
+    }
+    touchActivity();
+  });
 }
 
 // ========== SERVER-SIDE PERSISTENCE ==========
@@ -481,7 +712,71 @@ function getTodayDateKey() {
   return `${year}-${month}-${day}`; // "YYYY-MM-DD" in America/Chicago
 }
 
+function startNewDailyGame() {
+  gameMode = "daily";
+  uiScreen = "game";
+  initialStateApplied = false;
+  expiredSessionSnapshot = null;
+  koreanShiftActive = false;
+  imeReset();
+  const dateKey = getTodayDateKey();
+  const targetWords = getDailyTargets(dateKey, currentLanguage);
+  gameState = createGame({ targetWords, language: currentLanguage });
+  guessError = null;
+  lastActivityAt = Date.now();
+  saveGameState();
+  renderApp();
+  setupKeyboardListeners();
+
+  if (discordUserId && discordRoomId) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      connectWebSocket();
+    } else {
+      joinCurrentDailyRoom();
+    }
+  }
+}
+
+function startNewPracticeGame() {
+  gameMode = "practice";
+  uiScreen = "game";
+  initialStateApplied = false;
+  expiredSessionSnapshot = null;
+  koreanShiftActive = false;
+  imeReset();
+  const targetWords = currentLanguage === 'ko'
+    ? getQuordleWordsForLanguage('ko')
+    : getQuordleWords();
+  gameState = createGame({ targetWords, language: currentLanguage });
+  guessError = null;
+  lastActivityAt = Date.now();
+  saveGameState();
+  renderApp();
+  setupKeyboardListeners();
+}
+
+function resumeExpiredSession() {
+  if (!expiredSessionSnapshot) return;
+  if (!restoreSavedPayload(expiredSessionSnapshot, { markActive: true })) {
+    expiredSessionSnapshot = null;
+    return;
+  }
+
+  saveGameState();
+  renderApp();
+  setupKeyboardListeners();
+
+  if (gameMode === "daily" && discordUserId && discordRoomId) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      connectWebSocket();
+    } else {
+      joinCurrentDailyRoom();
+    }
+  }
+}
+
 function initQuordleGame() {
+  setupActivityTracking();
   // For daily mode, try server-side persistence first
   initDailyFromServer();
 }
@@ -497,45 +792,71 @@ async function initDailyFromServer() {
     // Only apply server state if WS hasn't already delivered it (prevents double init)
     // and if we're still in daily mode (user may have switched to practice while awaiting)
     if (serverState && serverState.gameState && gameMode !== 'practice' && !initialStateApplied) {
-      initialStateApplied = true;
-      gameState = serverState.gameState;
-      gameMode = serverState.gameMode || "daily";
-      guessError = null;
-      if (gameState.gameOver) uiScreen = "results";
-      // Also save to localStorage as backup
-      saveGameState();
-      renderApp();
-      setupKeyboardListeners();
-      return;
+      const nextLanguage = serverState.language || currentLanguage;
+      const normalizedState = normalizeRestoredGameState(serverState.gameState, nextLanguage);
+      if (!normalizedState) {
+        console.warn('Ignoring invalid REST state payload from server');
+      } else {
+        initialStateApplied = true;
+        restoreSavedPayload({
+          gameState: normalizedState,
+          gameMode: serverState.gameMode || "daily",
+          language: nextLanguage,
+          dateKey: serverState.dateKey || getTodayDateKey(),
+          lastActiveAt: Date.now(),
+          savedAt: Date.now(),
+        }, { markActive: true });
+        // Also save to localStorage as backup
+        saveGameState();
+        renderApp();
+        setupKeyboardListeners();
+        return;
+      }
     }
   }
 
   // Fallback: try to restore from localStorage
-  if (loadGameState()) {
-    guessError = null;
-    if (gameState.gameOver) uiScreen = "results";
+  const dailyLoadState = loadGameState();
+  if (dailyLoadState === "restored") {
+    saveGameState();
+    renderApp();
+    setupKeyboardListeners();
+    return;
+  }
+  if (dailyLoadState === "expired") {
+    uiScreen = "expired";
+    renderApp();
+    setupKeyboardListeners();
+    return;
+  }
+
+  const practiceLoadState = loadPracticeState();
+  if (practiceLoadState === "restored") {
+    saveGameState();
+    renderApp();
+    setupKeyboardListeners();
+    return;
+  }
+  if (practiceLoadState === "expired") {
+    uiScreen = "expired";
     renderApp();
     setupKeyboardListeners();
     return;
   }
 
   // No valid save, start fresh daily
-  gameMode = "daily";
-  const dateKey = getTodayDateKey();
-  const targetWords = getDailyTargets(dateKey, currentLanguage);
-  gameState = createGame({ targetWords, language: currentLanguage });
-  guessError = null;
-  saveGameState();
-  renderApp();
-  setupKeyboardListeners();
+  startNewDailyGame();
 }
 
 function renderApp() {
-  if (uiScreen === "results") {
+  if (uiScreen === "expired") {
+    renderExpiredScreen();
+  } else if (uiScreen === "results") {
     renderResultsScreen();
   } else {
     renderGameScreen();
   }
+  scheduleInactivityTimeout();
 }
 
 // Keep backward compat alias
@@ -703,6 +1024,53 @@ function renderResultsScreen() {
         ${gameMode === 'daily' ? `<div class="results-footer">${lang === 'ko' ? '내일 다시 도전하세요!' : 'Come back tomorrow for the next Daily'}</div>` : ''}
       </div>
       
+      <div class="keyboard-spacer"></div>
+    </div>
+  `;
+}
+
+function renderExpiredScreen() {
+  const app = document.querySelector('#app');
+  const snapshot = expiredSessionSnapshot;
+  const snapshotState = snapshot?.gameState;
+  const solvedCount = snapshotState?.boards?.filter((board) => board.solved).length || 0;
+  const guessCount = snapshotState?.guessCount || 0;
+  const maxGuesses = snapshotState?.maxGuesses || getLanguageConfig(currentLanguage).maxGuesses;
+  const sessionLabel = snapshot?.gameMode === 'practice' ? 'Practice Session Expired' : 'Daily Session Expired';
+  const resumeButton = snapshot
+    ? `<button class="results-btn results-btn-primary resume-session-btn">Resume Saved Game</button>`
+    : '';
+
+  app.innerHTML = `
+    <div class="quordle-container ${currentLanguage === 'ko' ? 'lang-ko' : 'lang-en'}">
+      <div class="game-header">
+        <h1 class="game-title">Quordle</h1>
+      </div>
+
+      <div class="results-screen">
+        <div class="results-card session-expired-card">
+          <div class="results-icon">${sessionLabel}</div>
+          <div class="results-message">Inactive for 45 minutes</div>
+          <div class="results-footer">Your latest board was saved before the session expired.</div>
+          <div class="results-stats">
+            <div class="results-stat">
+              <span class="results-stat-value">${solvedCount}</span>
+              <span class="results-stat-label">of 4 solved</span>
+            </div>
+            <div class="results-stat">
+              <span class="results-stat-value">${guessCount}/${maxGuesses}</span>
+              <span class="results-stat-label">guesses</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="results-actions">
+          ${resumeButton}
+          <button class="results-btn results-btn-secondary start-daily-btn">Start Daily</button>
+          <button class="results-btn results-btn-secondary start-practice-btn">Start Practice</button>
+        </div>
+      </div>
+
       <div class="keyboard-spacer"></div>
     </div>
   `;
@@ -894,7 +1262,7 @@ function renderKeyboard() {
   const rows = [
     ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
     ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
-    ['ENTER', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '⌫']
+    [KEY_ENTER, 'Z', 'X', 'C', 'V', 'B', 'N', 'M', KEY_BACKSPACE]
   ];
 
   const boardStatuses = computeKeyboardBoardMap(gameState);
@@ -904,10 +1272,12 @@ function renderKeyboard() {
       ${rows.map(row => `
         <div class="keyboard-row">
           ${row.map(key => {
-    const lowerKey = key.toLowerCase();
-    const widthClass = key.length > 1 ? 'key-wide' : '';
-    const grid = key.length === 1 ? renderBoardGrid(boardStatuses, lowerKey) : '';
-    return `<button class="key ${widthClass}" data-key="${key}">${grid}<span class="key-label">${key}</span></button>`;
+    const isSpecial = key === KEY_ENTER || key === KEY_BACKSPACE;
+    const lowerKey = isSpecial ? null : key.toLowerCase();
+    const widthClass = isSpecial ? 'key-wide' : '';
+    const grid = lowerKey ? renderBoardGrid(boardStatuses, lowerKey) : '';
+    const label = key === KEY_BACKSPACE ? '⌫' : key;
+    return `<button class="key ${widthClass}" data-key="${key}">${grid}<span class="key-label">${label}</span></button>`;
   }).join('')}
         </div>
       `).join('')}
@@ -917,16 +1287,10 @@ function renderKeyboard() {
 
 // ========== KOREAN KEYBOARD (두벌식) ==========
 function renderKoreanKeyboard() {
-  // Standard 2-set (두벌식) layout:
-  // Row 1: ㅂ ㅈ ㄷ ㄱ ㅅ ㅛ ㅕ ㅑ ㅐ ㅔ
-  // Row 2: ㅁ ㄴ ㅇ ㄹ ㅎ ㅗ ㅓ ㅏ ㅣ
-  // Row 3: ENTER ㅋ ㅌ ㅊ ㅍ ㅠ ㅜ ㅡ ⌫
-  // Row 4 (doubles): ㅃ ㅉ ㄸ ㄲ ㅆ (toggled via ⇧)
   const rows = [
     ['ㅂ', 'ㅈ', 'ㄷ', 'ㄱ', 'ㅅ', 'ㅛ', 'ㅕ', 'ㅑ', 'ㅐ', 'ㅔ'],
     ['ㅁ', 'ㄴ', 'ㅇ', 'ㄹ', 'ㅎ', 'ㅗ', 'ㅓ', 'ㅏ', 'ㅣ'],
-    ['ENTER', 'ㅋ', 'ㅌ', 'ㅊ', 'ㅍ', 'ㅠ', 'ㅜ', 'ㅡ', '⌫'],
-    ['⇧', 'ㅃ', 'ㅉ', 'ㄸ', 'ㄲ', 'ㅆ'],
+    [KEY_ENTER, 'ㅋ', 'ㅌ', 'ㅊ', 'ㅍ', 'ㅠ', 'ㅜ', 'ㅡ', KEY_BACKSPACE],
   ];
 
   const boardStatuses = computeKeyboardBoardMap(gameState);
@@ -936,13 +1300,20 @@ function renderKoreanKeyboard() {
       ${rows.map(row => `
         <div class="keyboard-row">
           ${row.map(key => {
-    const isSpecial = (key === 'ENTER' || key === '⌫' || key === '⇧');
+    const renderedKey = koreanShiftActive && KOREAN_SHIFT_MAP[key] ? KOREAN_SHIFT_MAP[key] : key;
+    const isSpecial = renderedKey === KEY_ENTER || renderedKey === KEY_BACKSPACE;
     const widthClass = isSpecial ? 'key-wide' : '';
-    const grid = !isSpecial ? renderBoardGrid(boardStatuses, key) : '';
-    return `<button class="key ${widthClass}" data-key="${key}">${grid}<span class="key-label">${key}</span></button>`;
+    const grid = !isSpecial ? renderBoardGrid(boardStatuses, renderedKey) : '';
+    const label = renderedKey === KEY_BACKSPACE ? '⌫' : renderedKey;
+    return `<button class="key ${widthClass}" data-key="${renderedKey}">${grid}<span class="key-label">${label}</span></button>`;
   }).join('')}
         </div>
       `).join('')}
+      <div class="ko-shift-row">
+        <button class="key key-wide key-shift ${koreanShiftActive ? 'active' : ''}" data-key="${KEY_SHIFT}">
+          <span class="key-label">Shift</span>
+        </button>
+      </div>
     </div>
   `;
 }
@@ -1117,14 +1488,23 @@ function imeBackspace() {
 }
 
 function handleKeyPress(key) {
-  if (gameState.gameOver) return;
+  if (!gameState || gameState.gameOver || uiScreen === "expired") return;
 
   const lang = currentLanguage;
   const wordLen = getLanguageConfig(lang).wordLength;
 
   if (lang === 'ko') {
     // ===== Korean mode =====
-    if (key === 'ENTER') {
+    if (key === KEY_SHIFT) {
+      koreanShiftActive = !koreanShiftActive;
+      guessError = null;
+      renderApp();
+      setupKeyboardListeners();
+      return;
+    }
+
+    if (key === KEY_ENTER) {
+      koreanShiftActive = false;
       // Finalize any IME composition first
       const finalChar = imeFinalize();
       if (finalChar) {
@@ -1143,7 +1523,7 @@ function handleKeyPress(key) {
           submitGuessWithPersistence(gameState.currentGuess);
         }
       }
-    } else if (key === '⌫' || key === 'BACKSPACE') {
+    } else if (key === KEY_BACKSPACE) {
       guessError = null;
       const result = imeBackspace();
       if (!result.modified) {
@@ -1152,16 +1532,16 @@ function handleKeyPress(key) {
       }
       renderApp();
       setupKeyboardListeners();
-    } else if (key === '⇧') {
-      // Shift key — handled by the double consonant keys directly
-      return;
     } else if (isConsonant(key) || isVowel(key)) {
       // Check if we'd exceed word length with committed chars
-      const { committed, display } = imeProcessJamo(key);
+      const { committed } = imeProcessJamo(key);
       if (committed) {
         if (gameState.currentGuess.length < wordLen) {
           gameState = setCurrentGuess(gameState, gameState.currentGuess + committed);
         }
+      }
+      if (KOREAN_SHIFT_OUTPUTS.has(key)) {
+        koreanShiftActive = false;
       }
       guessError = null;
       renderApp();
@@ -1169,7 +1549,7 @@ function handleKeyPress(key) {
     }
   } else {
     // ===== English mode =====
-    if (key === 'ENTER') {
+    if (key === KEY_ENTER) {
       if (gameState.currentGuess.length === wordLen) {
         if (!isValidGuess(gameState.currentGuess)) {
           guessError = 'Not in word list';
@@ -1183,7 +1563,7 @@ function handleKeyPress(key) {
           submitGuessWithPersistence(gameState.currentGuess);
         }
       }
-    } else if (key === '⌫' || key === 'BACKSPACE') {
+    } else if (key === KEY_BACKSPACE) {
       guessError = null;
       gameState = setCurrentGuess(gameState, gameState.currentGuess.slice(0, -1));
       renderApp();
@@ -1205,6 +1585,7 @@ async function submitGuessWithPersistence(guess) {
   // so without this, a rapid second Enter press would pass the length === 5
   // guard in handleKeyPress and send the same guess again.
   gameState = setCurrentGuess(gameState, '');
+  koreanShiftActive = false;
   renderApp();
   setupKeyboardListeners();
 
@@ -1219,8 +1600,21 @@ async function submitGuessWithPersistence(guess) {
     // Fallback to REST if WebSocket not connected
     const serverState = await serverSubmitGuess(guess);
     if (serverState && serverState.gameState) {
-      gameState = serverState.gameState;
-      if (gameState.gameOver) uiScreen = "results";
+      const nextLanguage = serverState.language || currentLanguage;
+      const normalizedState = normalizeRestoredGameState(serverState.gameState, nextLanguage);
+      if (!normalizedState) {
+        console.warn('Ignoring invalid REST guess payload from server');
+        return;
+      }
+
+      restoreSavedPayload({
+        gameState: normalizedState,
+        gameMode: serverState.gameMode || gameMode,
+        language: nextLanguage,
+        dateKey: serverState.dateKey || getTodayDateKey(),
+        lastActiveAt: Date.now(),
+        savedAt: Date.now(),
+      }, { markActive: true });
       saveGameState(); // Backup to localStorage
       renderApp();
       setupKeyboardListeners();
@@ -1230,7 +1624,7 @@ async function submitGuessWithPersistence(guess) {
 
   // Fallback: local-only submission (practice mode or no server)
   gameState = submitGuess(gameState, guess);
-  if (gameState.gameOver) uiScreen = "results";
+  setUiScreenFromGameState();
   saveGameState();
   renderApp();
   setupKeyboardListeners();
@@ -1258,8 +1652,7 @@ function setupKeyboardListeners() {
   const practiceBtn = document.querySelector('.practice-btn');
   if (practiceBtn) {
     practiceBtn.addEventListener('click', () => {
-      uiScreen = "game";
-      startPracticeGame();
+      startNewPracticeGame();
     });
   }
 
@@ -1267,8 +1660,7 @@ function setupKeyboardListeners() {
   const newGameBtn = document.querySelector('.new-game-btn');
   if (newGameBtn) {
     newGameBtn.addEventListener('click', () => {
-      uiScreen = "game";
-      startPracticeGame();
+      startNewPracticeGame();
     });
   }
 
@@ -1289,6 +1681,27 @@ function setupKeyboardListeners() {
       uiScreen = "results";
       renderApp();
       setupKeyboardListeners();
+    });
+  }
+
+  const resumeBtn = document.querySelector('.resume-session-btn');
+  if (resumeBtn) {
+    resumeBtn.addEventListener('click', () => {
+      resumeExpiredSession();
+    });
+  }
+
+  const startDailyBtn = document.querySelector('.start-daily-btn');
+  if (startDailyBtn) {
+    startDailyBtn.addEventListener('click', () => {
+      startNewDailyGame();
+    });
+  }
+
+  const startPracticeBtn = document.querySelector('.start-practice-btn');
+  if (startPracticeBtn) {
+    startPracticeBtn.addEventListener('click', () => {
+      startNewPracticeGame();
     });
   }
 }
@@ -1314,9 +1727,9 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
 
   if (e.key === 'Enter') {
-    handleKeyPress('ENTER');
+    handleKeyPress(KEY_ENTER);
   } else if (e.key === 'Backspace') {
-    handleKeyPress('BACKSPACE');
+    handleKeyPress(KEY_BACKSPACE);
   } else if (currentLanguage === 'ko') {
     const ch = e.key;
     // First, try QWERTY → jamo mapping (for users typing on English keyboard)
@@ -1337,35 +1750,14 @@ document.addEventListener('keydown', (e) => {
 
 // Start a new practice round (random targets)
 function startPracticeGame() {
-  gameMode = "practice";
-  uiScreen = "game";
-  initialStateApplied = false;
-  imeReset();
-  const targetWords = currentLanguage === 'ko'
-    ? getQuordleWordsForLanguage('ko')
-    : getQuordleWords();
-  gameState = createGame({ targetWords, language: currentLanguage });
-  guessError = null;
-  saveGameState(); // Save new practice game
-  renderApp();
-  setupKeyboardListeners();
+  startNewPracticeGame();
 }
 window.startPractice = startPracticeGame; // Keep for backwards compat
 
 // Reset game - clears storage and starts fresh
 function resetGame() {
   clearGameStorage();
-  gameMode = "daily";
-  uiScreen = "game";
-  initialStateApplied = false;
-  imeReset();
-  const dateKey = getTodayDateKey();
-  const targetWords = getDailyTargets(dateKey, currentLanguage);
-  gameState = createGame({ targetWords, language: currentLanguage });
-  guessError = null;
-  saveGameState();
-  renderApp();
-  setupKeyboardListeners();
+  startNewDailyGame();
 }
 window.resetGame = resetGame; // Keep for backwards compat
 
@@ -1379,43 +1771,51 @@ function switchLanguage(newLang) {
   // Switch language
   currentLanguage = newLang;
   localStorage.setItem('quordle_language', newLang);
+  expiredSessionSnapshot = null;
+  koreanShiftActive = false;
   imeReset();
   guessError = null;
 
   // Try to load existing game for the new language
   if (gameMode === 'daily') {
-    if (!loadGameState()) {
+    const loadStatus = loadGameState();
+    if (loadStatus === "expired") {
+      uiScreen = "expired";
+    } else if (loadStatus !== "restored") {
       // No saved daily for this language, create new one
       const dateKey = getTodayDateKey();
       const targetWords = getDailyTargets(dateKey, currentLanguage);
       gameState = createGame({ targetWords, language: currentLanguage });
+      lastActivityAt = Date.now();
+      saveGameState();
+      uiScreen = "game";
+    }
+    if (loadStatus === "restored") {
+      setUiScreenFromGameState();
       saveGameState();
     }
-    if (gameState.gameOver) uiScreen = "results";
-    else uiScreen = "game";
 
     // Re-JOIN via WebSocket so the server creates/loads player state for the new language
-    if (ws && ws.readyState === WebSocket.OPEN && discordUserId && discordRoomId) {
-      const dateKey = getTodayDateKey();
-      userProfile = getUserProfile();
-      ws.send(JSON.stringify({
-        type: 'JOIN',
-        roomId: discordRoomId,
-        dateKey,
-        visibleUserId: discordUserId,
-        profile: userProfile,
-        guildId: discordGuildId,
-        language: currentLanguage,
-      }));
+    if (loadStatus !== "expired" && ws && ws.readyState === WebSocket.OPEN && discordUserId && discordRoomId) {
+      joinCurrentDailyRoom();
     }
   } else {
     // Practice mode — start fresh for new language
-    const targetWords = currentLanguage === 'ko'
-      ? getQuordleWordsForLanguage('ko')
-      : getQuordleWords();
-    gameState = createGame({ targetWords, language: currentLanguage });
-    uiScreen = "game";
-    saveGameState();
+    const loadStatus = loadPracticeState();
+    if (loadStatus === "expired") {
+      uiScreen = "expired";
+    } else if (loadStatus === "restored") {
+      setUiScreenFromGameState();
+      saveGameState();
+    } else {
+      const targetWords = currentLanguage === 'ko'
+        ? getQuordleWordsForLanguage('ko')
+        : getQuordleWords();
+      gameState = createGame({ targetWords, language: currentLanguage });
+      uiScreen = "game";
+      lastActivityAt = Date.now();
+      saveGameState();
+    }
   }
 
   renderApp();
