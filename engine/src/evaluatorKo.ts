@@ -7,7 +7,7 @@
  */
 
 import type { GuessResult, LetterResult, KoSyllableResult, JamoHint } from './types.js';
-import { decomposeHangul, isHangulSyllable, splitCompoundCoda } from './jamo.js';
+import { decomposeHangul, isHangulSyllable, splitCompoundCoda, splitCompoundVowel } from './jamo.js';
 
 /**
  * Layer 1: Evaluate a Korean guess at the syllable block level.
@@ -65,9 +65,29 @@ export function evaluateGuessKo(guess: string, target: string): KoSyllableResult
     const inc = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) || 0) + 1);
     const dec = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) || 0) - 1);
     const has = (m: Map<string, number>, k: string) => (m.get(k) || 0) > 0;
+    const getVowelUnits = (vowel: string): string[] => {
+        const split = splitCompoundVowel(vowel);
+        return split ? [...split] : [vowel];
+    };
+    const incVowels = (m: Map<string, number>, vowel: string) => {
+        for (const unit of getVowelUnits(vowel)) inc(m, unit);
+    };
+    const decVowels = (m: Map<string, number>, vowel: string) => {
+        for (const unit of getVowelUnits(vowel)) dec(m, unit);
+    };
+    const consumeAvailableVowels = (m: Map<string, number>, vowel: string): boolean => {
+        let matched = false;
+        for (const unit of getVowelUnits(vowel)) {
+            if (has(m, unit)) {
+                dec(m, unit);
+                matched = true;
+            }
+        }
+        return matched;
+    };
 
     // --- Build target jamo count maps ---
-    // Compound codas are decomposed into individual consonant components.
+    // Compound codas and vowels are decomposed into matchable components.
     const consonantCounts = new Map<string, number>();
     const vowelCounts = new Map<string, number>();
 
@@ -75,7 +95,7 @@ export function evaluateGuessKo(guess: string, target: string): KoSyllableResult
         if (isHangulSyllable(ch)) {
             const d = decomposeHangul(ch);
             inc(consonantCounts, d.onset);
-            inc(vowelCounts, d.vowel);
+            incVowels(vowelCounts, d.vowel);
             if (d.coda) {
                 const split = splitCompoundCoda(d.coda);
                 if (split) {
@@ -94,7 +114,7 @@ export function evaluateGuessKo(guess: string, target: string): KoSyllableResult
         if (syllableResults[i] === 'correct' && isHangulSyllable(target[i])) {
             const d = decomposeHangul(target[i]);
             dec(consonantCounts, d.onset);
-            dec(vowelCounts, d.vowel);
+            decVowels(vowelCounts, d.vowel);
             if (d.coda) {
                 const split = splitCompoundCoda(d.coda);
                 if (split) {
@@ -139,7 +159,7 @@ export function evaluateGuessKo(guess: string, target: string): KoSyllableResult
         }
         if (g.vowel === t.vowel) {
             h.vowel = 'correct';
-            dec(vowelCounts, g.vowel);
+            decVowels(vowelCounts, g.vowel);
         }
         if (g.coda !== null && t.coda !== null && g.coda === t.coda) {
             h.coda = 'correct';
@@ -167,9 +187,8 @@ export function evaluateGuessKo(guess: string, target: string): KoSyllableResult
         }
 
         // Vowel
-        if (h.vowel !== 'correct' && has(vowelCounts, g.vowel)) {
+        if (h.vowel !== 'correct' && consumeAvailableVowels(vowelCounts, g.vowel)) {
             h.vowel = 'present';
-            dec(vowelCounts, g.vowel);
         }
 
         // Coda

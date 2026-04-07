@@ -282,6 +282,18 @@ describe('evaluateGuessKo', () => {
         expect(results[0].jamoHints).not.toBeNull();
         expect(results[0].jamoHints!.coda).toBe('present'); // ㄱ component matches target onset
     });
+
+    it('treats a simple vowel as present when the target has it inside a compound vowel', () => {
+        const results = evaluateGuessKo('지도', '대화');
+        expect(results[1].jamoHints).not.toBeNull();
+        expect(results[1].jamoHints!.vowel).toBe('present'); // ㅗ matches the ㅘ in 화
+    });
+
+    it('matches cross-position simple vowels against target compound vowels', () => {
+        const results = evaluateGuessKo('자신', '대화');
+        expect(results[0].jamoHints).not.toBeNull();
+        expect(results[0].jamoHints!.vowel).toBe('present'); // ㅏ matches the ㅘ in 화
+    });
 });
 
 describe('evaluateGuessKo: jamo count limiting (no over-counting)', () => {
@@ -328,6 +340,14 @@ describe('evaluateGuessKo: jamo count limiting (no over-counting)', () => {
         const results = evaluateGuessKo('나방', '나무');
         expect(results[0].syllable).toBe('correct');
         expect(results[0].jamoHints).toBeNull();
+        expect(results[1].jamoHints!.vowel).toBe('absent');
+    });
+
+    it('limits split compound-vowel units to one matching simple vowel each', () => {
+        // target 대화 has one ㅏ available via the compound vowel ㅘ in 화
+        // guess 자바 contains two ㅏ vowels, so only the first should consume it
+        const results = evaluateGuessKo('자바', '대화');
+        expect(results[0].jamoHints!.vowel).toBe('present');
         expect(results[1].jamoHints!.vowel).toBe('absent');
     });
 });
@@ -460,6 +480,34 @@ describe('Korean game: computeKeyboardMap', () => {
         expect(keyMap['ㄱ']).toBe('present');
         // ㅅ is present in target as onset of 시
         expect(keyMap['ㅅ']).toBe('present');
+    });
+
+    it('surfaces split compound-vowel matches on the keyboard for ㅗ', () => {
+        const game = createGame({
+            targetWords: ['대화', '대화', '대화', '대화'],
+            language: 'ko',
+        });
+
+        const state = submitGuess(game, '지도');
+        const keyMap = computeKeyboardMap(state);
+        const boardMap = computeKeyboardBoardMap(state);
+
+        expect(keyMap['ㅗ']).toBe('present');
+        expect(boardMap['ㅗ'][0]).toBe('present');
+    });
+
+    it('surfaces split compound-vowel matches on the keyboard for ㅏ', () => {
+        const game = createGame({
+            targetWords: ['대화', '대화', '대화', '대화'],
+            language: 'ko',
+        });
+
+        const state = submitGuess(game, '자신');
+        const keyMap = computeKeyboardMap(state);
+        const boardMap = computeKeyboardBoardMap(state);
+
+        expect(keyMap['ㅏ']).toBe('present');
+        expect(boardMap['ㅏ'][0]).toBe('present');
     });
 
     it('produces per-board jamo statuses via computeKeyboardBoardMap', () => {
