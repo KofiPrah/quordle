@@ -1,5 +1,5 @@
 /**
- * Korean Hangul Jamo decomposition/composition utilities.
+ * Korean Hangul jamo decomposition/composition utilities.
  *
  * Korean syllable blocks (가–힣, U+AC00–U+D7A3) are composed of:
  *   - 초성 (onset/initial consonant): 19 values
@@ -8,6 +8,8 @@
  *
  * Formula: syllableCode = 0xAC00 + (onset * 21 + vowel) * 28 + coda
  */
+
+import type { JamoSlot } from './types.js';
 
 // Onset (초성) consonants — 19 entries
 export const ONSETS = [
@@ -36,7 +38,12 @@ const CODA_COUNT = 28;
 export interface DecomposedSyllable {
     onset: string;
     vowel: string;
-    coda: string | null; // null = no coda (종성 없음)
+    coda: string | null; // null = no coda
+}
+
+export interface ExpandedJamoUnit {
+    jamo: string;
+    slot: JamoSlot;
 }
 
 /** Check if a character is a composed Hangul syllable block (가–힣) */
@@ -203,4 +210,40 @@ export function combineVowels(first: string, second: string): string | null {
 /** Split a compound vowel into its two component vowels. Returns null if not compound. */
 export function splitCompoundVowel(vowel: string): [string, string] | null {
     return COMPOUND_VOWEL_SPLIT[vowel] || null;
+}
+
+/** Expand a decomposed Hangul syllable into ordered atomic jamo units. */
+export function expandDecomposedSyllableToJamoUnits(syllable: DecomposedSyllable): ExpandedJamoUnit[] {
+    const units: ExpandedJamoUnit[] = [
+        { jamo: syllable.onset, slot: 'onset' },
+    ];
+
+    const splitVowel = splitCompoundVowel(syllable.vowel);
+    if (splitVowel) {
+        units.push(
+            { jamo: splitVowel[0], slot: 'vowel' },
+            { jamo: splitVowel[1], slot: 'vowel' },
+        );
+    } else {
+        units.push({ jamo: syllable.vowel, slot: 'vowel' });
+    }
+
+    if (syllable.coda) {
+        const splitCoda = splitCompoundCoda(syllable.coda);
+        if (splitCoda) {
+            units.push(
+                { jamo: splitCoda[0], slot: 'coda' },
+                { jamo: splitCoda[1], slot: 'coda' },
+            );
+        } else {
+            units.push({ jamo: syllable.coda, slot: 'coda' });
+        }
+    }
+
+    return units;
+}
+
+/** Expand a composed Hangul syllable block into ordered atomic jamo units. */
+export function expandHangulToJamoUnits(syllable: string): ExpandedJamoUnit[] {
+    return expandDecomposedSyllableToJamoUnits(decomposeHangul(syllable));
 }

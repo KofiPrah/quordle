@@ -1353,10 +1353,13 @@ button:focus-visible {
 
 /* Jamo hint dots (sub-syllable feedback for Korean) */
 .jamo-hints {
-  display: flex;
+  display: inline-grid;
+  grid-auto-flow: column;
   justify-content: center;
+  align-items: center;
   gap: 2px;
-  margin-top: 1px;
+  width: 100%;
+  margin-top: 2px;
   min-height: 6px;
 }
 
@@ -1383,12 +1386,22 @@ button:focus-visible {
 /* Tile with jamo hints needs slightly more height */
 .tile-with-jamo {
   flex-direction: column;
-  height: calc(var(--tile) + 8px);
-  padding-bottom: 2px;
+  justify-content: center;
+  height: calc(var(--tile) + 10px);
+  padding: 2px 1px 3px;
 }
 
 .row-condensed .tile-with-jamo {
-  height: calc(var(--tile-condensed) + 6px);
+  height: calc(var(--tile-condensed) + 8px);
+}
+
+.row-condensed .jamo-hints {
+  gap: 1px;
+}
+
+.row-condensed .jamo-dot {
+  width: 4px;
+  height: 4px;
 }
 
 /* Korean keyboard: shift row for doubled consonants */

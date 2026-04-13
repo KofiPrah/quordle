@@ -7,11 +7,23 @@ export type LetterResult = 'correct' | 'present' | 'absent';
 /** Result of evaluating a full guess against a target word */
 export type GuessResult = LetterResult[];
 
+/** Atomic jamo slot inside a Hangul syllable */
+export type JamoSlot = 'onset' | 'vowel' | 'coda';
+
+/** Atomic jamo hint unit for Korean evaluation */
+export interface JamoHintUnit {
+    jamo: string;
+    slot: JamoSlot;
+    status: LetterResult;
+}
+
 /** Jamo-level hint for a single syllable position (Korean only) */
 export interface JamoHint {
-    onset: LetterResult;
-    vowel: LetterResult;
-    coda: LetterResult | null; // null if no coda in either guess or target
+    units: JamoHintUnit[];
+    /** Legacy scalar fields kept for backwards compatibility with persisted games */
+    onset?: LetterResult;
+    vowel?: LetterResult;
+    coda?: LetterResult | null;
 }
 
 /** Extended result for Korean evaluation — syllable-level + optional jamo hints */

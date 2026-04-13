@@ -11,6 +11,7 @@ import {
     combineCodas,
     combineVowels,
     splitCompoundVowel,
+    expandHangulToJamoUnits,
 } from '../src/jamo.js';
 import { evaluateGuessSyllable, evaluateGuessKo } from '../src/evaluatorKo.js';
 import { validateGuess, createGame, submitGuess, setCurrentGuess, computeKeyboardMap, computeKeyboardBoardMap } from '../src/game.js';
@@ -173,6 +174,23 @@ describe('jamo: compound vowels', () => {
     });
 });
 
+describe('jamo: atomic expansion', () => {
+    it('expands compound vowels and compound codas into ordered units', () => {
+        expect(expandHangulToJamoUnits('과')).toEqual([
+            { jamo: 'ㄱ', slot: 'onset' },
+            { jamo: 'ㅗ', slot: 'vowel' },
+            { jamo: 'ㅏ', slot: 'vowel' },
+        ]);
+
+        expect(expandHangulToJamoUnits('닭')).toEqual([
+            { jamo: 'ㄷ', slot: 'onset' },
+            { jamo: 'ㅏ', slot: 'vowel' },
+            { jamo: 'ㄹ', slot: 'coda' },
+            { jamo: 'ㄱ', slot: 'coda' },
+        ]);
+    });
+});
+
 // ============================================================================
 // Korean evaluator
 // ============================================================================
@@ -283,16 +301,66 @@ describe('evaluateGuessKo', () => {
         expect(results[0].jamoHints!.coda).toBe('present'); // ㄱ component matches target onset
     });
 
-    it('treats a simple vowel as present when the target has it inside a compound vowel', () => {
+    it('treats a same-position simple vowel as correct when it matches the first unit of a compound vowel', () => {
         const results = evaluateGuessKo('지도', '대화');
         expect(results[1].jamoHints).not.toBeNull();
-        expect(results[1].jamoHints!.vowel).toBe('present'); // ㅗ matches the ㅘ in 화
+        expect(results[1].jamoHints!.vowel).toBe('correct'); // ㅗ matches the first unit of ㅘ in 화
     });
 
     it('matches cross-position simple vowels against target compound vowels', () => {
         const results = evaluateGuessKo('자신', '대화');
         expect(results[0].jamoHints).not.toBeNull();
         expect(results[0].jamoHints!.vowel).toBe('present'); // ㅏ matches the ㅘ in 화
+    });
+
+    const compoundVowelCases = [
+        { compound: 'ㅘ', first: 'ㅗ', second: 'ㅏ' },
+        { compound: 'ㅙ', first: 'ㅗ', second: 'ㅐ' },
+        { compound: 'ㅚ', first: 'ㅗ', second: 'ㅣ' },
+        { compound: 'ㅝ', first: 'ㅜ', second: 'ㅓ' },
+        { compound: 'ㅞ', first: 'ㅜ', second: 'ㅔ' },
+        { compound: 'ㅟ', first: 'ㅜ', second: 'ㅣ' },
+        { compound: 'ㅢ', first: 'ㅡ', second: 'ㅣ' },
+    ] as const;
+
+    for (const { compound, first, second } of compoundVowelCases) {
+        it(`marks the first atomic vowel of ${compound} as correct for ${first}`, () => {
+            const guess = composeHangul('ㅇ', first);
+            const target = composeHangul('ㅇ', compound);
+            const results = evaluateGuessKo(guess, target);
+            const vowelUnits = results[0].jamoHints!.units.filter((unit) => unit.slot === 'vowel');
+
+            expect(vowelUnits).toEqual([
+                { jamo: first, slot: 'vowel', status: 'correct' },
+            ]);
+        });
+
+        it(`marks the second atomic vowel of ${compound} as present for ${second}`, () => {
+            const guess = composeHangul('ㅇ', second);
+            const target = composeHangul('ㅇ', compound);
+            const results = evaluateGuessKo(guess, target);
+            const vowelUnits = results[0].jamoHints!.units.filter((unit) => unit.slot === 'vowel');
+
+            expect(vowelUnits).toEqual([
+                { jamo: second, slot: 'vowel', status: 'present' },
+            ]);
+        });
+    }
+
+    it('can produce mixed atomic-vowel statuses inside a compound vowel', () => {
+        const results = evaluateGuessKo('와', '왜');
+        const vowelUnits = results[0].jamoHints!.units.filter((unit) => unit.slot === 'vowel');
+
+        expect(vowelUnits).toEqual([
+            { jamo: 'ㅗ', slot: 'vowel', status: 'correct' },
+            { jamo: 'ㅏ', slot: 'vowel', status: 'absent' },
+        ]);
+    });
+
+    it('returns four atomic units for a four-jamo guess syllable', () => {
+        const results = evaluateGuessKo('닭', '넓');
+        expect(results[0].jamoHints!.units).toHaveLength(4);
+        expect(results[0].jamoHints!.units.map((unit) => unit.jamo)).toEqual(['ㄷ', 'ㅏ', 'ㄹ', 'ㄱ']);
     });
 });
 
@@ -482,7 +550,7 @@ describe('Korean game: computeKeyboardMap', () => {
         expect(keyMap['ㅅ']).toBe('present');
     });
 
-    it('surfaces split compound-vowel matches on the keyboard for ㅗ', () => {
+    it('surfaces same-position compound-vowel matches on the keyboard for ㅗ as correct', () => {
         const game = createGame({
             targetWords: ['대화', '대화', '대화', '대화'],
             language: 'ko',
@@ -492,8 +560,8 @@ describe('Korean game: computeKeyboardMap', () => {
         const keyMap = computeKeyboardMap(state);
         const boardMap = computeKeyboardBoardMap(state);
 
-        expect(keyMap['ㅗ']).toBe('present');
-        expect(boardMap['ㅗ'][0]).toBe('present');
+        expect(keyMap['ㅗ']).toBe('correct');
+        expect(boardMap['ㅗ'][0]).toBe('correct');
     });
 
     it('surfaces split compound-vowel matches on the keyboard for ㅏ', () => {
@@ -508,6 +576,38 @@ describe('Korean game: computeKeyboardMap', () => {
 
         expect(keyMap['ㅏ']).toBe('present');
         expect(boardMap['ㅏ'][0]).toBe('present');
+    });
+
+    it('marks solved compound-vowel component keys as correct', () => {
+        const game = createGame({
+            targetWords: ['과자', '과자', '과자', '과자'],
+            language: 'ko',
+        });
+
+        const state = submitGuess(game, '과자');
+        const keyMap = computeKeyboardMap(state);
+        const boardMap = computeKeyboardBoardMap(state);
+
+        expect(keyMap['ㅗ']).toBe('correct');
+        expect(keyMap['ㅏ']).toBe('correct');
+        expect(boardMap['ㅗ'][0]).toBe('correct');
+        expect(boardMap['ㅏ'][0]).toBe('correct');
+    });
+
+    it('marks solved compound-coda component keys as correct', () => {
+        const game = createGame({
+            targetWords: ['닭이', '닭이', '닭이', '닭이'],
+            language: 'ko',
+        });
+
+        const state = submitGuess(game, '닭이');
+        const keyMap = computeKeyboardMap(state);
+        const boardMap = computeKeyboardBoardMap(state);
+
+        expect(keyMap['ㄹ']).toBe('correct');
+        expect(keyMap['ㄱ']).toBe('correct');
+        expect(boardMap['ㄹ'][0]).toBe('correct');
+        expect(boardMap['ㄱ'][0]).toBe('correct');
     });
 
     it('produces per-board jamo statuses via computeKeyboardBoardMap', () => {

@@ -16,7 +16,8 @@ import { evaluateGuess } from "../engine/src/evaluator.ts";
 import { getQuordleWords, isValidGuess } from "../engine/src/words.ts";
 import { getDailyTargets } from "../engine/src/daily.ts";
 import { getLanguageConfig, isValidGuessForLanguage, getQuordleWordsForLanguage } from "../engine/src/languageConfig.ts";
-import { isHangulSyllable, decomposeHangul, composeHangul, isConsonant, isVowel, canBeOnset, canBeCoda, combineCodas, splitCompoundCoda, combineVowels, splitCompoundVowel, ONSETS, VOWELS } from "../engine/src/jamo.ts";
+import { canBeCoda, canBeOnset, combineCodas, combineVowels, expandHangulToJamoUnits, isConsonant, isHangulSyllable, isVowel, splitCompoundCoda, splitCompoundVowel } from "../engine/src/jamo.ts";
+import { backspaceKoIme, createKoImeState, finalizeKoIme, getKoImeDisplayChar, processKoImeJamo } from "../engine/src/koIme.ts";
 
 // Will eventually store the authenticated user's access_token
 let auth;
@@ -259,6 +260,68 @@ function getSavedStateTimestamp(payload) {
   return Number.isFinite(ts) ? ts : Date.now();
 }
 
+const VALID_HINT_STATUSES = new Set(['correct', 'present', 'absent']);
+
+function getBestHintStatus(units, slot) {
+  let best = null;
+  for (const unit of units) {
+    if (!unit || unit.slot !== slot) continue;
+    if (unit.status === 'correct') return 'correct';
+    if (unit.status === 'present') best = 'present';
+    if (unit.status === 'absent' && best === null) best = 'absent';
+  }
+  return best;
+}
+
+function synthesizeHintUnitsFromLegacy(syllable, hint) {
+  if (!hint || !isHangulSyllable(syllable)) return [];
+
+  return expandHangulToJamoUnits(syllable)
+    .map((unit) => {
+      const status = hint[unit.slot];
+      return VALID_HINT_STATUSES.has(status) ? { ...unit, status } : null;
+    })
+    .filter(Boolean);
+}
+
+function normalizeJamoHint(hint, syllable) {
+  if (!hint || typeof hint !== 'object') return null;
+
+  const units = Array.isArray(hint.units)
+    ? hint.units.filter((unit) => unit && typeof unit.jamo === 'string' && ['onset', 'vowel', 'coda'].includes(unit.slot) && VALID_HINT_STATUSES.has(unit.status))
+    : synthesizeHintUnitsFromLegacy(syllable, hint);
+
+  const onset = VALID_HINT_STATUSES.has(hint.onset) ? hint.onset : getBestHintStatus(units, 'onset');
+  const vowel = VALID_HINT_STATUSES.has(hint.vowel) ? hint.vowel : getBestHintStatus(units, 'vowel');
+  const coda = VALID_HINT_STATUSES.has(hint.coda) ? hint.coda : getBestHintStatus(units, 'coda');
+
+  return {
+    ...hint,
+    units,
+    ...(onset ? { onset } : {}),
+    ...(vowel ? { vowel } : {}),
+    coda,
+  };
+}
+
+function normalizeKoResults(board) {
+  if (!Array.isArray(board.koResults)) return board.koResults;
+
+  return board.koResults.map((guessResults, guessIdx) => {
+    if (!Array.isArray(guessResults)) return guessResults;
+
+    return guessResults.map((syllableResult, syllIdx) => {
+      if (!syllableResult || typeof syllableResult !== 'object') return syllableResult;
+      const guessSyllable = board.guesses?.[guessIdx]?.[syllIdx] || '';
+
+      return {
+        ...syllableResult,
+        jamoHints: syllableResult.jamoHints ? normalizeJamoHint(syllableResult.jamoHints, guessSyllable) : null,
+      };
+    });
+  });
+}
+
 function normalizeRestoredGameState(state, language = currentLanguage) {
   if (!state || typeof state !== 'object' || !Array.isArray(state.boards) || state.boards.length !== 4) {
     return null;
@@ -273,6 +336,7 @@ function normalizeRestoredGameState(state, language = currentLanguage) {
       ...board,
       guesses: board.guesses,
       results: board.results,
+      koResults: language === 'ko' ? normalizeKoResults(board) : board.koResults,
       solved: Boolean(board.solved),
       solvedOnGuess: Number.isInteger(board.solvedOnGuess) ? board.solvedOnGuess : null,
     };
@@ -1215,7 +1279,6 @@ function renderBoard(board, index) {
 function renderRow(guess, result, isCurrent = false, isCondensed = false, koResult = null) {
   const lang = currentLanguage;
   const wordLen = getLanguageConfig(lang).wordLength;
-  // For Korean, split by character. For English, split by letter.
   const chars = lang === 'ko' ? Array.from(guess.padEnd(wordLen, ' ')) : guess.padEnd(wordLen, ' ').split('');
 
   const tiles = chars.map((ch, i) => {
@@ -1226,21 +1289,20 @@ function renderRow(guess, result, isCurrent = false, isCondensed = false, koResu
       tileClass += ' tile-filled';
     }
 
-    // Display character
     const display = lang === 'ko' ? ch.trim() : ch.trim().toUpperCase();
 
-    // Jamo hint indicators (Korean only, for non-correct scored tiles)
     let jamoHintHtml = '';
     if (lang === 'ko' && koResult && koResult[i] && koResult[i].jamoHints && result && result[i] !== 'correct') {
-      const h = koResult[i].jamoHints;
-      tileClass += ' tile-with-jamo';
-      jamoHintHtml = `
-        <div class="jamo-hints">
-          <span class="jamo-dot jamo-dot-${h.onset}" title="초성"></span>
-          <span class="jamo-dot jamo-dot-${h.vowel}" title="중성"></span>
-          ${h.coda !== null ? `<span class="jamo-dot jamo-dot-${h.coda}" title="종성"></span>` : ''}
-        </div>
-      `;
+      const hint = normalizeJamoHint(koResult[i].jamoHints, ch);
+      const units = hint?.units || [];
+      if (units.length > 0) {
+        tileClass += ' tile-with-jamo';
+        jamoHintHtml = `
+          <div class="jamo-hints" data-unit-count="${units.length}">
+            ${units.map((unit) => `<span class="jamo-dot jamo-dot-${unit.status}" title="${unit.slot}: ${unit.jamo}"></span>`).join('')}
+          </div>
+        `;
+      }
     }
 
     return `<div class="${tileClass}">${display}${jamoHintHtml}</div>`;
@@ -1327,31 +1389,22 @@ function renderKoreanKeyboard() {
 //   3: onset + vowel + coda → composed syllable with coda (간)
 //   4: onset + vowel + compound coda → composed syllable with compound coda (갈ㅂ→값)
 
-let imeState = {
-  onset: null,    // onset jamo or null
-  vowel: null,    // vowel jamo or null
-  coda: null,     // coda jamo or null (single or compound)
-};
+let imeState = createKoImeState();
 
 function imeReset() {
-  imeState = { onset: null, vowel: null, coda: null };
+  imeState = createKoImeState();
 }
 
 /** Get the currently composing character for display (partial syllable or jamo) */
 function compositionDisplayChar() {
-  if (!imeState.onset && !imeState.vowel) return '';
-  if (imeState.onset && !imeState.vowel) return imeState.onset; // standalone jamo
-  if (imeState.onset && imeState.vowel) {
-    return composeHangul(imeState.onset, imeState.vowel, imeState.coda);
-  }
-  return '';
+  return getKoImeDisplayChar(imeState);
 }
 
 /** Finalize the current composition: append the composed syllable to currentGuess */
 function imeFinalize() {
-  const ch = compositionDisplayChar();
-  imeReset();
-  return ch;
+  const result = finalizeKoIme(imeState);
+  imeState = result.state;
+  return result.committed;
 }
 
 /**
@@ -1360,7 +1413,7 @@ function imeFinalize() {
  *   - committed: fully composed syllable(s) to append to gameState.currentGuess
  *   - display: the current in-progress composition character (for display only)
  */
-function imeProcessJamo(jamo) {
+function imeProcessJamoLegacy(jamo) {
   const wordLen = getLanguageConfig('ko').wordLength;
   const currentLen = gameState.currentGuess.length;
 
@@ -1459,7 +1512,7 @@ function imeProcessJamo(jamo) {
 }
 
 /** Handle backspace in Korean IME mode */
-function imeBackspace() {
+function imeBackspaceLegacy() {
   if (imeState.coda) {
     // Remove coda (or shrink compound coda)
     const split = splitCompoundCoda(imeState.coda);
@@ -1485,6 +1538,18 @@ function imeBackspace() {
     return { modified: true, display: '' };
   }
   return { modified: false, display: '' };
+}
+
+function imeProcessJamo(jamo) {
+  const result = processKoImeJamo(imeState, jamo);
+  imeState = result.state;
+  return { committed: result.committed, display: result.display };
+}
+
+function imeBackspace() {
+  const result = backspaceKoIme(imeState);
+  imeState = result.state;
+  return { modified: result.modified, display: result.display };
 }
 
 function handleKeyPress(key) {

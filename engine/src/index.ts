@@ -3,6 +3,8 @@ export type {
     Language,
     LetterResult,
     GuessResult,
+    JamoSlot,
+    JamoHintUnit,
     JamoHint,
     KoSyllableResult,
     BoardState,
@@ -45,10 +47,21 @@ export {
     combineCodas,
     combineVowels,
     splitCompoundVowel,
+    expandDecomposedSyllableToJamoUnits,
+    expandHangulToJamoUnits,
     ONSETS,
     VOWELS,
     CODAS,
 } from './jamo.js';
+
+// Korean IME helpers
+export {
+    createKoImeState,
+    getKoImeDisplayChar,
+    finalizeKoIme,
+    processKoImeJamo,
+    backspaceKoIme,
+} from './koIme.js';
 
 // Words and validation (English — backward compat)
 export {
