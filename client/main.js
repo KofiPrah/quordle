@@ -18,6 +18,13 @@ import { getDailyTargets } from "../engine/src/daily.ts";
 import { getLanguageConfig, isValidGuessForLanguage, getQuordleWordsForLanguage } from "../engine/src/languageConfig.ts";
 import { canBeCoda, canBeOnset, combineCodas, combineVowels, expandHangulToJamoUnits, isConsonant, isHangulSyllable, isVowel, splitCompoundCoda, splitCompoundVowel } from "../engine/src/jamo.ts";
 import { backspaceKoIme, createKoImeState, finalizeKoIme, getKoImeDisplayChar, processKoImeJamo } from "../engine/src/koIme.ts";
+import {
+  getRemainingGuessCount,
+  partitionBoards,
+  reconcileExpandedSolvedBoardIndex,
+  reconcileSelectedBoardIndex,
+  toggleExpandedSolvedBoardIndex,
+} from "./src/boardLayout.js";
 
 // Will eventually store the authenticated user's access_token
 let auth;
@@ -63,12 +70,48 @@ let activityViewportBound = false;
 let viewportSyncFrame = null;
 let leaderboardModalOpen = false;
 let boardScrollTop = 0;
+let selectedBoardIndex = null;
+let expandedSolvedBoardIndex = null;
+let boardUiGameIdentity = null;
+let pendingBoardSelectionAnnouncement = '';
 
 function resetBoardScrollPosition() {
   boardScrollTop = 0;
   const boardRegion = document.querySelector('.game-scroll-region');
   if (boardRegion) {
     boardRegion.scrollTop = 0;
+  }
+}
+
+function resetBoardUiState() {
+  selectedBoardIndex = null;
+  expandedSolvedBoardIndex = null;
+  boardUiGameIdentity = null;
+  pendingBoardSelectionAnnouncement = '';
+}
+
+function getBoardUiGameIdentity() {
+  if (!gameState?.boards) return null;
+  const targets = gameState.boards.map((board) => board.targetWord).join('|');
+  return `${currentLanguage}:${gameMode}:${targets}`;
+}
+
+function syncBoardUiState() {
+  if (!gameState?.boards) return;
+
+  const nextIdentity = getBoardUiGameIdentity();
+  if (nextIdentity !== boardUiGameIdentity) {
+    selectedBoardIndex = null;
+    expandedSolvedBoardIndex = null;
+    boardUiGameIdentity = nextIdentity;
+  }
+
+  const previousSelection = selectedBoardIndex;
+  selectedBoardIndex = reconcileSelectedBoardIndex(gameState.boards, selectedBoardIndex);
+  expandedSolvedBoardIndex = reconcileExpandedSolvedBoardIndex(gameState.boards, expandedSolvedBoardIndex);
+
+  if (previousSelection !== null && selectedBoardIndex !== null && previousSelection !== selectedBoardIndex) {
+    pendingBoardSelectionAnnouncement = `Board ${selectedBoardIndex + 1} selected`;
   }
 }
 
@@ -506,7 +549,7 @@ function saveGameState({ overrideState = gameState, overrideMode = gameMode, ove
       gameMode: overrideMode,
       language: overrideLanguage,
       dateKey: overrideMode === "daily" ? getTodayDateKey() : null,
-      lastActiveAt,
+      lastActiveAt: lastActivityAt,
       savedAt: Date.now(),
     };
     localStorage.setItem(key, JSON.stringify(payload));
@@ -575,7 +618,7 @@ function expireCurrentSession() {
     gameMode,
     language: currentLanguage,
     dateKey: gameMode === "daily" ? getTodayDateKey() : null,
-    lastActiveAt,
+    lastActiveAt: lastActivityAt,
     savedAt: Date.now(),
   };
 
@@ -859,6 +902,7 @@ function startNewDailyGame() {
   uiScreen = "game";
   leaderboardModalOpen = false;
   resetBoardScrollPosition();
+  resetBoardUiState();
   initialStateApplied = false;
   expiredSessionSnapshot = null;
   koreanShiftActive = false;
@@ -886,6 +930,7 @@ function startNewPracticeGame() {
   uiScreen = "game";
   leaderboardModalOpen = false;
   resetBoardScrollPosition();
+  resetBoardUiState();
   initialStateApplied = false;
   expiredSessionSnapshot = null;
   koreanShiftActive = false;
@@ -1096,9 +1141,12 @@ function closeLeaderboardModal() {
 
 function renderGameScreen() {
   const app = document.querySelector('#app');
+  syncBoardUiState();
   const solvedCount = gameState.boards.filter(b => b.solved).length;
   const lang = currentLanguage;
   const currentGuessDisplay = getCurrentGuessDisplayText();
+  const selectionAnnouncement = pendingBoardSelectionAnnouncement;
+  pendingBoardSelectionAnnouncement = '';
   const errorHtml = `
     <div class="guess-error-slot" aria-live="polite" aria-atomic="true">
       ${guessError ? `<div class="guess-error">${guessError}</div>` : ''}
@@ -1111,10 +1159,6 @@ function renderGameScreen() {
         <div class="game-status game-status-done">
           <div class="game-status-main">
             <span class="game-status-badge ${gameState.won ? 'game-status-badge-won' : 'game-status-badge-lost'}">${gameState.won ? 'Won' : 'Lost'}</span>
-            <div class="game-status-metrics">
-              <span class="game-stat-pill"><strong>${solvedCount}/4</strong><span>Solved</span></span>
-              <span class="game-stat-pill"><strong>${gameState.guessCount}</strong><span>Guesses</span></span>
-            </div>
           </div>
           ${renderResultsLinkButton()}
         </div>
@@ -1124,10 +1168,6 @@ function renderGameScreen() {
           <div class="game-status-main">
             <span class="game-status-label">Current</span>
             <span class="guess-text">${currentGuessDisplay}</span>
-          </div>
-          <div class="game-status-metrics">
-            <span class="game-stat-pill"><strong>${solvedCount}/4</strong><span>Solved</span></span>
-            <span class="game-stat-pill"><strong>${gameState.guessCount}/${gameState.maxGuesses}</strong><span>Guesses</span></span>
           </div>
         </div>
         ${errorHtml}
@@ -1140,6 +1180,16 @@ function renderGameScreen() {
       <button class="lang-btn ${lang === 'ko' ? 'lang-btn-active' : ''}" data-lang="ko">🇰🇷 KO</button>
     </div>
   `;
+  const headerStats = `
+    <div class="game-header-stats" aria-label="Game progress">
+      <span class="game-header-stat" aria-label="${solvedCount} of 4 boards solved">
+        <strong>${solvedCount}/4</strong><span class="game-header-stat-label">Solved</span>
+      </span>
+      <span class="game-header-stat" aria-label="${gameState.guessCount} of ${gameState.maxGuesses} guesses used">
+        <strong>${gameState.guessCount}/${gameState.maxGuesses}</strong><span class="game-header-stat-label">Guesses</span>
+      </span>
+    </div>
+  `;
 
   app.innerHTML = `
     <div class="quordle-container ${lang === 'ko' ? 'lang-ko' : 'lang-en'}">
@@ -1147,13 +1197,16 @@ function renderGameScreen() {
         <h1 class="game-title">Quordle${gameMode === 'practice' ? ' <span class="mode-badge">Practice</span>' : ''}</h1>
         <div class="game-header-actions">
           ${langToggle}
+          ${headerStats}
           ${renderLeaderboardButton()}
         </div>
       </div>
 
       <main class="boards-grid game-scroll-region" aria-label="Quordle boards">
-        ${gameState.boards.map((board, i) => renderBoard(board, i)).join('')}
+        ${renderBoardRegion()}
       </main>
+
+      <div class="sr-only" aria-live="polite" aria-atomic="true">${selectionAnnouncement}</div>
 
       <section class="game-input-dock" aria-label="Guess controls">
         ${statusHtml}
@@ -1390,48 +1443,99 @@ function renderLeaderboardContent() {
 // renderBanner removed — game status is now inline in renderGameScreen,
 // full results are in renderResultsScreen
 
-function renderBoard(board, index) {
+function renderBoardRegion() {
+  const { active, solved } = partitionBoards(gameState.boards);
+  const solvedHtml = solved.length > 0
+    ? `<section class="solved-boards-strip" aria-label="Solved boards">
+        ${solved.map(({ board, index }) => renderSolvedBoardCard(board, index)).join('')}
+      </section>`
+    : '';
+  const activeHtml = active.length > 0
+    ? `<section class="active-boards-grid" data-active-count="${active.length}" aria-label="Active boards">
+        ${active.map(({ board, index }) => renderActiveBoard(board, index)).join('')}
+      </section>`
+    : '';
+
+  return `${solvedHtml}${activeHtml}`;
+}
+
+function renderSolvedBoardCard(board, index) {
+  const expanded = expandedSolvedBoardIndex === index;
+  const solvedGuessCount = board.solvedOnGuess ?? board.guesses.length;
+  const answer = currentLanguage === 'ko' ? board.targetWord : board.targetWord.toUpperCase();
+  const historyId = `solved-board-history-${index}`;
   const rows = [];
-  const currentGuessIndex = gameState.guessCount; // 0-based index for current input row
+  const visibleGuessCount = Math.min(solvedGuessCount, board.guesses.length);
+  for (let guessIndex = 0; guessIndex < visibleGuessCount; guessIndex += 1) {
+    const koResult = currentLanguage === 'ko' && board.koResults ? board.koResults[guessIndex] : null;
+    rows.push(renderRow(board.guesses[guessIndex], board.results[guessIndex], false, true, koResult));
+  }
+  const historyHtml = `<div class="solved-board-history" id="${historyId}" ${expanded ? '' : 'hidden'}>${rows.join('')}</div>`;
+
+  return `
+    <article class="solved-board-card ${expanded ? 'solved-board-card-expanded' : ''}">
+      <button
+        class="solved-board-toggle"
+        type="button"
+        data-toggle-solved-board="${index}"
+        aria-expanded="${expanded}"
+        aria-controls="${historyId}"
+        aria-label="${expanded ? 'Collapse' : 'Expand'} solved board ${index + 1}, ${answer}, solved in ${solvedGuessCount} guesses"
+      >
+        <span class="solved-board-check" aria-hidden="true">✓</span>
+        <span class="solved-board-number">#${index + 1}</span>
+        <strong class="solved-board-answer">${answer}</strong>
+        <span class="solved-board-meta">${solvedGuessCount} ${solvedGuessCount === 1 ? 'guess' : 'guesses'}</span>
+        <span class="solved-board-chevron" aria-hidden="true">${expanded ? '▴' : '▾'}</span>
+      </button>
+      ${historyHtml}
+    </article>
+  `;
+}
+
+function renderActiveBoard(board, index) {
+  const rows = [];
   const lang = currentLanguage;
   const wordLen = getLanguageConfig(lang).wordLength;
-  const emptyStr = ' '.repeat(wordLen);
 
-  // Determine solve row index (0-based) if board is solved
-  const solveRowIndex = board.solvedOnGuess !== null ? board.solvedOnGuess - 1 : null;
-
-  // Submitted guesses (always condensed style)
   for (let i = 0; i < board.guesses.length; i++) {
-    // If board is solved and this row is after the solve, show condensed empty
-    if (solveRowIndex !== null && i > solveRowIndex) {
-      rows.push(renderRow(emptyStr, null, false, true, null)); // condensed empty
-    } else {
-      const koResult = (lang === 'ko' && board.koResults) ? board.koResults[i] : null;
-      rows.push(renderRow(board.guesses[i], board.results[i], false, true, koResult)); // condensed with result
-    }
+    const koResult = (lang === 'ko' && board.koResults) ? board.koResults[i] : null;
+    rows.push(renderRow(board.guesses[i], board.results[i], false, true, koResult));
   }
 
-  // Current guess row (full tiles, only if board not solved and game not over)
-  if (!board.solved && !gameState.gameOver && board.guesses.length < gameState.maxGuesses) {
-    // Pad current guess for display
+  if (!gameState.gameOver && board.guesses.length < gameState.maxGuesses) {
     const displayGuess = lang === 'ko'
       ? (gameState.currentGuess + compositionDisplayChar()).padEnd(wordLen, ' ')
       : gameState.currentGuess.padEnd(wordLen, ' ');
-    rows.push(renderRow(displayGuess, null, true, false, null)); // full tiles
+    rows.push(renderRow(displayGuess, null, true, false, null));
   }
 
-  // Empty rows after current (condensed empty)
-  const emptyRowStart = board.solved || gameState.gameOver ? board.guesses.length : board.guesses.length + 1;
-  for (let i = emptyRowStart; i < gameState.maxGuesses; i++) {
-    rows.push(renderRow(emptyStr, null, false, true, null)); // condensed empty
-  }
+  const remainingGuesses = getRemainingGuessCount(gameState.maxGuesses, gameState.guessCount);
+  const remainingHtml = !gameState.gameOver && remainingGuesses > 0
+    ? `<div class="board-remaining" aria-label="${remainingGuesses} guesses remaining">
+        <span class="board-remaining-mark" aria-hidden="true"></span>
+        <span>${remainingGuesses} ${remainingGuesses === 1 ? 'guess' : 'guesses'} remaining</span>
+      </div>`
+    : '';
+  const selected = selectedBoardIndex === index;
+  const headerId = `board-header-${index}`;
 
-  const solvedClass = board.solved ? 'board-solved' : '';
   return `
-    <div class="board ${solvedClass}">
-      <div class="board-number">#${index + 1}</div>
+    <section class="board board-active ${selected ? 'board-selected' : ''}" aria-labelledby="${headerId}">
+      <button
+        class="board-select-button"
+        id="${headerId}"
+        type="button"
+        data-select-board="${index}"
+        aria-pressed="${selected}"
+        aria-label="Select board ${index + 1}${selected ? ', currently selected' : ''}"
+      >
+        <span>#${index + 1}</span>
+        <span class="board-selected-indicator">${selected ? 'Selected' : 'Select'}</span>
+      </button>
       ${rows.join('')}
-    </div>
+      ${remainingHtml}
+    </section>
   `;
 }
 
@@ -1862,6 +1966,34 @@ function setupKeyboardListeners() {
     }, { passive: true });
   }
 
+  document.querySelectorAll('[data-select-board]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const boardIndex = Number(button.dataset.selectBoard);
+      if (!Number.isInteger(boardIndex) || gameState.boards[boardIndex]?.solved) return;
+      if (selectedBoardIndex !== boardIndex) {
+        selectedBoardIndex = boardIndex;
+        pendingBoardSelectionAnnouncement = `Board ${boardIndex + 1} selected`;
+      }
+      renderApp();
+      setupKeyboardListeners();
+      requestAnimationFrame(() => document.querySelector(`[data-select-board="${boardIndex}"]`)?.focus());
+    });
+  });
+
+  document.querySelectorAll('[data-toggle-solved-board]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const boardIndex = Number(button.dataset.toggleSolvedBoard);
+      expandedSolvedBoardIndex = toggleExpandedSolvedBoardIndex(
+        gameState.boards,
+        expandedSolvedBoardIndex,
+        boardIndex,
+      );
+      renderApp();
+      setupKeyboardListeners();
+      requestAnimationFrame(() => document.querySelector(`[data-toggle-solved-board="${boardIndex}"]`)?.focus());
+    });
+  });
+
   const leaderboardTrigger = document.querySelector('.leaderboard-trigger');
   if (leaderboardTrigger) {
     leaderboardTrigger.addEventListener('click', openLeaderboardModal);
@@ -2061,6 +2193,7 @@ function switchLanguage(newLang) {
   localStorage.setItem('quordle_language', newLang);
   leaderboardModalOpen = false;
   resetBoardScrollPosition();
+  resetBoardUiState();
   expiredSessionSnapshot = null;
   koreanShiftActive = false;
   imeReset();
