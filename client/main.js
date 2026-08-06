@@ -102,6 +102,8 @@ function logViewportMetrics(measurement) {
     measuredHeight: measurement.height,
     innerHeight: window.innerHeight,
     visualViewportHeight: window.visualViewport?.height,
+    discordSafeAreaTop: getComputedStyle(document.documentElement).getPropertyValue('--discord-safe-area-inset-top'),
+    resolvedSafeAreaTop: getComputedStyle(document.documentElement).getPropertyValue('--app-safe-area-top'),
     documentClientHeight: document.documentElement.clientHeight,
     bodyHeight: body.height,
     appHeight: app?.height,

@@ -21,6 +21,12 @@
   --key-min-width: clamp(30px, 8.4vw, 38px);
   --key-font-size: clamp(0.8rem, 2vw, 1rem);
   --key-padding: clamp(7px, 1.7vw, 11px);
+
+  /* Discord injects these custom properties for its mobile Activity chrome. */
+  --app-safe-area-top: var(--discord-safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --app-safe-area-right: var(--discord-safe-area-inset-right, env(safe-area-inset-right, 0px));
+  --app-safe-area-bottom: var(--discord-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --app-safe-area-left: var(--discord-safe-area-inset-left, env(safe-area-inset-left, 0px));
 }
 
 a {
@@ -118,7 +124,10 @@ button:focus-visible {
     "main"
     "dock";
   gap: clamp(0.2rem, 0.8vh, 0.6rem);
-  padding: max(clamp(0.25rem, 1vh, 1rem), env(safe-area-inset-top, 0px)) clamp(0.25rem, 1vh, 1rem) 0;
+  padding-top: calc(var(--app-safe-area-top) + clamp(0.25rem, 1vh, 1rem));
+  padding-right: calc(var(--app-safe-area-right) + clamp(0.25rem, 1vh, 1rem));
+  padding-bottom: 0;
+  padding-left: calc(var(--app-safe-area-left) + clamp(0.25rem, 1vh, 1rem));
   max-width: 1280px;
   width: 100%;
   height: var(--app-height, 100%);
@@ -311,6 +320,24 @@ button:focus-visible {
   align-self: stretch;
 }
 
+.boards-grid {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+.boards-grid::-webkit-scrollbar {
+  width: 7px;
+}
+
+.boards-grid::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.boards-grid::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
 .board {
   display: flex;
   flex-direction: column;
@@ -318,7 +345,7 @@ button:focus-visible {
   padding: var(--tile-gap);
   border-radius: 8px;
   position: relative;
-  align-items: center
+  align-items: center;
 }
 
 .board-solved {
@@ -422,7 +449,7 @@ button:focus-visible {
   position: relative;
   z-index: 20;
   overflow: hidden;
-  padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
+  padding-bottom: max(8px, var(--app-safe-area-bottom));
   background: #242424;
 }
 
@@ -832,7 +859,10 @@ button:focus-visible {
   z-index: 1000;
   display: grid;
   place-items: center;
-  padding: max(0.75rem, env(safe-area-inset-top, 0px)) 0.75rem max(0.75rem, env(safe-area-inset-bottom, 0px));
+  padding-top: max(0.75rem, var(--app-safe-area-top));
+  padding-right: max(0.75rem, var(--app-safe-area-right));
+  padding-bottom: max(0.75rem, var(--app-safe-area-bottom));
+  padding-left: max(0.75rem, var(--app-safe-area-left));
   box-sizing: border-box;
   background: rgba(0, 0, 0, 0.72);
 }
@@ -1018,7 +1048,7 @@ button:focus-visible {
 /* ========== TOAST NOTIFICATIONS ========== */
 .toast {
   position: fixed;
-  top: calc(env(safe-area-inset-top, 0px) + 0.75rem);
+  top: calc(var(--app-safe-area-top) + 0.75rem);
   left: 50%;
   transform: translateX(-50%) translateY(-100%);
   background: rgba(0, 0, 0, 0.85);
@@ -1039,6 +1069,150 @@ button:focus-visible {
 
 /* ========== RESPONSIVE ADJUSTMENTS ========== */
 
+/* Desktop Activity layout: keep the game composed instead of stretching boards
+   into the full width and height of Discord's flexible iframe. */
+@media (min-width: 701px) {
+  :root {
+    --tile: clamp(38px, 3.2vw, 46px);
+    --tile-condensed: clamp(18px, 1.55vw, 21px);
+    --key-height: 52px;
+    --key-min-width: clamp(40px, 3vw, 44px);
+    --key-font-size: 0.95rem;
+    --key-padding: 10px;
+  }
+
+  .quordle-container {
+    max-width: 1040px;
+    gap: clamp(0.45rem, 0.9vh, 0.7rem);
+    padding-top: calc(var(--app-safe-area-top) + clamp(0.75rem, 1.4vh, 1.1rem));
+    padding-right: calc(var(--app-safe-area-right) + 1rem);
+    padding-left: calc(var(--app-safe-area-left) + 1rem);
+  }
+
+  .game-header {
+    padding: 0.1rem 0.35rem 0.55rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .game-header .game-title {
+    font-size: clamp(1.55rem, 2.4vw, 1.9rem);
+    font-weight: 750;
+    letter-spacing: -0.035em;
+  }
+
+  .game-header-actions {
+    gap: 0.55rem;
+  }
+
+  .lang-toggle {
+    padding: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 8px;
+  }
+
+  .lang-btn {
+    padding: 0.28rem 0.65rem;
+  }
+
+  .results-link {
+    min-height: 32px;
+    padding: 0.3rem 0.75rem;
+  }
+
+  .boards-grid {
+    grid-template-columns: repeat(2, max-content);
+    grid-template-rows: repeat(2, max-content);
+    justify-content: safe center;
+    align-content: safe center;
+    column-gap: clamp(2.5rem, 6vw, 4.5rem);
+    row-gap: 0.75rem;
+    padding: 0.75rem;
+    background:
+      radial-gradient(circle at 50% 0%, rgba(88, 101, 242, 0.08), transparent 42%),
+      rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    box-shadow:
+      0 16px 40px rgba(0, 0, 0, 0.16),
+      inset 0 1px 0 rgba(255, 255, 255, 0.025);
+    scrollbar-gutter: auto;
+  }
+
+  .board {
+    width: max-content;
+    align-self: start;
+    padding: 0.55rem 0.7rem;
+    background: rgba(12, 13, 16, 0.32);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 12px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  }
+
+  .board-number {
+    top: -0.5rem;
+    left: -0.5rem;
+    min-width: 1.45rem;
+    padding: 0.15rem 0.4rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    background: #45474d;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.28);
+    z-index: 1;
+  }
+
+  .game-input-dock {
+    width: 100%;
+    justify-self: center;
+    gap: 0.2rem;
+    background: transparent;
+  }
+
+  .game-status-wrap {
+    gap: 0.2rem;
+  }
+
+  .game-status {
+    padding: 0.55rem 0.75rem;
+    background: rgba(255, 255, 255, 0.045);
+    border-color: rgba(255, 255, 255, 0.09);
+    border-radius: 12px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  }
+
+  .guess-error-slot {
+    min-height: 1.35rem;
+    padding-left: 0.25rem;
+  }
+
+  .guess-error {
+    padding: 0.25rem 0.65rem;
+    font-size: 0.8rem;
+  }
+
+  .keyboard {
+    gap: 6px;
+    padding: 0.45rem 0.25rem 0.65rem;
+  }
+
+  .keyboard-row {
+    gap: 6px;
+  }
+
+  .key {
+    border-radius: 7px;
+    background: #4b4d52;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+
+  .key:hover {
+    background: #5a5d63;
+  }
+
+  .key-wide {
+    min-width: 74px;
+  }
+}
+
 /* Mobile layout */
 @media (max-width: 700px) {
   :root {
@@ -1054,7 +1228,8 @@ button:focus-visible {
 
   .quordle-container {
     gap: clamp(0.12rem, 0.4vh, 0.34rem);
-    padding-inline: clamp(0.25rem, 1vw, 0.5rem);
+    padding-right: calc(var(--app-safe-area-right) + clamp(0.25rem, 1vw, 0.5rem));
+    padding-left: calc(var(--app-safe-area-left) + clamp(0.25rem, 1vw, 0.5rem));
   }
 
   .game-header {
@@ -1144,8 +1319,9 @@ button:focus-visible {
 
   .leaderboard-modal-backdrop {
     place-items: end center;
-    padding-inline: 0;
-    padding-bottom: 0;
+    padding-right: var(--app-safe-area-right);
+    padding-bottom: var(--app-safe-area-bottom);
+    padding-left: var(--app-safe-area-left);
   }
 
   .leaderboard-modal {
