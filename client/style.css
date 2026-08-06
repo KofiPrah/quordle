@@ -1681,11 +1681,33 @@ button:focus-visible {
 .boards-grid {
   display: flex;
   flex-direction: column;
-  justify-content: flex-start;
+  justify-content: safe center;
   align-content: normal;
-  align-items: stretch;
+  align-items: center;
   gap: var(--board-gap);
   padding: var(--board-gap);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.boards-stage {
+  width: min(100%, 820px);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--board-gap);
+  box-sizing: border-box;
+  padding: clamp(0.45rem, 1vw, 0.8rem);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 50% 10%, rgba(88, 101, 242, 0.13), transparent 48%),
+    rgba(255, 255, 255, 0.035);
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .active-boards-grid {
@@ -1916,6 +1938,11 @@ button:focus-visible {
     padding: 0;
   }
 
+  .boards-stage {
+    padding: clamp(0.3rem, 1.25vw, 0.5rem);
+    border-radius: 13px;
+  }
+
   .board-active {
     padding: clamp(0.2rem, 0.65vh, 0.4rem);
   }
@@ -1977,6 +2004,14 @@ button:focus-visible {
 
   .game-header {
     padding-bottom: 0.15rem;
+  }
+
+  .boards-grid {
+    justify-content: flex-start;
+  }
+
+  .boards-stage {
+    padding-block: 0.3rem;
   }
 
   .game-header .game-title {

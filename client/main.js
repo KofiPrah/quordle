@@ -1456,7 +1456,7 @@ function renderBoardRegion() {
       </section>`
     : '';
 
-  return `${solvedHtml}${activeHtml}`;
+  return `<div class="boards-stage">${solvedHtml}${activeHtml}</div>`;
 }
 
 function renderSolvedBoardCard(board, index) {
