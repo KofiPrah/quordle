@@ -14,6 +14,12 @@ export type {
     LanguageConfig,
 } from './types.js';
 
+export type {
+    DictionarySense,
+    KoreanDictionaryEntry,
+    KoreanDictionarySnapshot,
+} from './koreanDictionary.js';
+
 // Game logic
 export {
     createGame,
@@ -81,6 +87,12 @@ export {
     isValidWordForLanguage,
     getQuordleWordsForLanguage,
 } from './languageConfig.js';
+
+export {
+    KOREAN_LEXICON_SOURCE,
+    isValidKoreanGuess,
+    isKoreanAnswerWord,
+} from './koreanLexicon.js';
 
 // Daily
 export { getDailyTargets } from './daily.js';

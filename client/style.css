@@ -453,6 +453,43 @@ button:focus-visible {
   background: #242424;
 }
 
+.learning-controls {
+  min-height: 1.8rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  padding-inline: 0.35rem;
+}
+
+.dictionary-trigger,
+.solved-board-meaning,
+.learning-card-open {
+  border: 1px solid rgba(129, 140, 248, 0.5);
+  background: rgba(88, 101, 242, 0.16);
+  color: #c7d2fe;
+}
+
+.dictionary-trigger {
+  min-height: 1.8rem;
+  padding: 0.25rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 750;
+}
+
+.dictionary-trigger:disabled {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: #71717a;
+  cursor: not-allowed;
+}
+
+.learning-controls-hint {
+  color: #71717a;
+  font-size: 0.68rem;
+}
+
 /* Keyboard */
 .keyboard {
   display: flex;
@@ -694,6 +731,95 @@ button:focus-visible {
   text-align: center;
 }
 
+.results-card-learning {
+  max-width: 760px;
+}
+
+.korean-learning-review {
+  text-align: left;
+}
+
+.learning-card-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.learning-card {
+  min-width: 0;
+  padding: 0.8rem;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.learning-card-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.learning-card-header > div {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.learning-card-header strong {
+  color: #fff;
+  font-size: 1.25rem;
+}
+
+.learning-card-header div span,
+.learning-card-number {
+  color: #a1a1aa;
+  font-size: 0.72rem;
+}
+
+.learning-card-primary {
+  margin-top: 0.65rem;
+}
+
+.learning-card-primary > strong {
+  color: #e4e4e7;
+}
+
+.learning-card-primary > span {
+  margin-left: 0.35rem;
+  color: #a5b4fc;
+  font-size: 0.68rem;
+}
+
+.learning-card-primary p {
+  margin: 0.35rem 0 0;
+  color: #a1a1aa;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.learning-card-more {
+  margin-top: 0.6rem;
+}
+
+.learning-card-more summary {
+  color: #a5b4fc;
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+
+.learning-card-more ol {
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.learning-card-open {
+  margin-top: 0.65rem;
+  padding: 0.3rem 0.55rem;
+  border-radius: 7px;
+  font-size: 0.7rem;
+}
+
 .results-won {
   background: rgba(34, 197, 94, 0.12);
   border: 2px solid #22c55e;
@@ -853,7 +979,8 @@ button:focus-visible {
   line-height: 1;
 }
 
-.leaderboard-modal-backdrop {
+/* Shared modal / mobile bottom-sheet shell */
+.overlay-sheet-backdrop {
   position: absolute;
   inset: 0;
   z-index: 1000;
@@ -864,10 +991,10 @@ button:focus-visible {
   padding-bottom: max(0.75rem, var(--app-safe-area-bottom));
   padding-left: max(0.75rem, var(--app-safe-area-left));
   box-sizing: border-box;
-  background: rgba(0, 0, 0, 0.72);
+  background: rgba(0, 0, 0, 0.74);
 }
 
-.leaderboard-modal {
+.overlay-sheet {
   width: min(720px, 92%);
   max-height: min(80%, 640px);
   min-height: 0;
@@ -878,44 +1005,210 @@ button:focus-visible {
   border-radius: 16px;
   background: #242424;
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  color: #f4f4f5;
   text-align: left;
 }
 
-.leaderboard-modal-header {
+.overlay-sheet-full {
+  max-height: calc(100% - max(1.5rem, var(--app-safe-area-top)) - max(1.5rem, var(--app-safe-area-bottom)));
+}
+
+.overlay-sheet-handle {
+  display: none;
+}
+
+.overlay-sheet-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  padding: 0.75rem 1rem;
+  padding: 0.65rem 0.85rem 0.65rem 1rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.leaderboard-modal-title {
+.overlay-sheet-title {
   margin: 0;
   color: #fff;
-  font-size: 1.1rem;
+  font-size: 1.05rem;
 }
 
-.leaderboard-modal-close {
-  width: 2.25rem;
-  height: 2.25rem;
+.overlay-sheet-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.overlay-sheet-size {
+  display: none;
+  min-height: 2rem;
+  padding: 0.25rem 0.55rem;
+  border: 0;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #d4d4d8;
+  font-size: 0.72rem;
+}
+
+.overlay-sheet-close {
+  width: 2.1rem;
+  height: 2.1rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
+  border: 0;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
-  font-size: 1.5rem;
+  font-size: 1.45rem;
   line-height: 1;
 }
 
-.leaderboard-modal-content {
+.overlay-sheet-content {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   padding: 1rem;
+}
+
+.dictionary-sheet {
+  width: min(620px, 92%);
+}
+
+.dictionary-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.dictionary-toolbar label {
+  color: #a1a1aa;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.dictionary-word-select {
+  min-width: 7rem;
+  min-height: 2.25rem;
+  padding: 0.35rem 2rem 0.35rem 0.65rem;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: #18181b;
+  color: #fff;
+  font: inherit;
+}
+
+.dictionary-word-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.dictionary-word-row h3 {
+  margin: 0;
+  color: #fff;
+  font-size: 1.8rem;
+}
+
+.dictionary-romanization {
+  color: #a5b4fc;
+  font-size: 0.92rem;
+}
+
+.dictionary-pronunciation {
+  margin-top: 0.55rem;
+  color: #d4d4d8;
+  font-size: 0.82rem;
+}
+
+.dictionary-pronunciation > span:first-child {
+  color: #71717a;
+}
+
+.dictionary-senses {
+  display: grid;
+  gap: 0.85rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dictionary-sense {
+  padding: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.dictionary-sense-heading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.dictionary-sense-number {
+  color: #818cf8;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.dictionary-part-of-speech {
+  padding: 0.12rem 0.35rem;
+  border-radius: 999px;
+  background: rgba(129, 140, 248, 0.12);
+  color: #a5b4fc;
+  font-size: 0.68rem;
+}
+
+.dictionary-sense-source {
+  margin-left: auto;
+  color: #a5b4fc;
+  font-size: 0.68rem;
+}
+
+.dictionary-sense p {
+  margin: 0.35rem 0 0;
+  color: #d4d4d8;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.dictionary-status,
+.dictionary-empty {
+  padding: 1.5rem 1rem;
+  color: #a1a1aa;
+  text-align: center;
+}
+
+.dictionary-retry,
+.dictionary-inline-retry {
+  min-height: 2.25rem;
+  padding: 0.4rem 0.8rem;
+  border: 0;
+  border-radius: 8px;
+  background: #5865f2;
+  color: #fff;
+}
+
+.dictionary-attribution {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: #71717a;
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
+.dictionary-attribution a {
+  color: #a5b4fc;
 }
 
 .leaderboard {
@@ -1317,18 +1610,51 @@ button:focus-visible {
     z-index: 1;
   }
 
-  .leaderboard-modal-backdrop {
+  .overlay-sheet-backdrop {
     place-items: end center;
+    padding-top: max(0.5rem, var(--app-safe-area-top));
     padding-right: var(--app-safe-area-right);
     padding-bottom: var(--app-safe-area-bottom);
     padding-left: var(--app-safe-area-left);
   }
 
-  .leaderboard-modal {
+  .overlay-sheet {
     width: 100%;
-    max-height: min(72%, 620px);
+    height: 50%;
+    max-height: none;
     border-radius: 16px 16px 0 0;
     border-bottom: 0;
+  }
+
+  .overlay-sheet-full {
+    height: calc(100% - max(0.5rem, var(--app-safe-area-top)));
+  }
+
+  .overlay-sheet-size {
+    display: inline-flex;
+  }
+
+  .overlay-sheet-handle {
+    width: 100%;
+    height: 1.25rem;
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    touch-action: none;
+  }
+
+  .overlay-sheet-handle span {
+    width: 2.8rem;
+    height: 0.25rem;
+    border-radius: 999px;
+    background: #71717a;
+  }
+
+  .overlay-sheet-header {
+    padding-top: 0.35rem;
   }
 }
 
@@ -1833,6 +2159,8 @@ button:focus-visible {
 
 .solved-board-card {
   min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   overflow: hidden;
   border: 1px solid rgba(34, 197, 94, 0.3);
   border-radius: 9px;
@@ -1862,6 +2190,15 @@ button:focus-visible {
 .solved-board-toggle:hover {
   border-color: transparent;
   background: rgba(34, 197, 94, 0.12);
+}
+
+.solved-board-meaning {
+  align-self: center;
+  min-height: 1.65rem;
+  margin-right: 0.4rem;
+  padding: 0.2rem 0.42rem;
+  border-radius: 6px;
+  font-size: 0.62rem;
 }
 
 .solved-board-check {
@@ -1896,6 +2233,7 @@ button:focus-visible {
 }
 
 .solved-board-history {
+  grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1909,6 +2247,14 @@ button:focus-visible {
 }
 
 @media (max-width: 700px) {
+  .learning-card-list {
+    grid-template-columns: 1fr;
+  }
+
+  .results-card-learning {
+    padding-inline: 0.85rem;
+  }
+
   .game-header {
     gap: 0.25rem;
     padding: 0 0.1rem 0.2rem;

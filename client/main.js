@@ -25,6 +25,14 @@ import {
   reconcileSelectedBoardIndex,
   toggleExpandedSolvedBoardIndex,
 } from "./src/boardLayout.js";
+import {
+  escapeHtml,
+  getDefaultDictionaryWord,
+  getDictionaryEligibleWords,
+  getKoreanDictionaryEntry,
+  loadKoreanDictionarySnapshot,
+} from "./src/dictionary.js";
+import { getSheetDragAction, renderOverlaySheet, trapOverlayFocus } from "./src/overlaySheet.js";
 
 // Will eventually store the authenticated user's access_token
 let auth;
@@ -68,7 +76,15 @@ let koreanShiftActive = false;
 let activityTrackingBound = false;
 let activityViewportBound = false;
 let viewportSyncFrame = null;
-let leaderboardModalOpen = false;
+const OVERLAY_LEADERBOARD = 'leaderboard-modal';
+const OVERLAY_DICTIONARY = 'dictionary-sheet';
+let activeOverlay = null;
+let overlaySize = 'half';
+let overlayReturnFocusSelector = null;
+let dictionarySnapshot = null;
+let dictionaryLoadState = 'idle';
+let dictionaryLoadError = null;
+let dictionarySelectedWord = null;
 let boardScrollTop = 0;
 let selectedBoardIndex = null;
 let expandedSolvedBoardIndex = null;
@@ -624,6 +640,7 @@ function expireCurrentSession() {
 
   guessError = null;
   koreanShiftActive = false;
+  resetOverlayState();
   imeReset();
   uiScreen = "expired";
   renderApp();
@@ -900,7 +917,7 @@ function getTodayDateKey() {
 function startNewDailyGame() {
   gameMode = "daily";
   uiScreen = "game";
-  leaderboardModalOpen = false;
+  resetOverlayState();
   resetBoardScrollPosition();
   resetBoardUiState();
   initialStateApplied = false;
@@ -928,7 +945,7 @@ function startNewDailyGame() {
 function startNewPracticeGame() {
   gameMode = "practice";
   uiScreen = "game";
-  leaderboardModalOpen = false;
+  resetOverlayState();
   resetBoardScrollPosition();
   resetBoardUiState();
   initialStateApplied = false;
@@ -1085,13 +1102,14 @@ function renderResultsLinkButton() {
 }
 
 function renderLeaderboardButton() {
+  const open = activeOverlay === OVERLAY_LEADERBOARD;
   return `
     <button
       class="leaderboard-trigger"
       type="button"
       aria-haspopup="dialog"
-      aria-expanded="${leaderboardModalOpen}"
-      aria-controls="leaderboard-modal"
+      aria-expanded="${open}"
+      aria-controls="${OVERLAY_LEADERBOARD}"
     >
       <span class="leaderboard-trigger-icon" aria-hidden="true">&#127942;</span>
       <span class="leaderboard-trigger-label">Scores</span>
@@ -1100,43 +1118,274 @@ function renderLeaderboardButton() {
 }
 
 function renderLeaderboardModal() {
-  if (!leaderboardModalOpen) return '';
+  if (activeOverlay !== OVERLAY_LEADERBOARD) return '';
+  return renderOverlaySheet({
+    id: OVERLAY_LEADERBOARD,
+    title: 'Leaderboards',
+    body: `<div id="leaderboard-panel">${renderLeaderboardContent()}</div>`,
+    size: overlaySize,
+    className: 'leaderboard-modal',
+  });
+}
 
+function openLeaderboardModal() {
+  if (activeOverlay) return;
+  activeOverlay = OVERLAY_LEADERBOARD;
+  overlaySize = 'half';
+  overlayReturnFocusSelector = '.leaderboard-trigger';
+  renderApp();
+  setupKeyboardListeners();
+  focusActiveOverlay();
+}
+
+function focusActiveOverlay() {
+  requestAnimationFrame(() => {
+    const overlay = document.querySelector(`[data-overlay-sheet="${activeOverlay}"]`);
+    const preferred = activeOverlay === OVERLAY_DICTIONARY
+      ? overlay?.querySelector('.dictionary-word-select, .dictionary-retry, .overlay-sheet-close')
+      : overlay?.querySelector('.overlay-sheet-close');
+    preferred?.focus();
+  });
+}
+
+function closeActiveOverlay() {
+  if (!activeOverlay) return;
+  const returnSelector = overlayReturnFocusSelector;
+  activeOverlay = null;
+  overlaySize = 'half';
+  overlayReturnFocusSelector = null;
+  renderApp();
+  setupKeyboardListeners();
+  if (returnSelector) {
+    requestAnimationFrame(() => document.querySelector(returnSelector)?.focus());
+  }
+}
+
+function resetOverlayState() {
+  activeOverlay = null;
+  overlaySize = 'half';
+  overlayReturnFocusSelector = null;
+  dictionarySelectedWord = null;
+}
+
+function ensureKoreanDictionaryLoaded() {
+  if (dictionarySnapshot || dictionaryLoadState === 'loading') return;
+  dictionaryLoadState = 'loading';
+  dictionaryLoadError = null;
+  loadKoreanDictionarySnapshot()
+    .then((snapshot) => {
+      dictionarySnapshot = snapshot;
+      dictionaryLoadState = 'loaded';
+      const eligible = getDictionaryEligibleWords(gameState, snapshot.entries);
+      if (!eligible.includes(dictionarySelectedWord)) {
+        dictionarySelectedWord = getDefaultDictionaryWord(gameState, eligible);
+      }
+      if (currentLanguage === 'ko') {
+        renderApp();
+        setupKeyboardListeners();
+        if (activeOverlay) focusActiveOverlay();
+      }
+    })
+    .catch((error) => {
+      console.error('Failed to load Korean dictionary snapshot:', error);
+      dictionaryLoadState = 'error';
+      dictionaryLoadError = 'Dictionary data could not be loaded.';
+      if (currentLanguage === 'ko') {
+        renderApp();
+        setupKeyboardListeners();
+        if (activeOverlay) focusActiveOverlay();
+      }
+    });
+}
+
+function renderDictionaryButton() {
+  if (currentLanguage !== 'ko') return '';
+  const eligibleWords = getDictionaryEligibleWords(gameState);
+  const disabled = eligibleWords.length === 0;
   return `
-    <div class="leaderboard-modal-backdrop">
-      <section
-        class="leaderboard-modal"
-        id="leaderboard-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="leaderboard-modal-title"
-      >
-        <div class="leaderboard-modal-header">
-          <h2 class="leaderboard-modal-title" id="leaderboard-modal-title">Leaderboards</h2>
-          <button class="leaderboard-modal-close" type="button" aria-label="Close leaderboards">&times;</button>
-        </div>
-        <div class="leaderboard-modal-content" id="leaderboard-panel">
-          ${renderLeaderboardContent()}
-        </div>
-      </section>
+    <div class="learning-controls">
+      <button
+        class="dictionary-trigger"
+        type="button"
+        aria-haspopup="dialog"
+        aria-controls="${OVERLAY_DICTIONARY}"
+        aria-expanded="${activeOverlay === OVERLAY_DICTIONARY}"
+        ${disabled ? 'disabled' : ''}
+        aria-label="${disabled ? 'Submit a valid Korean word to use the dictionary' : 'Open dictionary for submitted Korean words'}"
+      >사전 <span aria-hidden="true">⌕</span></button>
+      ${disabled ? '<span class="learning-controls-hint">Submit a word to unlock</span>' : ''}
     </div>
   `;
 }
 
-function openLeaderboardModal() {
-  if (leaderboardModalOpen) return;
-  leaderboardModalOpen = true;
+function openDictionary(word = null, returnFocusSelector = '.dictionary-trigger') {
+  if (activeOverlay && activeOverlay !== OVERLAY_DICTIONARY) return;
+  const eligibleWords = getDictionaryEligibleWords(gameState, dictionarySnapshot?.entries ?? null);
+  if (eligibleWords.length === 0) return;
+  dictionarySelectedWord = eligibleWords.includes(word)
+    ? word
+    : getDefaultDictionaryWord(gameState, eligibleWords);
+  activeOverlay = OVERLAY_DICTIONARY;
+  overlaySize = 'half';
+  overlayReturnFocusSelector = returnFocusSelector;
+  ensureKoreanDictionaryLoaded();
   renderApp();
   setupKeyboardListeners();
-  requestAnimationFrame(() => document.querySelector('.leaderboard-modal-close')?.focus());
+  focusActiveOverlay();
 }
 
-function closeLeaderboardModal() {
-  if (!leaderboardModalOpen) return;
-  leaderboardModalOpen = false;
-  renderApp();
-  setupKeyboardListeners();
-  requestAnimationFrame(() => document.querySelector('.leaderboard-trigger')?.focus());
+function renderDictionarySense(sense, index) {
+  const translations = sense.translations.map(escapeHtml).join('; ');
+  return `
+    <li class="dictionary-sense">
+      <div class="dictionary-sense-heading">
+        <span class="dictionary-sense-number">${index + 1}</span>
+        <strong>${translations}</strong>
+        <span class="dictionary-part-of-speech">${escapeHtml(sense.partOfSpeech)}</span>
+        <a class="dictionary-sense-source" href="${escapeHtml(sense.sourceUrl)}" target="_blank" rel="noopener noreferrer">Source</a>
+      </div>
+      <p>${escapeHtml(sense.definition)}</p>
+    </li>
+  `;
+}
+
+function renderDictionaryEntry(entry) {
+  if (!entry) return '<div class="dictionary-empty">No dictionary entry is available for this word.</div>';
+  return `
+    <article class="dictionary-entry">
+      <div class="dictionary-word-row">
+        <h3 lang="ko">${escapeHtml(entry.word)}</h3>
+        <span class="dictionary-romanization">${escapeHtml(entry.romanization)}</span>
+      </div>
+      ${entry.pronunciation && entry.pronunciation !== entry.word
+        ? `<div class="dictionary-pronunciation"><span>Pronunciation</span> <span lang="ko">${escapeHtml(entry.pronunciation)}</span></div>`
+        : ''}
+      <ol class="dictionary-senses">
+        ${entry.senses.map(renderDictionarySense).join('')}
+      </ol>
+    </article>
+  `;
+}
+
+function renderDictionaryAttribution() {
+  const metadata = dictionarySnapshot?.metadata;
+  if (!metadata) return '';
+  return `
+    <footer class="dictionary-attribution">
+      Definitions and translations from
+      <a href="${escapeHtml(metadata.dictionaryUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(metadata.source)}</a>.
+      <a href="${escapeHtml(metadata.licenseUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(metadata.license)}</a>.
+    </footer>
+  `;
+}
+
+function renderDictionaryOverlay() {
+  if (activeOverlay !== OVERLAY_DICTIONARY) return '';
+  let body;
+  if (dictionaryLoadState === 'error') {
+    body = `<div class="dictionary-status" role="alert">
+      <p>${escapeHtml(dictionaryLoadError)}</p>
+      <button class="dictionary-retry" type="button">Retry</button>
+    </div>`;
+  } else if (!dictionarySnapshot) {
+    body = '<div class="dictionary-status" role="status">Loading dictionary…</div>';
+  } else {
+    const eligibleWords = getDictionaryEligibleWords(gameState, dictionarySnapshot.entries);
+    const selectedWord = eligibleWords.includes(dictionarySelectedWord)
+      ? dictionarySelectedWord
+      : getDefaultDictionaryWord(gameState, eligibleWords);
+    dictionarySelectedWord = selectedWord;
+    const options = eligibleWords.map((word) => (
+      `<option value="${escapeHtml(word)}" ${word === selectedWord ? 'selected' : ''}>${escapeHtml(word)}</option>`
+    )).join('');
+    body = eligibleWords.length === 0
+      ? '<div class="dictionary-status">Submit a valid Korean word to view its meaning.</div>'
+      : `<div class="dictionary-toolbar">
+          <label for="dictionary-word-select">Submitted word</label>
+          <select class="dictionary-word-select" id="dictionary-word-select">${options}</select>
+        </div>
+        ${renderDictionaryEntry(getKoreanDictionaryEntry(selectedWord, dictionarySnapshot))}
+        ${renderDictionaryAttribution()}`;
+  }
+
+  return renderOverlaySheet({
+    id: OVERLAY_DICTIONARY,
+    title: 'Dictionary · 사전',
+    body,
+    size: overlaySize,
+    className: 'dictionary-sheet',
+  });
+}
+
+function bindActiveOverlayInteractions() {
+  if (!activeOverlay) return;
+  const overlayId = activeOverlay;
+  const overlay = document.querySelector(`[data-overlay-sheet="${overlayId}"]`);
+  const backdrop = document.querySelector(`[data-overlay-backdrop="${overlayId}"]`);
+  if (!overlay || !backdrop) return;
+
+  backdrop.addEventListener('click', (event) => {
+    if (event.target === backdrop) closeActiveOverlay();
+  });
+  overlay.querySelectorAll(`[data-overlay-close="${overlayId}"]`).forEach((button) => {
+    button.addEventListener('click', closeActiveOverlay);
+  });
+  overlay.querySelectorAll(`[data-overlay-size-toggle="${overlayId}"]`).forEach((button) => {
+    button.addEventListener('click', () => {
+      overlaySize = overlaySize === 'full' ? 'half' : 'full';
+      renderApp();
+      setupKeyboardListeners();
+      requestAnimationFrame(() => document.querySelector(`[data-overlay-size-toggle="${overlayId}"]`)?.focus());
+    });
+  });
+  overlay.addEventListener('keydown', (event) => trapOverlayFocus(event, overlay, closeActiveOverlay));
+
+  const handle = overlay.querySelector('.overlay-sheet-handle');
+  if (handle) {
+    let dragStartY = null;
+    handle.addEventListener('pointerdown', (event) => {
+      dragStartY = event.clientY;
+      handle.setPointerCapture?.(event.pointerId);
+    });
+    handle.addEventListener('pointerup', (event) => {
+      if (dragStartY === null) return;
+      const action = getSheetDragAction(dragStartY, event.clientY, overlaySize);
+      dragStartY = null;
+      if (action === 'dismiss') {
+        closeActiveOverlay();
+      } else if (action === 'expand' || action === 'collapse') {
+        overlaySize = action === 'expand' ? 'full' : 'half';
+        renderApp();
+        setupKeyboardListeners();
+        focusActiveOverlay();
+      }
+    });
+    handle.addEventListener('pointercancel', () => { dragStartY = null; });
+  }
+
+  const wordSelect = overlay.querySelector('.dictionary-word-select');
+  if (wordSelect) {
+    wordSelect.addEventListener('change', () => {
+      const eligibleWords = getDictionaryEligibleWords(gameState, dictionarySnapshot?.entries ?? null);
+      if (!eligibleWords.includes(wordSelect.value)) return;
+      dictionarySelectedWord = wordSelect.value;
+      renderApp();
+      setupKeyboardListeners();
+      requestAnimationFrame(() => document.querySelector('.dictionary-word-select')?.focus());
+    });
+  }
+
+  const retry = overlay.querySelector('.dictionary-retry');
+  if (retry) {
+    retry.addEventListener('click', () => {
+      dictionaryLoadState = 'idle';
+      dictionaryLoadError = null;
+      ensureKoreanDictionaryLoaded();
+      renderApp();
+      setupKeyboardListeners();
+      focusActiveOverlay();
+    });
+  }
 }
 
 function renderGameScreen() {
@@ -1210,10 +1459,12 @@ function renderGameScreen() {
 
       <section class="game-input-dock" aria-label="Guess controls">
         ${statusHtml}
+        ${renderDictionaryButton()}
         ${currentLanguage === 'ko' ? renderKoreanKeyboard() : renderKeyboard()}
       </section>
 
       ${renderLeaderboardModal()}
+      ${renderDictionaryOverlay()}
     </div>
   `;
 
@@ -1221,6 +1472,64 @@ function renderGameScreen() {
   if (boardRegion) {
     boardRegion.scrollTop = boardScrollTop;
   }
+}
+
+function renderKoreanLearningReview() {
+  ensureKoreanDictionaryLoaded();
+  if (dictionaryLoadState === 'error') {
+    return `<div class="answers-reveal korean-learning-review">
+      <div class="answers-title">정답 · Answer review</div>
+      <div class="dictionary-status" role="alert">
+        <p>${escapeHtml(dictionaryLoadError)}</p>
+        <button class="dictionary-inline-retry" type="button">Retry</button>
+      </div>
+    </div>`;
+  }
+  if (!dictionarySnapshot) {
+    return `<div class="answers-reveal korean-learning-review">
+      <div class="answers-title">정답 · Answer review</div>
+      <div class="dictionary-status" role="status">Loading answer meanings…</div>
+    </div>`;
+  }
+
+  const cards = gameState.boards.map((board, index) => {
+    const entry = getKoreanDictionaryEntry(board.targetWord, dictionarySnapshot);
+    if (!entry) {
+      return `<article class="learning-card ${board.solved ? 'answer-solved' : 'answer-missed'}">
+        <div class="learning-card-header"><span>#${index + 1}</span><strong lang="ko">${escapeHtml(board.targetWord)}</strong></div>
+        <p>Definition unavailable for this legacy round.</p>
+      </article>`;
+    }
+    const [primary, ...additional] = entry.senses;
+    return `<article class="learning-card ${board.solved ? 'answer-solved' : 'answer-missed'}">
+      <div class="learning-card-header">
+        <span class="learning-card-number">#${index + 1}</span>
+        <div><strong lang="ko">${escapeHtml(entry.word)}</strong><span>${escapeHtml(entry.romanization)}</span></div>
+        <span class="answer-status" aria-label="${board.solved ? 'Solved' : 'Missed'}">${board.solved ? '✓' : '✗'}</span>
+      </div>
+      <div class="learning-card-primary">
+        <strong>${primary.translations.map(escapeHtml).join('; ')}</strong>
+        <span>${escapeHtml(primary.partOfSpeech)}</span>
+        <p>${escapeHtml(primary.definition)}</p>
+      </div>
+      ${additional.length > 0 ? `<details class="learning-card-more">
+        <summary>${additional.length} more ${additional.length === 1 ? 'meaning' : 'meanings'}</summary>
+        <ol>${additional.map((sense, senseIndex) => renderDictionarySense(sense, senseIndex + 1)).join('')}</ol>
+      </details>` : ''}
+      <button
+        class="learning-card-open"
+        type="button"
+        data-dictionary-word="${escapeHtml(entry.word)}"
+        aria-label="Open full dictionary entry for ${escapeHtml(entry.word)}"
+      >Full entry</button>
+    </article>`;
+  }).join('');
+
+  return `<div class="answers-reveal korean-learning-review">
+    <div class="answers-title">정답 · Answer review</div>
+    <div class="learning-card-list">${cards}</div>
+    ${renderDictionaryAttribution()}
+  </div>`;
 }
 
 function renderResultsScreen() {
@@ -1240,14 +1549,14 @@ function renderResultsScreen() {
   `;
 
   // Answers reveal (always show on results)
-  const answersHtml = `
+  const answersHtml = lang === 'ko' ? renderKoreanLearningReview() : `
     <div class="answers-reveal">
-      <div class="answers-title">${lang === 'ko' ? '정답' : 'Answers'}</div>
+      <div class="answers-title">Answers</div>
       <div class="answers-list">
         ${gameState.boards.map((board, i) => `
           <div class="answer-item ${board.solved ? 'answer-solved' : 'answer-missed'}">
             <span class="answer-number">#${i + 1}</span>
-            <span class="answer-word">${lang === 'ko' ? board.targetWord : board.targetWord.toUpperCase()}</span>
+            <span class="answer-word">${board.targetWord.toUpperCase()}</span>
             ${board.solved ? '<span class="answer-status">✓</span>' : '<span class="answer-status">✗</span>'}
           </div>
         `).join('')}
@@ -1273,7 +1582,7 @@ function renderResultsScreen() {
       </div>
       
       <div class="results-screen">
-        <div class="results-card ${bannerClass}">
+        <div class="results-card ${bannerClass} ${lang === 'ko' ? 'results-card-learning' : ''}">
           <div class="results-icon">${icon}</div>
           <div class="results-message">${message}</div>
           <div class="results-stats">
@@ -1298,6 +1607,7 @@ function renderResultsScreen() {
       </div>
       
       ${renderLeaderboardModal()}
+      ${renderDictionaryOverlay()}
     </div>
   `;
 }
@@ -1488,6 +1798,12 @@ function renderSolvedBoardCard(board, index) {
         <span class="solved-board-meta">${solvedGuessCount} ${solvedGuessCount === 1 ? 'guess' : 'guesses'}</span>
         <span class="solved-board-chevron" aria-hidden="true">${expanded ? '▴' : '▾'}</span>
       </button>
+      ${currentLanguage === 'ko' ? `<button
+        class="solved-board-meaning"
+        type="button"
+        data-dictionary-word="${escapeHtml(board.targetWord)}"
+        aria-label="Open meaning for ${escapeHtml(board.targetWord)}"
+      >Meaning</button>` : ''}
       ${historyHtml}
     </article>
   `;
@@ -1816,7 +2132,7 @@ function imeBackspace() {
 }
 
 function handleKeyPress(key) {
-  if (!gameState || gameState.gameOver || uiScreen === "expired" || leaderboardModalOpen) return;
+  if (!gameState || gameState.gameOver || uiScreen === "expired" || activeOverlay) return;
 
   const lang = currentLanguage;
   const wordLen = getLanguageConfig(lang).wordLength;
@@ -1999,49 +2315,31 @@ function setupKeyboardListeners() {
     leaderboardTrigger.addEventListener('click', openLeaderboardModal);
   }
 
-  const leaderboardClose = document.querySelector('.leaderboard-modal-close');
-  if (leaderboardClose) {
-    leaderboardClose.addEventListener('click', closeLeaderboardModal);
+  const dictionaryTrigger = document.querySelector('.dictionary-trigger:not([disabled])');
+  if (dictionaryTrigger) {
+    dictionaryTrigger.addEventListener('click', () => openDictionary(null, '.dictionary-trigger'));
   }
 
-  const leaderboardBackdrop = document.querySelector('.leaderboard-modal-backdrop');
-  if (leaderboardBackdrop) {
-    leaderboardBackdrop.addEventListener('click', (event) => {
-      if (event.target === leaderboardBackdrop) {
-        closeLeaderboardModal();
-      }
+  document.querySelectorAll('[data-dictionary-word]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const word = button.dataset.dictionaryWord;
+      if (!word) return;
+      openDictionary(word, `[data-dictionary-word="${CSS.escape(word)}"]`);
+    });
+  });
+
+  const inlineRetry = document.querySelector('.dictionary-inline-retry');
+  if (inlineRetry) {
+    inlineRetry.addEventListener('click', () => {
+      dictionaryLoadState = 'idle';
+      dictionaryLoadError = null;
+      ensureKoreanDictionaryLoaded();
+      renderApp();
+      setupKeyboardListeners();
     });
   }
 
-  const leaderboardModal = document.querySelector('.leaderboard-modal');
-  if (leaderboardModal) {
-    leaderboardModal.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        closeLeaderboardModal();
-        return;
-      }
-
-      if (event.key !== 'Tab') return;
-      const focusable = Array.from(leaderboardModal.querySelectorAll(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      ));
-      if (focusable.length === 0) {
-        event.preventDefault();
-        return;
-      }
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    });
-  }
+  bindActiveOverlayInteractions();
 
   // On-screen keyboard
   document.querySelectorAll('.key').forEach(btn => {
@@ -2138,10 +2436,10 @@ const QWERTY_TO_JAMO = {
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
 
-  if (leaderboardModalOpen) {
+  if (activeOverlay) {
     if (e.key === 'Escape') {
       e.preventDefault();
-      closeLeaderboardModal();
+      closeActiveOverlay();
     }
     return;
   }
@@ -2191,7 +2489,7 @@ function switchLanguage(newLang) {
   // Switch language
   currentLanguage = newLang;
   localStorage.setItem('quordle_language', newLang);
-  leaderboardModalOpen = false;
+  resetOverlayState();
   resetBoardScrollPosition();
   resetBoardUiState();
   expiredSessionSnapshot = null;

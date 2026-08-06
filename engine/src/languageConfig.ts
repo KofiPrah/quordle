@@ -1,21 +1,11 @@
 import type { Language, LanguageConfig } from './types.js';
 import { WORD_LIST, GUESS_WORDS } from './words.js';
-import koWordsText from './koWords.txt?raw';
-import koGuessWordsText from './koGuessWords.txt?raw';
-
-// ========== KOREAN WORD LISTS ==========
-const KO_ANSWER_WORDS: readonly string[] = koWordsText
-    .split('\n')
-    .map(w => w.trim())
-    .filter(w => w.length === 2 && /^[\uAC00-\uD7A3]+$/.test(w));
-
-const KO_GUESS_WORDS_LIST: readonly string[] = koGuessWordsText
-    .split('\n')
-    .map(w => w.trim())
-    .filter(w => w.length === 2 && /^[\uAC00-\uD7A3]+$/.test(w));
-
-const koGuessWordsSet = new Set([...KO_GUESS_WORDS_LIST, ...KO_ANSWER_WORDS]);
-const koAnswerWordsSet = new Set(KO_ANSWER_WORDS);
+import {
+    KO_ANSWER_WORDS,
+    KO_GUESS_WORDS_LIST,
+    koAnswerWordsSet,
+    koGuessWordsSet,
+} from './koreanLexicon.js';
 
 // ========== ENGLISH CONFIG ==========
 const enGuessWordsSet = new Set([...GUESS_WORDS, ...WORD_LIST]);
