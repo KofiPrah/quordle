@@ -25,6 +25,12 @@ This is the recommended setup for production.
      VITE_DISCORD_CLIENT_ID=your_client_id
      DISCORD_CLIENT_SECRET=your_secret
      ALLOWED_ORIGINS=https://your-app.vercel.app
+     REDIS_URL=${{Redis.REDIS_URL}}
+     LEARNING_ANALYTICS_ENABLED=true
+     APP_SESSION_SECRET=<random server-only secret>
+     ANALYTICS_HMAC_SECRET=<independent random server-only secret>
+     ANALYTICS_ADMIN_TOKEN=<independent server-only token>
+     NODE_ENV=production
      ```
 
 4. **Get your server URL**: e.g., `https://quordle-server.up.railway.app`

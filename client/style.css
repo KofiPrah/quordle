@@ -902,6 +902,107 @@ button:focus-visible {
   font-size: 0.7rem;
 }
 
+.learning-card-actions,
+.saved-word-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+}
+
+.learning-card-actions .learning-card-open,
+.saved-word-actions .learning-card-open {
+  margin-top: 0;
+}
+
+.save-word-button {
+  min-height: 1.9rem;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid rgba(52, 211, 153, 0.48);
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.12);
+  color: #a7f3d0;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 750;
+}
+
+.save-word-button-saved {
+  border-color: rgba(52, 211, 153, 0.75);
+  background: rgba(16, 185, 129, 0.24);
+  color: #d1fae5;
+}
+
+.save-word-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.saved-words-collection {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  text-align: left;
+}
+
+.saved-words-collection .answers-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.saved-words-collection .answers-title span {
+  color: #a7f3d0;
+}
+
+.saved-word-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.7rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.saved-word-copy {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.15rem 0.55rem;
+  align-items: baseline;
+}
+
+.saved-word-copy strong {
+  color: #fff;
+  font-size: 1.1rem;
+}
+
+.saved-word-copy span,
+.saved-words-storage-note,
+.saved-words-empty {
+  color: #a1a1aa;
+  font-size: 0.75rem;
+}
+
+.saved-word-copy p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #d4d4d8;
+  font-size: 0.78rem;
+}
+
+.saved-word-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  margin-top: 0;
+}
+
+.saved-words-inline-error {
+  color: #fca5a5;
+  font-size: 0.76rem;
+}
+
 .results-won {
   background: rgba(34, 197, 94, 0.12);
   border: 2px solid #22c55e;
@@ -1325,6 +1426,10 @@ button:focus-visible {
   gap: 0.75rem;
   padding-bottom: 0.65rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.dictionary-word-row .save-word-button {
+  margin-left: auto;
 }
 
 .dictionary-word-row h3 {
@@ -2507,6 +2612,16 @@ button:focus-visible {
 
   .results-card-learning {
     padding-inline: 0.85rem;
+  }
+
+  .saved-word-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .saved-word-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .game-header {

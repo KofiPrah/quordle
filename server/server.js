@@ -5,12 +5,21 @@ import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import cors from "cors";
 import path from "path";
+import fs from "node:fs";
+import crypto from "node:crypto";
 import { fileURLToPath } from "url";
 import Redis from "ioredis";
 import { evaluateGuessKo } from "@quordle/engine/evaluatorKo";
 import { KO_ANSWER_WORDS, isValidKoreanGuess } from "@quordle/engine/koreanLexicon";
 import { calculatePerformanceMetrics, normalizeAssistanceState } from "@quordle/engine/assistance";
 import { requestKoreanHint } from "@quordle/engine/koreanHints";
+import { createLearningDataService } from "./learningData.js";
+import {
+  createAppSessionToken,
+  getBearerToken,
+  secureTokenEquals,
+  verifyAppSessionToken,
+} from "./sessionAuth.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,6 +31,34 @@ dotenv.config(); // Also try current directory
 // Debug flag for WebSocket logging
 const DEBUG_WS = process.env.DEBUG_WS === 'true';
 const DEBUG_LEADERBOARD = process.env.DEBUG_LEADERBOARD === '1' || process.env.DEBUG_LEADERBOARD === 'true';
+const LEARNING_ANALYTICS_ENABLED = ['1', 'true'].includes(String(process.env.LEARNING_ANALYTICS_ENABLED).toLowerCase());
+const APP_SESSION_SECRET = process.env.APP_SESSION_SECRET || '';
+const ANALYTICS_HMAC_SECRET = process.env.ANALYTICS_HMAC_SECRET || '';
+const ANALYTICS_ADMIN_TOKEN = process.env.ANALYTICS_ADMIN_TOKEN || '';
+const ALLOW_DEV_SESSION = process.env.NODE_ENV !== 'production'
+  && ['1', 'true'].includes(String(process.env.ALLOW_DEV_SESSION).toLowerCase());
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LEARNING_CONFIGURATION_COMPLETE = LEARNING_ANALYTICS_ENABLED
+  && Boolean(APP_SESSION_SECRET)
+  && Boolean(ANALYTICS_HMAC_SECRET)
+  && Boolean(ANALYTICS_ADMIN_TOKEN);
+
+let koreanRecognitionWords = Object.freeze({});
+let englishGuessWords = new Set();
+try {
+  const recognitionPath = new URL('../engine/src/koWordRecognition.generated.json', import.meta.url);
+  koreanRecognitionWords = JSON.parse(fs.readFileSync(recognitionPath, 'utf8')).words ?? koreanRecognitionWords;
+} catch (error) {
+  console.warn('[Learning] Korean recognition snapshot unavailable:', error.message);
+}
+try {
+  const guessWordsPath = new URL('../engine/src/guessWords.txt', import.meta.url);
+  englishGuessWords = new Set(
+    fs.readFileSync(guessWordsPath, 'utf8').split(/\r?\n/u).map((word) => word.trim()).filter(Boolean),
+  );
+} catch (error) {
+  console.warn('[Game] English guess snapshot unavailable:', error.message);
+}
 
 // Redis client (optional - falls back to in-memory if not configured)
 let redis = null;
@@ -84,6 +121,153 @@ if (process.env.REDIS_URL) {
   }
 } else {
   console.log('[Redis] No REDIS_URL configured - using in-memory storage only');
+}
+
+const learningData = createLearningDataService({
+  enabled: LEARNING_CONFIGURATION_COMPLETE,
+  hmacSecret: ANALYTICS_HMAC_SECRET,
+  redisProvider: () => hasRedisConnection() ? redis : null,
+  allowMemoryFallback: process.env.NODE_ENV === 'test',
+  isAcceptedKoreanWord: isValidKoreanGuess,
+  isRecognizedKoreanWord: (word) => Boolean(koreanRecognitionWords[word]),
+});
+
+function getAuthenticatedLearningUser(req) {
+  const payload = verifyAppSessionToken(getBearerToken(req), APP_SESSION_SECRET);
+  return payload?.sub ?? null;
+}
+
+function learningRoute(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch((error) => {
+    console.warn('[Learning] Request failed:', error.message);
+    if (!res.headersSent) {
+      res.status(503).json({ error: 'Learning data service unavailable', code: 'LEARNING_DATA_ERROR' });
+    }
+  });
+}
+
+function learningEventBase(player, overrides = {}) {
+  const language = player.language === 'ko' ? 'ko' : 'en';
+  const dateKey = player.dateKey;
+  return {
+    version: 1,
+    occurredAt: Date.now(),
+    dateKey,
+    language,
+    mode: 'daily',
+    roundId: `daily:${dateKey}:${language}`,
+    ...overrides,
+  };
+}
+
+async function safelyRecordLearningEvent(event, userId, options = {}) {
+  try {
+    return await learningData.recordEvent(event, userId, options);
+  } catch (error) {
+    console.warn('[Learning] Event recording failed:', error.message);
+    return { accepted: false, code: 'LEARNING_DATA_ERROR' };
+  }
+}
+
+async function recordDailyRoundStarted(player) {
+  if (!player) return;
+  await safelyRecordLearningEvent(learningEventBase(player, {
+    eventId: `round-start:daily:${player.dateKey}:${player.language || 'en'}`,
+    type: 'round_started',
+    occurredAt: player.createdAt || Date.now(),
+  }), player.visibleUserId);
+}
+
+async function recordDailyGuessTransition(player, previousGameState, nextGameState, guess) {
+  if (!player || !previousGameState || !nextGameState) return;
+  const guessNumber = nextGameState.guessCount;
+  const baseId = `daily:${player.dateKey}:${player.language || 'en'}:${guessNumber}`;
+  await safelyRecordLearningEvent(learningEventBase(player, {
+    eventId: `guess:${baseId}`,
+    type: 'valid_guess_submitted',
+    word: guess,
+  }), player.visibleUserId);
+
+  for (let boardIndex = 0; boardIndex < nextGameState.boards.length; boardIndex += 1) {
+    const before = previousGameState.boards[boardIndex];
+    const after = nextGameState.boards[boardIndex];
+    if (!before.solved && after.solved) {
+      await safelyRecordLearningEvent(learningEventBase(player, {
+        eventId: `board-solved:${baseId}:${boardIndex}`,
+        type: 'board_solved',
+        boardIndex,
+        word: after.targetWord,
+      }), player.visibleUserId);
+    }
+  }
+
+  if (player.language === 'ko') {
+    await learningData.markSavedWordLaterGuessed(player.visibleUserId, guess, {
+      dateKey: player.dateKey,
+      mode: 'daily',
+      roundId: `daily:${player.dateKey}:ko`,
+      roundStartedAt: player.createdAt,
+    }).catch((error) => console.warn('[Learning] Saved-word recall failed:', error.message));
+  }
+
+  if (!previousGameState.gameOver && nextGameState.gameOver) {
+    for (let boardIndex = 0; boardIndex < nextGameState.boards.length; boardIndex += 1) {
+      const board = nextGameState.boards[boardIndex];
+      if (!board.solved) {
+        await safelyRecordLearningEvent(learningEventBase(player, {
+          eventId: `board-failed:daily:${player.dateKey}:${player.language || 'en'}:${boardIndex}`,
+          type: 'board_failed',
+          boardIndex,
+          word: board.targetWord,
+        }), player.visibleUserId);
+      }
+    }
+    const performance = calculatePerformanceMetrics(nextGameState);
+    await safelyRecordLearningEvent(learningEventBase(player, {
+      eventId: `round-completed:daily:${player.dateKey}:${player.language || 'en'}`,
+      type: 'round_completed',
+      metrics: {
+        won: nextGameState.won,
+        assisted: performance.assisted,
+        guessCount: performance.guessCount,
+        score: performance.score,
+        solvedCount: performance.solvedCount,
+        failedCount: 4 - performance.solvedCount,
+      },
+    }), player.visibleUserId);
+  }
+}
+
+async function recordDailyHint(player, hint) {
+  if (!player || !hint) return;
+  await safelyRecordLearningEvent(learningEventBase(player, {
+    eventId: `hint:daily:${player.dateKey}:ko:${hint.boardIndex}:${hint.type}`,
+    type: 'hint_used',
+    boardIndex: hint.boardIndex,
+    hintType: hint.type,
+  }), player.visibleUserId);
+}
+
+async function recordDailyInvalidGuess(player, guess, attemptId) {
+  if (!player || typeof attemptId !== 'string' || !UUID_RE.test(attemptId)) return;
+  if (learningData.available()
+    && !(await learningData.checkRateLimit(player.visibleUserId, 'daily-invalid', 60))) return;
+  const language = player.language === 'ko' ? 'ko' : 'en';
+  const normalizedGuess = language === 'ko'
+    ? String(guess ?? '').normalize('NFC')
+    : String(guess ?? '').toLowerCase();
+  const recognizedKorean = language === 'ko'
+    && /^[\uAC00-\uD7A3]{2}$/u.test(normalizedGuess)
+    && !isValidKoreanGuess(normalizedGuess)
+    && Boolean(koreanRecognitionWords[normalizedGuess]);
+  await safelyRecordLearningEvent(learningEventBase(player, {
+    eventId: `invalid:${attemptId}`,
+    type: 'invalid_guess_submitted',
+    classification: recognizedKorean
+      ? 'recognized-unaccepted'
+      : (language === 'ko' ? 'unrecognized' : 'not-in-list'),
+    ...(recognizedKorean ? { word: normalizedGuess } : {}),
+  }), player.visibleUserId);
 }
 
 // ========== REDIS KEY HELPERS ==========
@@ -569,6 +753,7 @@ wss.on("connection", (ws, req) => {
           }
           // Always (re-)add player to room to ensure leaderboard is updated
           setPlayer(playerState);
+          await recordDailyRoundStarted(playerState);
 
           // Send STATE to joining client
           ws.send(JSON.stringify({ type: 'STATE', playerState }));
@@ -587,6 +772,26 @@ wss.on("connection", (ws, req) => {
 
           // Broadcast ROOM_EVENT join to everyone in room (including joiner)
           broadcastToRoomByKey(currentRoomKey, { type: 'ROOM_EVENT', event: 'join', visibleUserId });
+          break;
+        }
+
+        case "INVALID_GUESS_ATTEMPT": {
+          const {
+            roomId, dateKey, visibleUserId, guess, attemptId, language: guessLanguage,
+          } = message;
+          const language = guessLanguage === 'ko' ? 'ko' : 'en';
+          if (!roomId || !dateKey || !visibleUserId || !guess || !UUID_RE.test(String(attemptId ?? ''))) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing or invalid fields' }));
+            return;
+          }
+          const playerState = getPlayer(roomId, dateKey, visibleUserId, language);
+          if (!playerState || playerState.gameState.gameOver) return;
+          const normalizedGuess = language === 'ko'
+            ? String(guess).normalize('NFC')
+            : String(guess).toLowerCase();
+          if (isValidGuessFormat(normalizedGuess, language)) return;
+          await recordDailyInvalidGuess(playerState, guess, attemptId);
+          ws.send(JSON.stringify({ type: 'ANALYTICS_ACK', event: 'invalid_guess', attemptId }));
           break;
         }
 
@@ -612,6 +817,11 @@ wss.on("connection", (ws, req) => {
           // Validate guess
           const normalizedGuess = language === 'ko' ? guess : guess.toLowerCase();
           if (!isValidGuessFormat(normalizedGuess, language)) {
+            await recordDailyInvalidGuess(
+              playerState,
+              normalizedGuess,
+              UUID_RE.test(String(message.attemptId ?? '')) ? message.attemptId : crypto.randomUUID(),
+            );
             const expectedLen = getWordLengthForLanguage(language);
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_GUESS', message: `Guess must be ${expectedLen} ${language === 'ko' ? 'syllables' : 'letters'}` }));
             return;
@@ -668,6 +878,7 @@ wss.on("connection", (ws, req) => {
           };
           console.log('[GUESS] Updating player:', visibleUserId, 'guessCount:', newGuessCount, 'boards:', newBoards.map(b => b.guesses.length));
           setPlayer(updatedPlayerState);
+          await recordDailyGuessTransition(updatedPlayerState, oldGameState, newGameState, normalizedGuess);
 
           // Publish DAILY_FINISHED event if game just ended
           if (newGameOver && hasRedisConnection()) {
@@ -746,7 +957,13 @@ wss.on("connection", (ws, req) => {
           const updatedPlayerState = result.duplicate
             ? { ...playerState, gameState: result.state }
             : { ...playerState, gameState: result.state, updatedAt: Date.now() };
-          if (!result.duplicate) setPlayer(updatedPlayerState);
+          if (!result.duplicate) {
+            setPlayer(updatedPlayerState);
+            const hint = result.state.assistance?.hints?.find(
+              (entry) => entry.boardIndex === boardIndex && entry.type === hintType,
+            );
+            await recordDailyHint(updatedPlayerState, hint);
+          }
 
           ws.send(JSON.stringify({ type: 'STATE', playerState: updatedPlayerState }));
           if (!result.duplicate) {
@@ -978,7 +1195,9 @@ function isValidGuessFormat(guess, language) {
   if (language === 'ko') {
     return guess.length === 2 && /^[\uAC00-\uD7A3]+$/.test(guess) && isValidKoreanGuess(guess);
   }
-  return guess.length === 5 && /^[a-z]+$/.test(guess);
+  return guess.length === 5
+    && /^[a-z]+$/.test(guess)
+    && (englishGuessWords.has(guess) || WORD_LIST.includes(guess));
 }
 
 function dateKeyToSeed(dateKey) {
@@ -1061,8 +1280,151 @@ function getTodayDateKey() {
 
 // Health check for deployment platforms
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    capabilities: {
+      learningDataEnabled: LEARNING_ANALYTICS_ENABLED,
+      learningDataAvailable: learningData.available(),
+      learningDataRedisBacked: learningData.available() && hasRedisConnection(),
+    },
+  });
 });
+
+app.post('/api/session/dev', (req, res) => {
+  if (!ALLOW_DEV_SESSION || !APP_SESSION_SECRET) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim().slice(0, 100) : '';
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const session = createAppSessionToken(userId, APP_SESSION_SECRET);
+  return res.json({ app_session_token: session.token, app_session_expires_at: session.expiresAt });
+});
+
+app.post('/api/analytics/events', learningRoute(async (req, res) => {
+  if (!learningData.available()) {
+    return res.status(503).json({ error: 'Learning analytics unavailable', code: 'LEARNING_DATA_UNAVAILABLE' });
+  }
+  const userId = getAuthenticatedLearningUser(req);
+  if (!userId) return res.status(401).json({ error: 'Valid app session required' });
+  const events = req.body?.events;
+  if (!Array.isArray(events) || events.length < 1 || events.length > 20) {
+    return res.status(400).json({ error: 'events must contain between 1 and 20 items' });
+  }
+  if (!(await learningData.checkRateLimit(userId, 'events', 60))) {
+    return res.status(429).json({ error: 'Analytics rate limit exceeded' });
+  }
+
+  const acceptedIds = [];
+  const duplicateIds = [];
+  const rejected = [];
+  for (const event of events) {
+    const result = await learningData.recordEvent(event, userId, { client: true });
+    if (!result.accepted) {
+      rejected.push({ eventId: typeof event?.eventId === 'string' ? event.eventId : null, code: result.code });
+      continue;
+    }
+    if (result.duplicate) duplicateIds.push(result.event.eventId);
+    else acceptedIds.push(result.event.eventId);
+    if (
+      !result.duplicate
+      && result.event.type === 'valid_guess_submitted'
+      && result.event.mode === 'practice'
+      && result.event.language === 'ko'
+    ) {
+      await learningData.markSavedWordLaterGuessed(userId, result.event.word, {
+        dateKey: result.event.dateKey,
+        mode: 'practice',
+        roundId: result.event.roundId,
+        roundStartedAt: result.event.roundStartedAt,
+      });
+    }
+  }
+  return res.json({ version: 1, acceptedIds, duplicateIds, rejected });
+}));
+
+app.get('/api/learning/saved-words', learningRoute(async (req, res) => {
+  if (!learningData.available()) {
+    return res.status(503).json({ error: 'Saved Words unavailable', code: 'LEARNING_DATA_UNAVAILABLE' });
+  }
+  const userId = getAuthenticatedLearningUser(req);
+  if (!userId) return res.status(401).json({ error: 'Valid app session required' });
+  if (!(await learningData.checkRateLimit(userId, 'saved-words-read', 60))) {
+    return res.status(429).json({ error: 'Saved Words rate limit exceeded' });
+  }
+  if (req.query.language && req.query.language !== 'ko') {
+    return res.status(400).json({ error: 'Saved Words currently supports Korean only' });
+  }
+  const words = await learningData.getSavedWords(userId);
+  return res.json({ version: 1, language: 'ko', storage: 'server', words });
+}));
+
+app.put('/api/learning/saved-words/:word', learningRoute(async (req, res) => {
+  if (!learningData.available()) {
+    return res.status(503).json({ error: 'Saved Words unavailable', code: 'LEARNING_DATA_UNAVAILABLE' });
+  }
+  const userId = getAuthenticatedLearningUser(req);
+  if (!userId) return res.status(401).json({ error: 'Valid app session required' });
+  if (!(await learningData.checkRateLimit(userId, 'saved-words', 30))) {
+    return res.status(429).json({ error: 'Saved Words rate limit exceeded' });
+  }
+  try {
+    const result = await learningData.saveWord(userId, req.params.word, {
+      source: req.body?.source,
+      dateKey: req.body?.dateKey,
+      mode: req.body?.mode,
+      roundId: req.body?.roundId,
+    });
+    return res.status(result.created ? 201 : 200).json({ version: 1, ...result });
+  } catch (error) {
+    const status = error.message === 'INVALID_WORD' ? 400 : 503;
+    return res.status(status).json({ error: error.message, code: error.message });
+  }
+}));
+
+app.delete('/api/learning/saved-words/:word', learningRoute(async (req, res) => {
+  if (!learningData.available()) {
+    return res.status(503).json({ error: 'Saved Words unavailable', code: 'LEARNING_DATA_UNAVAILABLE' });
+  }
+  const userId = getAuthenticatedLearningUser(req);
+  if (!userId) return res.status(401).json({ error: 'Valid app session required' });
+  if (!(await learningData.checkRateLimit(userId, 'saved-words', 30))) {
+    return res.status(429).json({ error: 'Saved Words rate limit exceeded' });
+  }
+  try {
+    const result = await learningData.unsaveWord(userId, req.params.word, {
+      dateKey: req.body?.dateKey,
+      mode: req.body?.mode,
+      roundId: req.body?.roundId,
+    });
+    return res.json({ version: 1, ...result });
+  } catch (error) {
+    const status = error.message === 'INVALID_WORD' ? 400 : 503;
+    return res.status(status).json({ error: error.message, code: error.message });
+  }
+}));
+
+app.get('/api/admin/analytics/summary', learningRoute(async (req, res) => {
+  const adminToken = getBearerToken(req);
+  if (!secureTokenEquals(adminToken, ANALYTICS_ADMIN_TOKEN)) {
+    return res.status(401).json({ error: 'Valid analytics admin token required' });
+  }
+  if (!learningData.available()) {
+    return res.status(503).json({ error: 'Learning analytics unavailable', code: 'LEARNING_DATA_UNAVAILABLE' });
+  }
+  try {
+    const summary = await learningData.getSummary({
+      from: req.query.from,
+      to: req.query.to,
+      language: req.query.language,
+      mode: req.query.mode,
+    });
+    return res.json(summary);
+  } catch (error) {
+    const status = ['INVALID_DATE_RANGE', 'INVALID_FILTER'].includes(error.message) ? 400 : 500;
+    return res.status(status).json({ error: error.message });
+  }
+}));
 
 // Activity leave notification - triggers "was playing" message in Discord
 app.post("/api/activity/leave", async (req, res) => {
@@ -1277,24 +1639,52 @@ app.get("/api/debug/persist", async (req, res) => {
 app.post("/api/token", async (req, res) => {
 
   // Exchange the code for an access_token
-  const response = await fetch(`https://discord.com/api/oauth2/token`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      client_id: process.env.VITE_DISCORD_CLIENT_ID,
-      client_secret: process.env.DISCORD_CLIENT_SECRET,
-      grant_type: "authorization_code",
-      code: req.body.code,
-    }),
-  });
+  try {
+    const response = await fetch(`https://discord.com/api/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: process.env.VITE_DISCORD_CLIENT_ID,
+        client_secret: process.env.DISCORD_CLIENT_SECRET,
+        grant_type: "authorization_code",
+        code: req.body.code,
+      }),
+    });
+    const tokenPayload = await response.json();
+    if (!response.ok || !tokenPayload.access_token) {
+      return res.status(502).json({ error: 'Discord token exchange failed' });
+    }
 
-  // Retrieve the access_token from the response
-  const { access_token } = await response.json();
+    let appSession = null;
+    if (APP_SESSION_SECRET) {
+      try {
+        const userResponse = await fetch('https://discord.com/api/v10/users/@me', {
+          headers: { Authorization: `Bearer ${tokenPayload.access_token}` },
+        });
+        const user = await userResponse.json();
+        if (userResponse.ok && user?.id) {
+          appSession = createAppSessionToken(user.id, APP_SESSION_SECRET);
+        } else {
+          console.warn('[Learning] Discord identity verification did not return a user; learning data is unavailable for this session.');
+        }
+      } catch (error) {
+        console.warn('[Learning] Discord identity verification failed:', error.message);
+      }
+    }
 
-  // Return the access_token to our client as { access_token: "..."}
-  res.send({ access_token });
+    return res.send({
+      access_token: tokenPayload.access_token,
+      ...(appSession ? {
+        app_session_token: appSession.token,
+        app_session_expires_at: appSession.expiresAt,
+      } : {}),
+    });
+  } catch (error) {
+    console.error('[Auth] Discord token exchange failed:', error.message);
+    return res.status(502).json({ error: 'Discord authentication unavailable' });
+  }
 });
 
 // JOIN: Get or create game state for a player in a room
@@ -1337,6 +1727,8 @@ app.post("/api/game/join", async (req, res) => {
       };
     }
 
+    await recordDailyRoundStarted(playerState);
+
     broadcastToRoomByKey(
       makeRoomKey(roomId, dateKey, language),
       { type: 'LEADERBOARD', leaderboard: getOrCreateRoom(roomId, dateKey, language).leaderboard, language },
@@ -1345,6 +1737,36 @@ app.post("/api/game/join", async (req, res) => {
   } catch (err) {
     console.error("JOIN error:", err);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// INVALID GUESS: Server-classify a rejected daily attempt without blocking client feedback.
+app.post('/api/game/invalid-guess', async (req, res) => {
+  try {
+    const {
+      roomId, userId, guess, attemptId, dateKey: clientDateKey, language: reqLanguage,
+    } = req.body;
+    const language = reqLanguage === 'ko' ? 'ko' : 'en';
+    if (!roomId || !userId || !guess || !UUID_RE.test(String(attemptId ?? ''))) {
+      return res.status(400).json({ error: 'roomId, userId, guess, and UUID attemptId required' });
+    }
+    const dateKey = clientDateKey && /^\d{4}-\d{2}-\d{2}$/.test(clientDateKey)
+      ? clientDateKey
+      : getTodayDateKey();
+    const player = await getPlayerAsync(roomId, dateKey, userId, language);
+    if (!player) return res.status(404).json({ error: 'No game found. Call /api/game/join first.' });
+    if (player.gameState.gameOver) return res.status(204).end();
+    const normalizedGuess = language === 'ko'
+      ? String(guess).normalize('NFC')
+      : String(guess).toLowerCase();
+    if (isValidGuessFormat(normalizedGuess, language)) {
+      return res.status(400).json({ error: 'Guess is accepted by the current lexicon' });
+    }
+    await recordDailyInvalidGuess(player, normalizedGuess, attemptId);
+    return res.status(202).json({ accepted: true });
+  } catch (error) {
+    console.warn('[Learning] Invalid-guess instrumentation failed:', error.message);
+    return res.status(202).json({ accepted: false });
   }
 });
 
@@ -1368,6 +1790,7 @@ app.post("/api/game/guess", async (req, res) => {
     }
 
     const { gameState } = state;
+    const existingPlayer = await getPlayerAsync(roomId, dateKey, userId, language);
     if (gameState.gameOver) {
       return res.json(state); // Game already over, return current state
     }
@@ -1375,6 +1798,13 @@ app.post("/api/game/guess", async (req, res) => {
     // Validate guess format (language-aware)
     const normalizedGuess = language === 'ko' ? guess : guess.toLowerCase();
     if (!isValidGuessFormat(normalizedGuess, language)) {
+      if (existingPlayer) {
+        await recordDailyInvalidGuess(
+          existingPlayer,
+          normalizedGuess,
+          UUID_RE.test(String(req.body.attemptId ?? '')) ? req.body.attemptId : crypto.randomUUID(),
+        );
+      }
       return res.status(400).json({ error: "Invalid guess format" });
     }
 
@@ -1423,6 +1853,15 @@ app.post("/api/game/guess", async (req, res) => {
     state = { ...state, gameState: { ...newGameState, language }, language };
     await gameStateStore.set(roomId, dateKey, userId, state, language);
 
+    const updatedPlayer = getPlayer(roomId, dateKey, userId, language) || (existingPlayer ? {
+      ...existingPlayer,
+      gameState: newGameState,
+      language,
+    } : null);
+    if (updatedPlayer) {
+      await recordDailyGuessTransition(updatedPlayer, gameState, newGameState, normalizedGuess);
+    }
+
     res.json(state);
   } catch (err) {
     console.error("GUESS error:", err);
@@ -1466,6 +1905,10 @@ app.post("/api/game/hint", async (req, res) => {
         : { ...playerState, gameState: result.state, updatedAt: Date.now() };
       if (!result.duplicate) {
         setPlayer(updatedPlayerState);
+        const hint = result.state.assistance?.hints?.find(
+          (entry) => entry.boardIndex === boardIndex && entry.type === hintType,
+        );
+        await recordDailyHint(updatedPlayerState, hint);
         const room = getOrCreateRoom(roomId, dateKey, language);
         broadcastToRoomByKey(
           makeRoomKey(roomId, dateKey, language),

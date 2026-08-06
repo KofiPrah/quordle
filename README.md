@@ -60,3 +60,43 @@ penalty, and Assisted/Unassisted status. Deploy the engine, server, bot, and
 client together when changing these contracts. Existing Redis JSON is
 normalized at restore time, so no database migration is required.
 
+## Learning analytics and Saved Words
+
+Phase 6 records versioned learning aggregates without retaining a raw event log.
+Daily valid and invalid guesses, solves, failures, hints, completion scores, and
+assistance status are derived by the server. The client submits practice gameplay
+events and UI interactions such as dictionary views, nearby-word selections, and
+post-game review engagement. Unrecognized input text is discarded; only
+KRDICT-confirmed real-but-unaccepted Korean words may appear in word-frequency
+aggregates.
+
+Cross-device Korean Saved Words use the authenticated Discord identity. The
+analytics store uses an HMAC pseudonym instead of the Discord ID, display name,
+guild, or room. Aggregate and cohort keys expire after 180 days, event
+idempotency keys after 30 days, and Saved Words remain until the player removes
+them. Local development outside Discord falls back to device-only localStorage.
+An authenticated local server can be exercised with `ALLOW_DEV_SESSION=true`;
+never enable that helper in a deployed environment.
+
+Production requires Redis and these server-only settings:
+
+```text
+LEARNING_ANALYTICS_ENABLED=true
+APP_SESSION_SECRET=<random secret>
+ANALYTICS_HMAC_SECRET=<independent random secret>
+ANALYTICS_ADMIN_TOKEN=<independent admin token>
+```
+
+If any requirement is unavailable, gameplay continues but server learning data
+fails closed. `/health` reports capability booleans without exposing secret
+values. Retrieve a protected JSON summary with:
+
+```powershell
+$headers = @{ Authorization = "Bearer $env:ANALYTICS_ADMIN_TOKEN" }
+Invoke-RestMethod -Headers $headers -Uri "https://your-server/api/admin/analytics/summary?from=2026-08-01&to=2026-08-31&language=ko&mode=daily"
+```
+
+The summary supports at most 90 days per request. Dictionary, nearby-word,
+Saved Words, and review usage do not affect scores; only persisted hints mark a
+round Assisted or apply the existing hint penalty.
+

@@ -45,6 +45,19 @@ import {
   isKoreanDiscoveryRequestCurrent,
   toKoreanNearbySuggestions,
 } from "./src/rejectedGuessFeedback.js";
+import {
+  buildLearningEvent,
+  createOneTimeEventTracker,
+  createStableLearningEventId,
+  createLearningEventQueue,
+  getOptimisticSavedWordToggle,
+  getSavedWordButtonState,
+  getSavedDictionarySupplementalWords,
+  getSavedWordsForResults,
+  readLocalSavedWords,
+  removeLocalSavedWord,
+  upsertLocalSavedWord,
+} from "./src/learningData.js";
 
 // Will eventually store the authenticated user's access_token
 let auth;
@@ -99,6 +112,7 @@ let dictionarySnapshot = null;
 let dictionaryLoadState = 'idle';
 let dictionaryLoadError = null;
 let dictionarySelectedWord = null;
+let dictionaryEntrySource = 'dictionary';
 let koreanRecognitionSnapshot = null;
 let koreanNearbyCandidates = null;
 let rejectedGuessRequestId = 0;
@@ -110,6 +124,234 @@ let pendingBoardSelectionAnnouncement = '';
 let pendingHintRequest = null;
 let hintRequestError = null;
 let hintRequestTimeout = null;
+let appSessionToken = null;
+let appSessionExpiresAt = 0;
+let currentRoundId = null;
+let roundStartedAt = null;
+let savedWords = [];
+let savedWordsLoadState = 'idle';
+let savedWordsError = null;
+let pendingSavedWord = null;
+let learningFlushTimer = null;
+let learningRetryDelayMs = 1000;
+let reviewObserver = null;
+const observedLearningEvents = createOneTimeEventTracker();
+const LEARNING_QUEUE_OWNER_KEY = 'quordle_learning_events_owner_v1';
+
+const learningEventQueue = createLearningEventQueue({
+  storage: localStorage,
+  send: async (events, options = {}) => {
+    if (!appSessionToken || appSessionExpiresAt <= Date.now()) {
+      throw new Error('Learning session unavailable');
+    }
+    const response = await fetch(`${API_URL}/api/analytics/events`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${appSessionToken}`,
+      },
+      body: JSON.stringify({ events }),
+      keepalive: options.keepalive === true,
+    });
+    if (!response.ok) throw new Error(`Learning analytics request failed (${response.status})`);
+    return response.json();
+  },
+});
+
+function getLearningEventContext() {
+  return {
+    dateKey: getTodayDateKey(),
+    language: currentLanguage,
+    mode: gameMode,
+    roundId: currentRoundId || `${gameMode}:${getTodayDateKey()}:${currentLanguage}`,
+    roundStartedAt: roundStartedAt || Date.now(),
+  };
+}
+
+function claimLearningQueueForUser(userId) {
+  if (!userId) return;
+  try {
+    const ownerId = createStableLearningEventId(`queue-owner:${userId}`);
+    const previousOwner = localStorage.getItem(LEARNING_QUEUE_OWNER_KEY);
+    if (previousOwner && previousOwner !== ownerId) learningEventQueue.clear();
+    localStorage.setItem(LEARNING_QUEUE_OWNER_KEY, ownerId);
+  } catch {
+    learningEventQueue.clear();
+  }
+}
+
+function scheduleLearningEventFlush(delayMs = 250) {
+  if (!appSessionToken || appSessionExpiresAt <= Date.now() || learningFlushTimer) return;
+  learningFlushTimer = setTimeout(() => {
+    learningFlushTimer = null;
+    learningEventQueue.flush()
+      .then((result) => {
+        learningRetryDelayMs = 1000;
+        if (result.pending > 0) scheduleLearningEventFlush();
+      })
+      .catch((error) => {
+        console.warn('[Learning] Analytics flush deferred:', error.message);
+        scheduleLearningEventFlush(learningRetryDelayMs);
+        learningRetryDelayMs = Math.min(learningRetryDelayMs * 2, 30_000);
+      });
+  }, delayMs);
+}
+
+function trackLearningEvent(type, details = {}, stableKey = null) {
+  if (!appSessionToken) return;
+  const context = getLearningEventContext();
+  const eventId = stableKey
+    ? createStableLearningEventId(`client:${context.roundId}:${stableKey}`)
+    : undefined;
+  if (eventId && !observedLearningEvents.claim(eventId)) return;
+  const queued = learningEventQueue.enqueue(buildLearningEvent(type, context, { ...details, eventId }));
+  if (queued) scheduleLearningEventFlush();
+}
+
+function getDictionarySupplementalWords() {
+  return [
+    ...getSafeFeedbackSuggestionWords(),
+    ...getSavedDictionarySupplementalWords(gameState, savedWords),
+  ];
+}
+
+function renderSaveWordButton(word, source = 'dictionary') {
+  const pending = pendingSavedWord === word;
+  const presentation = getSavedWordButtonState(savedWords, word, pending);
+  const { saved } = presentation;
+  const unavailable = savedWordsLoadState === 'loading'
+    || savedWordsLoadState === 'idle'
+    || savedWordsLoadState === 'error';
+  return `<button
+    class="save-word-button ${saved ? 'save-word-button-saved' : ''}"
+    type="button"
+    data-save-word="${escapeHtml(word)}"
+    data-save-source="${escapeHtml(source)}"
+    aria-pressed="${presentation.ariaPressed}"
+    aria-label="${escapeHtml(presentation.ariaLabel)}"
+    ${pending || unavailable ? 'disabled' : ''}
+  >${escapeHtml(presentation.text)}</button>`;
+}
+
+async function toggleSavedWord(word, source = 'dictionary') {
+  if (pendingSavedWord || savedWordsLoadState === 'loading' || savedWordsLoadState === 'idle') return;
+  const normalized = word.normalize('NFC');
+  const optimistic = getOptimisticSavedWordToggle(savedWords, normalized, source);
+  const { previous, existing } = optimistic;
+  pendingSavedWord = normalized;
+  savedWordsError = null;
+  savedWords = optimistic.next;
+  renderApp();
+  setupKeyboardListeners();
+
+  try {
+    if (appSessionToken && savedWordsLoadState !== 'loaded-local') {
+      const response = await fetch(`${API_URL}/api/learning/saved-words/${encodeURIComponent(normalized)}`, {
+        method: existing ? 'DELETE' : 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${appSessionToken}`,
+        },
+        body: JSON.stringify({
+          source,
+          dateKey: getTodayDateKey(),
+          mode: gameMode,
+          roundId: currentRoundId,
+        }),
+      });
+      if (!response.ok) throw new Error(`Saved Words update failed (${response.status})`);
+      const payload = await response.json();
+      if (!existing && payload.record) {
+        savedWords = savedWords.map((entry) => entry.word === normalized ? payload.record : entry);
+      }
+      savedWordsLoadState = 'loaded-server';
+    } else if (existing) {
+      savedWords = removeLocalSavedWord(localStorage, normalized);
+      savedWordsLoadState = 'loaded-local';
+    } else {
+      savedWords = upsertLocalSavedWord(localStorage, normalized, source);
+      savedWordsLoadState = 'loaded-local';
+    }
+  } catch (error) {
+    savedWords = previous;
+    savedWordsError = 'Saved Words could not be updated. Please try again.';
+    console.warn('[Learning] Saved Words update failed:', error.message);
+  } finally {
+    pendingSavedWord = null;
+    renderApp();
+    setupKeyboardListeners();
+    if (activeOverlay) focusActiveOverlay();
+    else requestAnimationFrame(() => {
+      const selector = `[data-save-word="${CSS.escape(normalized)}"]`;
+      (document.querySelector(selector) || document.querySelector('.saved-words-collection'))?.focus();
+    });
+  }
+}
+
+function loadLocalSavedWordState() {
+  savedWords = readLocalSavedWords(localStorage);
+  savedWordsLoadState = 'loaded-local';
+  savedWordsError = null;
+}
+
+async function loadSavedWords() {
+  if (!appSessionToken) {
+    if (discordSdk) {
+      savedWordsLoadState = 'error';
+      savedWordsError = 'Cross-device Saved Words are not configured.';
+    } else {
+      loadLocalSavedWordState();
+    }
+    return;
+  }
+  if (savedWordsLoadState === 'loading') return;
+  savedWordsLoadState = 'loading';
+  savedWordsError = null;
+  try {
+    const response = await fetch(`${API_URL}/api/learning/saved-words?language=ko`, {
+      headers: { Authorization: `Bearer ${appSessionToken}` },
+    });
+    if (!response.ok) throw new Error(`Saved Words request failed (${response.status})`);
+    const payload = await response.json();
+    savedWords = Array.isArray(payload.words) ? payload.words : [];
+    savedWordsLoadState = 'loaded-server';
+  } catch (error) {
+    if (!discordSdk) {
+      loadLocalSavedWordState();
+    } else {
+      savedWordsLoadState = 'error';
+      savedWordsError = 'Cross-device Saved Words are temporarily unavailable.';
+    }
+    console.warn('[Learning] Failed to load Saved Words:', error.message);
+  }
+  if (currentLanguage === 'ko' && gameState) {
+    renderApp();
+    setupKeyboardListeners();
+  }
+}
+
+async function requestDevLearningSession() {
+  if (appSessionToken || !discordUserId) return;
+  try {
+    const response = await fetch(`${API_URL}/api/session/dev`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: discordUserId }),
+    });
+    if (!response.ok) throw new Error(`Dev session unavailable (${response.status})`);
+    const payload = await response.json();
+    appSessionToken = payload.app_session_token || null;
+    appSessionExpiresAt = Number(payload.app_session_expires_at) || 0;
+    await loadSavedWords();
+    scheduleLearningEventFlush();
+  } catch {
+    loadLocalSavedWordState();
+    if (gameState) {
+      renderApp();
+      setupKeyboardListeners();
+    }
+  }
+}
 
 function clearPendingHintRequest() {
   pendingHintRequest = null;
@@ -476,6 +718,29 @@ function sendHintViaWebSocket(boardIndex, hintType) {
   return true;
 }
 
+function reportDailyInvalidGuess(guess) {
+  if (gameMode !== 'daily' || !discordUserId || !discordRoomId) return;
+  const payload = {
+    type: 'INVALID_GUESS_ATTEMPT',
+    roomId: discordRoomId,
+    dateKey: getTodayDateKey(),
+    visibleUserId: discordUserId,
+    guess,
+    language: currentLanguage,
+    attemptId: crypto.randomUUID(),
+  };
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(payload));
+    return;
+  }
+  fetch(`${API_URL}/api/game/invalid-guess`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...payload, userId: discordUserId }),
+    keepalive: true,
+  }).catch(() => {});
+}
+
 function getSavedStateTimestamp(payload) {
   const ts = Number(payload?.lastActiveAt ?? payload?.savedAt);
   return Number.isFinite(ts) ? ts : Date.now();
@@ -650,6 +915,8 @@ function saveGameState({ overrideState = gameState, overrideMode = gameMode, ove
       gameMode: overrideMode,
       language: overrideLanguage,
       dateKey: overrideMode === "daily" ? getTodayDateKey() : null,
+      roundId: currentRoundId,
+      roundStartedAt,
       lastActiveAt: lastActivityAt,
       savedAt: Date.now(),
     };
@@ -666,6 +933,14 @@ function restoreSavedPayload(payload, { markActive = false } = {}) {
   localStorage.setItem('quordle_language', currentLanguage);
   gameState = payload.gameState;
   gameMode = payload.gameMode || "daily";
+  currentRoundId = typeof payload.roundId === 'string' && payload.roundId
+    ? payload.roundId
+    : (gameMode === 'daily'
+      ? `daily:${payload.dateKey || getTodayDateKey()}:${currentLanguage}`
+      : `practice:${crypto.randomUUID()}`);
+  roundStartedAt = Number.isFinite(Number(payload.roundStartedAt))
+    ? Number(payload.roundStartedAt)
+    : Date.now();
   saveActiveMode(gameMode);
   clearGuessFeedback();
   expiredSessionSnapshot = null;
@@ -784,6 +1059,9 @@ function setupActivityTracking() {
     touchActivity();
   });
   document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      learningEventQueue.flush({ keepalive: true }).catch(() => {});
+    }
     if (document.visibilityState !== 'visible' || !gameState || uiScreen === "expired") {
       return;
     }
@@ -870,10 +1148,12 @@ if (discordSdk) {
       // Dev mode fallback - use localStorage-persisted random IDs
       setupDevMode();
       initQuordleGame();
+      requestDevLearningSession();
     });
 } else {
   setupDevMode();
   initQuordleGame();
+  requestDevLearningSession();
 }
 
 function setupDevMode() {
@@ -886,6 +1166,7 @@ function setupDevMode() {
     localStorage.setItem('dev_user_id', devUserId);
   }
   discordUserId = devUserId;
+  claimLearningQueueForUser(discordUserId);
 
   // Use a fixed dev room or allow override via URL param
   const urlParams = new URLSearchParams(window.location.search);
@@ -931,7 +1212,10 @@ async function setupDiscordSdk() {
       code,
     }),
   });
-  const { access_token } = await response.json();
+  const tokenPayload = await response.json();
+  const { access_token } = tokenPayload;
+  appSessionToken = tokenPayload.app_session_token || null;
+  appSessionExpiresAt = Number(tokenPayload.app_session_expires_at) || 0;
 
   // Authenticate with Discord client (using the access_token)
   auth = await discordSdk.commands.authenticate({
@@ -944,6 +1228,7 @@ async function setupDiscordSdk() {
 
   // Capture Discord context for server-side persistence
   discordUserId = auth.user?.id || null;
+  claimLearningQueueForUser(discordUserId);
   discordGuildId = discordSdk.guildId || null;
   discordChannelId = discordSdk.channelId || null;
   // Use channelId as roomId (stable across activity restarts for state persistence)
@@ -951,6 +1236,9 @@ async function setupDiscordSdk() {
   // - Game state persists when player closes and reopens the activity
   // - Leaderboard shows all players who played in the same channel
   discordRoomId = discordSdk.channelId || discordSdk.instanceId || null;
+
+  loadSavedWords();
+  scheduleLearningEventFlush();
 
   // Notify server when user leaves the activity
   setupLeaveNotification();
@@ -1050,6 +1338,8 @@ function startNewDailyGame() {
   koreanShiftActive = false;
   imeReset();
   const dateKey = getTodayDateKey();
+  currentRoundId = `daily:${dateKey}:${currentLanguage}`;
+  roundStartedAt = Date.now();
   const targetWords = getDailyTargets(dateKey, currentLanguage);
   gameState = createGame({ targetWords, language: currentLanguage });
   clearGuessFeedback();
@@ -1078,6 +1368,8 @@ function startNewPracticeGame() {
   expiredSessionSnapshot = null;
   koreanShiftActive = false;
   imeReset();
+  currentRoundId = `practice:${crypto.randomUUID()}`;
+  roundStartedAt = Date.now();
   const targetWords = currentLanguage === 'ko'
     ? getQuordleWordsForLanguage('ko')
     : getQuordleWords();
@@ -1085,6 +1377,7 @@ function startNewPracticeGame() {
   clearGuessFeedback();
   lastActivityAt = Date.now();
   saveGameState();
+  trackLearningEvent('round_started', {}, 'round-started');
   renderApp();
   setupKeyboardListeners();
 }
@@ -1200,6 +1493,10 @@ async function initDailyFromServer() {
 }
 
 function renderApp() {
+  if (uiScreen !== 'results' && reviewObserver) {
+    reviewObserver.disconnect();
+    reviewObserver = null;
+  }
   const currentBoardRegion = document.querySelector('.game-scroll-region');
   if (currentBoardRegion) {
     boardScrollTop = currentBoardRegion.scrollTop;
@@ -1310,6 +1607,7 @@ function resetOverlayState() {
   overlaySize = 'half';
   overlayReturnFocusSelector = null;
   dictionarySelectedWord = null;
+  dictionaryEntrySource = 'dictionary';
   clearPendingHintRequest();
   hintRequestError = null;
 }
@@ -1325,7 +1623,7 @@ function ensureKoreanDictionaryLoaded() {
       const eligible = getDictionaryEligibleWords(
         gameState,
         snapshot.entries,
-        getSafeFeedbackSuggestionWords(),
+        getDictionarySupplementalWords(),
       );
       if (!eligible.includes(dictionarySelectedWord)) {
         dictionarySelectedWord = getDefaultDictionaryWord(gameState, eligible);
@@ -1510,6 +1808,9 @@ async function requestBoardHint(boardIndex, hintType) {
   } else {
     gameState = result.state;
     saveGameState();
+    if (!result.duplicate) {
+      trackLearningEvent('hint_used', { boardIndex, hintType }, `hint:${boardIndex}:${hintType}`);
+    }
   }
   renderApp();
   setupKeyboardListeners();
@@ -1521,16 +1822,29 @@ function openDictionary(word = null, returnFocusSelector = '.dictionary-trigger'
   const eligibleWords = getDictionaryEligibleWords(
     gameState,
     dictionarySnapshot?.entries ?? null,
-    getSafeFeedbackSuggestionWords(),
+    getDictionarySupplementalWords(),
   );
   if (eligibleWords.length === 0) return;
   dictionarySelectedWord = eligibleWords.includes(word)
     ? word
     : getDefaultDictionaryWord(gameState, eligibleWords);
+  dictionaryEntrySource = returnFocusSelector.includes('nearby-word')
+    ? 'nearby'
+    : (gameState.gameOver ? 'post-game' : 'dictionary');
   activeOverlay = OVERLAY_DICTIONARY;
   overlaySize = 'half';
   overlayReturnFocusSelector = returnFocusSelector;
   ensureKoreanDictionaryLoaded();
+  trackLearningEvent('dictionary_opened', {
+    ...(dictionarySelectedWord ? { word: dictionarySelectedWord } : {}),
+    surface: dictionaryEntrySource,
+  });
+  if (dictionarySelectedWord) {
+    trackLearningEvent('definition_viewed', {
+      word: dictionarySelectedWord,
+      surface: dictionaryEntrySource,
+    });
+  }
   renderApp();
   setupKeyboardListeners();
   focusActiveOverlay();
@@ -1551,13 +1865,14 @@ function renderDictionarySense(sense, index) {
   `;
 }
 
-function renderDictionaryEntry(entry) {
+function renderDictionaryEntry(entry, source = dictionaryEntrySource) {
   if (!entry) return '<div class="dictionary-empty">No dictionary entry is available for this word.</div>';
   return `
     <article class="dictionary-entry">
       <div class="dictionary-word-row">
         <h3 lang="ko">${escapeHtml(entry.word)}</h3>
         <span class="dictionary-romanization">${escapeHtml(entry.romanization)}</span>
+        ${renderSaveWordButton(entry.word, source)}
       </div>
       ${entry.pronunciation && entry.pronunciation !== entry.word
         ? `<div class="dictionary-pronunciation"><span>Pronunciation</span> <span lang="ko">${escapeHtml(entry.pronunciation)}</span></div>`
@@ -1595,7 +1910,7 @@ function renderDictionaryOverlay() {
     const eligibleWords = getDictionaryEligibleWords(
       gameState,
       dictionarySnapshot.entries,
-      getSafeFeedbackSuggestionWords(),
+      getDictionarySupplementalWords(),
     );
     const selectedWord = eligibleWords.includes(dictionarySelectedWord)
       ? dictionarySelectedWord
@@ -1610,7 +1925,7 @@ function renderDictionaryOverlay() {
           <label for="dictionary-word-select">Available word</label>
           <select class="dictionary-word-select" id="dictionary-word-select">${options}</select>
         </div>
-        ${renderDictionaryEntry(getKoreanDictionaryEntry(selectedWord, dictionarySnapshot))}
+        ${renderDictionaryEntry(getKoreanDictionaryEntry(selectedWord, dictionarySnapshot), dictionaryEntrySource)}
         ${renderDictionaryAttribution()}`;
   }
 
@@ -1675,10 +1990,17 @@ function bindActiveOverlayInteractions() {
       const eligibleWords = getDictionaryEligibleWords(
         gameState,
         dictionarySnapshot?.entries ?? null,
-        getSafeFeedbackSuggestionWords(),
+        getDictionarySupplementalWords(),
       );
       if (!eligibleWords.includes(wordSelect.value)) return;
       dictionarySelectedWord = wordSelect.value;
+      dictionaryEntrySource = getSafeFeedbackSuggestionWords().includes(dictionarySelectedWord)
+        ? 'nearby'
+        : (gameState.gameOver ? 'post-game' : 'dictionary');
+      trackLearningEvent('definition_viewed', {
+        word: dictionarySelectedWord,
+        surface: dictionaryEntrySource,
+      });
       renderApp();
       setupKeyboardListeners();
       requestAnimationFrame(() => document.querySelector('.dictionary-word-select')?.focus());
@@ -1836,13 +2158,13 @@ function renderKoreanLearningReview() {
   const cards = gameState.boards.map((board, index) => {
     const entry = getKoreanDictionaryEntry(board.targetWord, dictionarySnapshot);
     if (!entry) {
-      return `<article class="learning-card ${board.solved ? 'answer-solved' : 'answer-missed'}">
+      return `<article class="learning-card ${board.solved ? 'answer-solved' : 'answer-missed'}" data-review-word="${escapeHtml(board.targetWord)}">
         <div class="learning-card-header"><span>#${index + 1}</span><strong lang="ko">${escapeHtml(board.targetWord)}</strong></div>
         <p>Definition unavailable for this legacy round.</p>
       </article>`;
     }
     const [primary, ...additional] = entry.senses;
-    return `<article class="learning-card ${board.solved ? 'answer-solved' : 'answer-missed'}">
+    return `<article class="learning-card ${board.solved ? 'answer-solved' : 'answer-missed'}" data-review-word="${escapeHtml(entry.word)}">
       <div class="learning-card-header">
         <span class="learning-card-number">#${index + 1}</span>
         <div><strong lang="ko">${escapeHtml(entry.word)}</strong><span>${escapeHtml(entry.romanization)}</span></div>
@@ -1857,12 +2179,15 @@ function renderKoreanLearningReview() {
         <summary>${additional.length} more ${additional.length === 1 ? 'meaning' : 'meanings'}</summary>
         <ol>${additional.map((sense, senseIndex) => renderDictionarySense(sense, senseIndex + 1)).join('')}</ol>
       </details>` : ''}
-      <button
-        class="learning-card-open"
-        type="button"
-        data-dictionary-word="${escapeHtml(entry.word)}"
-        aria-label="Open full dictionary entry for ${escapeHtml(entry.word)}"
-      >Full entry</button>
+      <div class="learning-card-actions">
+        <button
+          class="learning-card-open"
+          type="button"
+          data-dictionary-word="${escapeHtml(entry.word)}"
+          aria-label="Open full dictionary entry for ${escapeHtml(entry.word)}"
+        >Full entry</button>
+        ${renderSaveWordButton(entry.word, 'post-game')}
+      </div>
     </article>`;
   }).join('');
 
@@ -1873,6 +2198,75 @@ function renderKoreanLearningReview() {
   </div>`;
 }
 
+function renderSavedWordsCollection() {
+  if (currentLanguage !== 'ko' || !gameState?.gameOver) return '';
+  if (savedWordsLoadState === 'idle' || savedWordsLoadState === 'loading') {
+    return `<section class="saved-words-collection" aria-labelledby="saved-words-title">
+      <div class="answers-title" id="saved-words-title">Saved Words</div>
+      <div class="dictionary-status" role="status">Loading saved vocabulary…</div>
+    </section>`;
+  }
+  if (savedWordsLoadState === 'error') {
+    return `<section class="saved-words-collection" aria-labelledby="saved-words-title">
+      <div class="answers-title" id="saved-words-title">Saved Words</div>
+      <div class="dictionary-status" role="alert">
+        <p>${escapeHtml(savedWordsError || 'Saved Words are unavailable.')}</p>
+        <button class="saved-words-retry" type="button">Retry</button>
+      </div>
+    </section>`;
+  }
+  if (!dictionarySnapshot) {
+    ensureKoreanDictionaryLoaded();
+    return `<section class="saved-words-collection" aria-labelledby="saved-words-title">
+      <div class="answers-title" id="saved-words-title">Saved Words</div>
+      <div class="dictionary-status" role="status">Loading saved vocabulary…</div>
+    </section>`;
+  }
+  const collection = getSavedWordsForResults(gameState, savedWords, dictionarySnapshot.entries);
+  const storageNote = savedWordsLoadState === 'loaded-local'
+    ? '<p class="saved-words-storage-note">Saved on this device only.</p>'
+    : '';
+  const cards = collection.map((record) => {
+    const entry = getKoreanDictionaryEntry(record.word, dictionarySnapshot);
+    const primary = entry?.senses?.[0];
+    if (!entry || !primary) return '';
+    return `<article class="saved-word-card">
+      <div class="saved-word-copy">
+        <strong lang="ko">${escapeHtml(entry.word)}</strong>
+        <span>${escapeHtml(entry.romanization)}</span>
+        <p>${primary.translations.map(escapeHtml).join('; ')}</p>
+      </div>
+      <div class="saved-word-actions">
+        <button type="button" class="learning-card-open" data-dictionary-word="${escapeHtml(entry.word)}">Full entry</button>
+        ${renderSaveWordButton(entry.word, 'post-game')}
+      </div>
+    </article>`;
+  }).join('');
+  return `<section class="saved-words-collection" aria-labelledby="saved-words-title" tabindex="-1">
+    <div class="answers-title" id="saved-words-title">Saved Words <span>${collection.length}</span></div>
+    ${storageNote}
+    ${savedWordsError ? `<p class="saved-words-inline-error" role="alert">${escapeHtml(savedWordsError)}</p>` : ''}
+    ${cards || '<p class="saved-words-empty">Save Korean words from the dictionary or answer review to build your collection.</p>'}
+  </section>`;
+}
+
+function setupPostGameReviewObserver() {
+  reviewObserver?.disconnect();
+  reviewObserver = null;
+  if (currentLanguage !== 'ko' || !gameState?.gameOver || typeof IntersectionObserver !== 'function') return;
+  reviewObserver = new IntersectionObserver((entries, observer) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting || entry.intersectionRatio < 0.5) return;
+      const word = entry.target.dataset.reviewWord;
+      if (word) {
+        trackLearningEvent('review_word_viewed', { word, surface: 'post-game' }, `review-word:${word}`);
+      }
+      observer.unobserve(entry.target);
+    });
+  }, { threshold: 0.5 });
+  document.querySelectorAll('[data-review-word]').forEach((card) => reviewObserver.observe(card));
+}
+
 function renderResultsScreen() {
   const app = document.querySelector('#app');
   const performance = calculatePerformanceMetrics(gameState);
@@ -1881,6 +2275,7 @@ function renderResultsScreen() {
   const message = gameState.won ? 'You Won!' : 'Game Over';
   const bannerClass = gameState.won ? 'results-won' : 'results-lost';
   const lang = currentLanguage;
+  if (lang === 'ko') trackLearningEvent('post_game_review_opened', {}, 'post-game-review-opened');
 
   // Language toggle
   const langToggle = `
@@ -1949,6 +2344,7 @@ function renderResultsScreen() {
             ${performance.assisted ? `Assisted · ${performance.hintPenalty}-point hint penalty` : 'Unassisted'}
           </div>
           ${answersHtml}
+          ${renderSavedWordsCollection()}
         </div>
         
         <div class="results-actions">
@@ -1963,6 +2359,7 @@ function renderResultsScreen() {
       ${renderDictionaryOverlay()}
     </div>
   `;
+  requestAnimationFrame(setupPostGameReviewObserver);
 }
 
 function renderExpiredScreen() {
@@ -2506,6 +2903,7 @@ function getKoreanNearbyCandidates(dictionary, recognition) {
 
 async function resolveRejectedKoreanGuess(word) {
   const sourceWord = String(word ?? '').normalize('NFC');
+  reportDailyInvalidGuess(sourceWord);
   const requestId = rejectedGuessRequestId + 1;
   rejectedGuessRequestId = requestId;
   guessFeedback = createKoreanFeedback('loading', [], sourceWord);
@@ -2545,6 +2943,12 @@ async function resolveRejectedKoreanGuess(word) {
       ? 'unrecognized'
       : 'recognized-unaccepted';
     guessFeedback = createKoreanFeedback(feedbackKind, suggestions, sourceWord);
+    if (gameMode === 'practice') {
+      trackLearningEvent('invalid_guess_submitted', {
+        classification: feedbackKind,
+        ...(feedbackKind === 'recognized-unaccepted' ? { word: sourceWord } : {}),
+      });
+    }
     renderApp();
     setupKeyboardListeners();
   } catch (error) {
@@ -2559,6 +2963,9 @@ async function resolveRejectedKoreanGuess(word) {
     })) return;
 
     guessFeedback = createKoreanFeedback('load-failure', [], sourceWord);
+    if (gameMode === 'practice') {
+      trackLearningEvent('invalid_guess_submitted', { classification: 'unrecognized' });
+    }
     renderApp();
     setupKeyboardListeners();
   }
@@ -2628,6 +3035,8 @@ function handleKeyPress(key) {
       if (gameState.currentGuess.length === wordLen) {
         if (!isValidGuess(gameState.currentGuess)) {
           setMessageFeedback('Not in word list', 'word-list-error');
+          if (gameMode === 'daily') reportDailyInvalidGuess(gameState.currentGuess);
+          else trackLearningEvent('invalid_guess_submitted', { classification: 'not-in-list' });
           renderApp();
           setupKeyboardListeners();
           return;
@@ -2654,6 +3063,40 @@ function handleKeyPress(key) {
   }
 }
 
+function recordPracticeGuessTransition(previousState, nextState, guess) {
+  const guessNumber = nextState.guessCount;
+  trackLearningEvent('valid_guess_submitted', { word: guess }, `guess:${guessNumber}`);
+  nextState.boards.forEach((board, boardIndex) => {
+    if (!previousState.boards[boardIndex].solved && board.solved) {
+      trackLearningEvent('board_solved', {
+        boardIndex,
+        word: board.targetWord,
+      }, `board-solved:${boardIndex}:${guessNumber}`);
+    }
+  });
+  if (!previousState.gameOver && nextState.gameOver) {
+    nextState.boards.forEach((board, boardIndex) => {
+      if (!board.solved) {
+        trackLearningEvent('board_failed', {
+          boardIndex,
+          word: board.targetWord,
+        }, `board-failed:${boardIndex}`);
+      }
+    });
+    const performance = calculatePerformanceMetrics(nextState);
+    trackLearningEvent('round_completed', {
+      metrics: {
+        won: nextState.won,
+        assisted: performance.assisted,
+        guessCount: performance.guessCount,
+        score: performance.score,
+        solvedCount: performance.solvedCount,
+        failedCount: 4 - performance.solvedCount,
+      },
+    }, 'round-completed');
+  }
+}
+
 async function submitGuessWithPersistence(guess) {
   // Immediately clear currentGuess to prevent double-submit.
   // In the WS path, state update is async (server responds with STATE),
@@ -2661,6 +3104,7 @@ async function submitGuessWithPersistence(guess) {
   // guard in handleKeyPress and send the same guess again.
   clearGuessFeedback();
   gameState = setCurrentGuess(gameState, '');
+  const previousGameState = gameState;
   koreanShiftActive = false;
   renderApp();
   setupKeyboardListeners();
@@ -2700,6 +3144,7 @@ async function submitGuessWithPersistence(guess) {
 
   // Fallback: local-only submission (practice mode or no server)
   gameState = submitGuess(gameState, guess);
+  if (gameMode === 'practice') recordPracticeGuessTransition(previousGameState, gameState, guess);
   setUiScreenFromGameState();
   saveGameState();
   renderApp();
@@ -2778,7 +3223,16 @@ function setupKeyboardListeners() {
     button.addEventListener('click', () => {
       const word = button.dataset.nearbyWord;
       if (!word || !getSafeFeedbackSuggestionWords().includes(word.normalize('NFC'))) return;
+      trackLearningEvent('nearby_suggestion_selected', { word, surface: 'rejected-guess' });
       openDictionary(word, `[data-nearby-word="${CSS.escape(word)}"]`);
+    });
+  });
+
+  document.querySelectorAll('[data-save-word]:not([disabled])').forEach((button) => {
+    button.addEventListener('click', () => {
+      const word = button.dataset.saveWord;
+      if (!word) return;
+      toggleSavedWord(word, button.dataset.saveSource || 'dictionary');
     });
   });
 
@@ -2788,6 +3242,16 @@ function setupKeyboardListeners() {
       dictionaryLoadState = 'idle';
       dictionaryLoadError = null;
       ensureKoreanDictionaryLoaded();
+      renderApp();
+      setupKeyboardListeners();
+    });
+  }
+
+  const savedWordsRetry = document.querySelector('.saved-words-retry');
+  if (savedWordsRetry) {
+    savedWordsRetry.addEventListener('click', () => {
+      if (appSessionToken) loadSavedWords();
+      else if (!discordSdk) loadLocalSavedWordState();
       renderApp();
       setupKeyboardListeners();
     });
@@ -2959,6 +3423,8 @@ function switchLanguage(newLang) {
     } else if (loadStatus !== "restored") {
       // No saved daily for this language, create new one
       const dateKey = getTodayDateKey();
+      currentRoundId = `daily:${dateKey}:${currentLanguage}`;
+      roundStartedAt = Date.now();
       const targetWords = getDailyTargets(dateKey, currentLanguage);
       gameState = createGame({ targetWords, language: currentLanguage });
       lastActivityAt = Date.now();
@@ -2983,6 +3449,8 @@ function switchLanguage(newLang) {
       setUiScreenFromGameState();
       saveGameState();
     } else {
+      currentRoundId = `practice:${crypto.randomUUID()}`;
+      roundStartedAt = Date.now();
       const targetWords = currentLanguage === 'ko'
         ? getQuordleWordsForLanguage('ko')
         : getQuordleWords();
@@ -2990,6 +3458,7 @@ function switchLanguage(newLang) {
       uiScreen = "game";
       lastActivityAt = Date.now();
       saveGameState();
+      trackLearningEvent('round_started', {}, 'round-started');
     }
   }
 
