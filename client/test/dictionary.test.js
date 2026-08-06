@@ -44,6 +44,12 @@ test('post-game eligibility adds every answer without duplicating guesses', () =
   assert.deepEqual(eligible, ['기차', '학교', '기관', '사과']);
 });
 
+test('explicit nearby suggestions are eligible without exposing unrelated answers', () => {
+  const eligible = getDictionaryEligibleWords(createState(), entries, ['기관']);
+  assert.deepEqual(eligible, ['기차', '학교', '기관']);
+  assert.equal(eligible.includes('사과'), false);
+});
+
 test('latest eligible submitted word is the default dictionary selection', () => {
   const state = createState({ gameOver: true });
   const eligible = getDictionaryEligibleWords(state, entries);

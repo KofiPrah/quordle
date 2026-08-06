@@ -18,7 +18,16 @@ export type {
     DictionarySense,
     KoreanDictionaryEntry,
     KoreanDictionarySnapshot,
+    KoreanRecognitionSnapshot,
 } from './koreanDictionary.js';
+
+export type {
+    KoreanWordLevel,
+    KoreanGuessClassification,
+    KoreanNearbyCandidate,
+    KoreanNearbySuggestion,
+    KoreanNearbyOptions,
+} from './nearbyWords.js';
 
 // Game logic
 export {
@@ -37,6 +46,9 @@ export { evaluateGuess, isSolved } from './evaluator.js';
 
 // Evaluator (Korean)
 export { evaluateGuessKo, evaluateGuessSyllable } from './evaluatorKo.js';
+
+// Korean vocabulary discovery
+export { classifyKoreanGuess, rankNearbyKoreanWords } from './nearbyWords.js';
 
 // Jamo utilities
 export {

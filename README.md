@@ -24,6 +24,14 @@ bulk JSON archive instead, pass the downloaded archive path after `--`:
 npm run dictionary:refresh -- C:\path\to\krdict-json.zip
 ```
 
+Bulk refreshes also regenerate the compact Korean recognition snapshot used for
+nearby-word suggestions and valid-but-not-accepted feedback. API-only refreshes
+preserve that broader snapshot and verification will fail if it no longer
+contains every accepted guess. Use a bulk refresh whenever accepted-word
+membership changes. The recognition snapshot contains only normalized
+two-syllable headwords and learning levels; full definitions remain limited to
+the accepted game lexicon.
+
 The key is build-time only and must never use a `VITE_` prefix. See
 `THIRD_PARTY_NOTICES.md` for dictionary attribution and licensing.
 

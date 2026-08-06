@@ -31,3 +31,11 @@ export interface KoreanDictionarySnapshot {
     };
     entries: Record<string, KoreanDictionaryEntry>;
 }
+
+export type KoreanWordLevel = 'beginner' | 'intermediate' | 'advanced' | 'ungraded';
+
+/** Compact offline catalog used to distinguish recognized Korean words. */
+export interface KoreanRecognitionSnapshot {
+    metadata: KoreanDictionarySnapshot['metadata'];
+    words: Record<string, KoreanWordLevel>;
+}

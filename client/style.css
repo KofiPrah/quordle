@@ -420,6 +420,11 @@ button:focus-visible {
   letter-spacing: 0.18em;
 }
 
+.guess-feedback-region {
+  min-width: 0;
+}
+
+.guess-feedback,
 .guess-error {
   margin-top: 0;
   padding: 0.4rem 0.8rem;
@@ -431,12 +436,80 @@ button:focus-visible {
   display: inline-block;
 }
 
+.guess-feedback {
+  max-width: 100%;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.guess-feedback-loading {
+  background-color: #4f46e5;
+}
+
+.guess-feedback-recognized-unaccepted {
+  background-color: #a16207;
+}
+
+.guess-feedback-unrecognized,
+.guess-feedback-load-failure,
+.guess-feedback-server-error,
+.guess-feedback-word-list-error,
+.guess-feedback-error {
+  background-color: #d9534f;
+}
+
 .guess-error-slot {
   min-height: 1.7rem;
   display: flex;
   align-items: center;
   justify-content: flex-start;
   text-align: left;
+}
+
+.nearby-words {
+  display: flex;
+  min-width: 0;
+  gap: 0.4rem;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  padding: 0.15rem 0.25rem 0.25rem;
+  scrollbar-width: thin;
+  scroll-snap-type: x proximity;
+}
+
+.nearby-word-button {
+  flex: 0 0 auto;
+  min-height: 2rem;
+  max-width: min(13rem, 72vw);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid rgba(129, 140, 248, 0.5);
+  border-radius: 999px;
+  background: rgba(88, 101, 242, 0.16);
+  color: #e0e7ff;
+  scroll-snap-align: start;
+}
+
+.nearby-word-button:hover,
+.nearby-word-button:focus-visible {
+  border-color: #a5b4fc;
+  background: rgba(88, 101, 242, 0.28);
+}
+
+.nearby-word-korean {
+  font-size: 0.88rem;
+  font-weight: 800;
+}
+
+.nearby-word-gloss {
+  overflow: hidden;
+  color: #c7d2fe;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .game-input-dock {
@@ -1477,6 +1550,7 @@ button:focus-visible {
     padding-left: 0.25rem;
   }
 
+  .guess-feedback,
   .guess-error {
     padding: 0.25rem 0.65rem;
     font-size: 0.8rem;
@@ -2425,6 +2499,7 @@ button:focus-visible {
     min-height: 0.95rem;
   }
 
+  .guess-feedback,
   .guess-error {
     padding: 0.12rem 0.5rem;
     font-size: 0.7rem;

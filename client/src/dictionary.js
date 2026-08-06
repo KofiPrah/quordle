@@ -1,5 +1,7 @@
 let snapshotPromise = null;
 let loadedSnapshot = null;
+let recognitionPromise = null;
+let loadedRecognitionSnapshot = null;
 
 export function escapeHtml(value) {
   return String(value ?? '')
@@ -25,6 +27,21 @@ export function loadKoreanDictionarySnapshot() {
   return snapshotPromise;
 }
 
+export function loadKoreanRecognitionSnapshot() {
+  if (!recognitionPromise) {
+    recognitionPromise = import('../../engine/src/koWordRecognition.generated.json')
+      .then((module) => {
+        loadedRecognitionSnapshot = module.default;
+        return loadedRecognitionSnapshot;
+      })
+      .catch((error) => {
+        recognitionPromise = null;
+        throw error;
+      });
+  }
+  return recognitionPromise;
+}
+
 export function getKoreanDictionaryEntry(word, snapshot = loadedSnapshot) {
   if (!snapshot?.entries || typeof word !== 'string') return null;
   return snapshot.entries[word.normalize('NFC')] ?? null;
@@ -40,7 +57,7 @@ function chronologicalSubmittedWords(gameState) {
   return words;
 }
 
-export function getDictionaryEligibleWords(gameState, entries = null) {
+export function getDictionaryEligibleWords(gameState, entries = null, supplementalWords = []) {
   if (!gameState || gameState.language !== 'ko' || !Array.isArray(gameState.boards)) return [];
   const eligible = [];
   const seen = new Set();
@@ -54,7 +71,13 @@ export function getDictionaryEligibleWords(gameState, entries = null) {
   chronologicalSubmittedWords(gameState).forEach(add);
   gameState.boards.filter((board) => board.solved).forEach((board) => add(board.targetWord));
   if (gameState.gameOver) gameState.boards.forEach((board) => add(board.targetWord));
+  supplementalWords.forEach(add);
   return eligible;
+}
+
+export function getKoreanRecognitionLevel(word, snapshot = loadedRecognitionSnapshot) {
+  if (!snapshot?.words || typeof word !== 'string') return null;
+  return snapshot.words[word.normalize('NFC')] ?? null;
 }
 
 export function getDefaultDictionaryWord(gameState, eligibleWords) {

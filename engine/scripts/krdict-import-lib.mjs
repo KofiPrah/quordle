@@ -65,6 +65,42 @@ function isProperNoun(partOfSpeech, wordType) {
   return combined.includes('고유 명사') || combined.includes('proper noun');
 }
 
+export function normalizeVocabularyLevel(value) {
+  switch (String(value ?? '').trim()) {
+    case '초급':
+    case 'beginner':
+      return 'beginner';
+    case '중급':
+    case 'intermediate':
+      return 'intermediate';
+    case '고급':
+    case 'advanced':
+      return 'advanced';
+    default:
+      return 'ungraded';
+  }
+}
+
+/**
+ * Extract the compact, gameplay-safe recognition metadata from one KRDICT
+ * bulk entry. Recognition intentionally does not require an English sense;
+ * full learning metadata remains limited to the curated accepted lexicon.
+ */
+export function parseBulkRecognitionEntry(entry) {
+  const word = String(featureValue(entry?.Lemma?.feat, 'writtenForm') ?? '').normalize('NFC');
+  if (!isEligibleKoreanWord(word)) return null;
+
+  const lexicalUnit = featureValue(entry?.feat, 'lexicalUnit');
+  const partOfSpeech = featureValue(entry?.feat, 'partOfSpeech');
+  const wordType = featureValue(entry?.feat, 'wordType');
+  if (lexicalUnit !== '단어' || isProperNoun(partOfSpeech, wordType)) return null;
+
+  return {
+    word,
+    level: normalizeVocabularyLevel(featureValue(entry?.feat, 'vocabularyLevel')),
+  };
+}
+
 function sourceUrl(targetCode) {
   return `https://krdict.korean.go.kr/eng/dicSearch/SearchView?ParaWordNo=${targetCode}`;
 }

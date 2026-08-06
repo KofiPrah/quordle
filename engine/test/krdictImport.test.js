@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   createDictionaryCollector,
+  normalizeVocabularyLevel,
   parseApiSearchXml,
   parseBulkLexicalEntry,
+  parseBulkRecognitionEntry,
   sanitizeProviderError,
 } from '../scripts/krdict-import-lib.mjs';
 
@@ -22,6 +24,9 @@ function bulkEntry({
   english = true,
   pronunciation = word,
   sense = 1,
+  lexicalUnit = '단어',
+  wordType,
+  vocabularyLevel = '중급',
 } = {}) {
   return {
     Lemma: { feat: { att: 'writtenForm', val: word } },
@@ -34,9 +39,11 @@ function bulkEntry({
       { att: 'pronunciation', val: pronunciation },
     ] },
     feat: [
-      { att: 'lexicalUnit', val: '단어' },
+      { att: 'lexicalUnit', val: lexicalUnit },
       { att: 'homonym_number', val: String(homonym) },
       { att: 'partOfSpeech', val: partOfSpeech },
+      ...(wordType ? [{ att: 'wordType', val: wordType }] : []),
+      { att: 'vocabularyLevel', val: vocabularyLevel },
     ],
     val: String(code),
   };
@@ -81,6 +88,23 @@ describe('KRDICT bulk parsing', () => {
       pronunciationCandidates,
     ));
     expect(collector.finalize().get('의논').romanization).toBe('inon');
+  });
+
+  it('extracts compact recognition metadata without requiring an English sense', () => {
+    expect(parseBulkRecognitionEntry(bulkEntry({ english: false, vocabularyLevel: '초급' }))).toEqual({
+      word: '기관',
+      level: 'beginner',
+    });
+    expect(normalizeVocabularyLevel('중급')).toBe('intermediate');
+    expect(normalizeVocabularyLevel('고급')).toBe('advanced');
+    expect(normalizeVocabularyLevel('없음')).toBe('ungraded');
+    expect(parseBulkRecognitionEntry(bulkEntry({ word: '기관'.normalize('NFD') })).word).toBe('기관');
+  });
+
+  it('filters malformed, non-word, and proper-noun recognition entries', () => {
+    expect(parseBulkRecognitionEntry(bulkEntry({ word: '가나다' }))).toBeNull();
+    expect(parseBulkRecognitionEntry(bulkEntry({ lexicalUnit: '구' }))).toBeNull();
+    expect(parseBulkRecognitionEntry(bulkEntry({ wordType: '고유 명사' }))).toBeNull();
   });
 });
 

@@ -12,6 +12,7 @@ import {
   isEligibleKoreanWord,
   parseApiSearchXml,
   parseBulkLexicalEntry,
+  parseBulkRecognitionEntry,
   sanitizeProviderError,
 } from './krdict-import-lib.mjs';
 
@@ -19,6 +20,13 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const engineDir = path.resolve(scriptDir, '..');
 const srcDir = path.join(engineDir, 'src');
 const BULK_DOWNLOAD_PAGE = 'https://krdict.korean.go.kr/download/downloadPopup';
+const recognitionPath = path.join(srcDir, 'koWordRecognition.generated.json');
+const LEVEL_RANK = Object.freeze({
+  ungraded: 0,
+  advanced: 1,
+  intermediate: 2,
+  beginner: 3,
+});
 
 function parseArgs(argv) {
   const args = { bulkArchive: null, downloadBulk: false };
@@ -97,7 +105,7 @@ function sourceDateFromDocument(document) {
   return creation ? String(creation) : undefined;
 }
 
-function collectBulkArchive(archivePath, membership, collector) {
+function collectBulkArchive(archivePath, membership, collector, recognitionWords) {
   const zip = new AdmZip(archivePath);
   const entries = zip.getEntries()
     .filter((entry) => !entry.isDirectory && entry.entryName.toLowerCase().endsWith('.json'))
@@ -113,6 +121,13 @@ function collectBulkArchive(archivePath, membership, collector) {
       throw new Error(`Missing LexicalEntry array in ${archiveEntry.entryName}`);
     }
     for (const entry of lexicalEntries) {
+      const recognition = parseBulkRecognitionEntry(entry);
+      if (recognition) {
+        const existingLevel = recognitionWords.get(recognition.word) ?? 'ungraded';
+        if (LEVEL_RANK[recognition.level] > LEVEL_RANK[existingLevel] || !recognitionWords.has(recognition.word)) {
+          recognitionWords.set(recognition.word, recognition.level);
+        }
+      }
       collector.add(parseBulkLexicalEntry(entry, membership));
     }
     process.stdout.write(`Processed KRDICT bulk file ${index + 1}/${entries.length}\n`);
@@ -165,7 +180,18 @@ function renderLexiconModule(answerWords, guessWords, source) {
     `export const KO_GUESS_WORDS_LIST: readonly string[] = ${JSON.stringify(guessWords, null, 2)};\n`;
 }
 
-function writeArtifacts(dictionary, membership, source) {
+function loadExistingRecognitionSnapshot() {
+  if (!fs.existsSync(recognitionPath)) {
+    throw new Error('Korean recognition snapshot is missing; refresh with an official KRDICT bulk archive');
+  }
+  const snapshot = JSON.parse(fs.readFileSync(recognitionPath, 'utf8'));
+  if (!snapshot?.metadata || !snapshot?.words || typeof snapshot.words !== 'object') {
+    throw new Error('Korean recognition snapshot is malformed; refresh it from the KRDICT bulk archive');
+  }
+  return snapshot;
+}
+
+function writeArtifacts(dictionary, membership, source, recognitionWords = null) {
   const entries = Object.fromEntries(dictionary);
   const resolvedWords = new Set(dictionary.keys());
   const answerWords = [...dictionary.values()]
@@ -196,6 +222,20 @@ function writeArtifacts(dictionary, membership, source) {
     ...(source.sourceUpdatedAt ? { sourceUpdatedAt: source.sourceUpdatedAt } : {}),
   };
 
+  const recognitionSnapshot = recognitionWords
+    ? {
+        metadata,
+        words: Object.fromEntries([...recognitionWords.entries()]
+          .sort(([left], [right]) => left.localeCompare(right, 'ko'))),
+      }
+    : loadExistingRecognitionSnapshot();
+
+  for (const word of guessWords) {
+    if (!recognitionSnapshot.words[word]) {
+      throw new Error(`Accepted guess missing from Korean recognition snapshot: ${word}. Refresh from the bulk archive.`);
+    }
+  }
+
   fs.writeFileSync(
     path.join(srcDir, 'koLexicon.generated.ts'),
     renderLexiconModule(answerWords, guessWords, metadata),
@@ -208,11 +248,19 @@ function writeArtifacts(dictionary, membership, source) {
     path.join(srcDir, 'koDictionary.unresolved.json'),
     `${JSON.stringify({ metadata, unresolvedAnswers, unresolvedGuesses }, null, 2)}\n`,
   );
+  if (recognitionWords) {
+    fs.writeFileSync(
+      recognitionPath,
+      `${JSON.stringify(recognitionSnapshot, null, 2)}\n`,
+    );
+  }
 
   return {
     answers: answerWords.length,
     guesses: guessWords.length,
     entries: dictionary.size,
+    recognizedWords: Object.keys(recognitionSnapshot.words).length,
+    recognitionSourceMode: recognitionSnapshot.metadata.sourceMode,
     unresolvedAnswers: unresolvedAnswers.length,
     unresolvedGuesses: unresolvedGuesses.length,
   };
@@ -222,6 +270,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const membership = loadCandidateMembership();
   const collector = createDictionaryCollector(membership);
+  const recognitionWords = new Map();
   let archivePath = args.bulkArchive ? path.resolve(args.bulkArchive) : null;
 
   if (args.downloadBulk) archivePath = await downloadBulkArchive();
@@ -230,9 +279,14 @@ async function main() {
   }
 
   const source = archivePath
-    ? collectBulkArchive(archivePath, membership, collector)
+    ? collectBulkArchive(archivePath, membership, collector, recognitionWords)
     : await collectApi(membership, collector);
-  const summary = writeArtifacts(collector.finalize(), membership, source);
+  const summary = writeArtifacts(
+    collector.finalize(),
+    membership,
+    source,
+    archivePath ? recognitionWords : null,
+  );
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
 
