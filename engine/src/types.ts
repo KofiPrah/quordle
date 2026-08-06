@@ -1,6 +1,24 @@
 /** Supported languages */
 export type Language = 'en' | 'ko';
 
+/** Korean learning hints available during an active round. */
+export type HintType = 'part-of-speech' | 'semantic-category' | 'batchim-count' | 'reveal-first-syllable';
+
+/** Persisted result of one charged hint request. */
+export interface HintUse {
+    boardIndex: number;
+    type: HintType;
+    payload: string | string[] | number;
+    cost: number;
+    usedAt: number;
+}
+
+/** Versioned assistance history stored with a game. */
+export interface AssistanceState {
+    scoringVersion: 1;
+    hints: HintUse[];
+}
+
 /** Result of evaluating a single letter in a guess */
 export type LetterResult = 'correct' | 'present' | 'absent';
 
@@ -52,6 +70,7 @@ export interface GameState {
     gameOver: boolean;
     won: boolean;
     language: Language;
+    assistance: AssistanceState;
 }
 
 /** Configuration for creating a new game */

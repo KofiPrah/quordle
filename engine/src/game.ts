@@ -44,6 +44,10 @@ export function createGame(config: GameConfig): GameState {
         gameOver: false,
         won: false,
         language,
+        assistance: {
+            scoringVersion: 1,
+            hints: [],
+        },
     };
 }
 

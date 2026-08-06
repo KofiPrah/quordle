@@ -14,12 +14,14 @@ const unresolved = JSON.parse(fs.readFileSync(
   'utf8',
 ));
 const lexicon = await import(pathToFileURL(path.join(engineDir, 'dist', 'koLexicon.generated.js')));
+const hintMetadata = await import(pathToFileURL(path.join(engineDir, 'dist', 'koHintMetadata.generated.js')));
 const entries = dictionary.entries ?? {};
 const answers = lexicon.KO_ANSWER_WORDS;
 const guesses = lexicon.KO_GUESS_WORDS_LIST;
 const guessSet = new Set(guesses);
 const recognizedWords = recognition.words ?? {};
 const recognizedLevels = new Set(['beginner', 'intermediate', 'advanced', 'ungraded']);
+const hints = hintMetadata.KO_HINT_METADATA;
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -55,6 +57,10 @@ for (const word of guesses) {
   assert(entries[word].guessEligible === true, `Guess eligibility mismatch: ${word}`);
   assert(recognizedWords[word], `Accepted guess missing from recognition snapshot: ${word}`);
   assert(entries[word].romanization, `Missing romanization: ${word}`);
+  assert(Array.isArray(entries[word].semanticCategories), `Missing semantic category collection: ${word}`);
+  for (const category of entries[word].semanticCategories) {
+    assert(category.korean && category.english, `Malformed semantic category: ${word}`);
+  }
   assert(Array.isArray(entries[word].senses) && entries[word].senses.length > 0, `Missing senses: ${word}`);
   for (const sense of entries[word].senses) {
     assert(sense.partOfSpeech, `Missing part of speech: ${word}`);
@@ -68,6 +74,9 @@ for (const word of guesses) {
 for (const word of answers) {
   assert(guessSet.has(word), `Answer missing from guess list: ${word}`);
   assert(entries[word]?.answerEligible === true, `Answer eligibility mismatch: ${word}`);
+  assert(hints[word], `Answer missing generated hint metadata: ${word}`);
+  assert(Array.isArray(hints[word].partsOfSpeech) && hints[word].partsOfSpeech.length > 0, `Answer missing part-of-speech hint: ${word}`);
+  assert(Array.isArray(hints[word].semanticCategories), `Answer missing semantic hint collection: ${word}`);
 }
 
 for (const word of unresolved.unresolvedGuesses ?? []) {
@@ -78,5 +87,5 @@ for (const word of unresolved.unresolvedAnswers ?? []) {
 }
 
 process.stdout.write(
-  `Verified ${answers.length} Korean answers, ${guesses.length} accepted guesses, and ${Object.keys(recognizedWords).length} recognized words.\n`,
+  `Verified ${answers.length} Korean answers (${answers.filter((word) => hints[word].semanticCategories.length > 0).length} with semantic hints), ${guesses.length} accepted guesses, and ${Object.keys(recognizedWords).length} recognized words.\n`,
 );

@@ -11,6 +11,7 @@
     "start:bot": "node bot.js",
     "dev": "node --watch server.js",
     "dev:bot": "node --watch bot.js",
+    "test": "npm run build && node --test",
     "typecheck": "tsc --noEmit",
     "setup:entry-point": "node scripts/configure-entry-point.js",
     "setup:entry-point:disable": "node scripts/configure-entry-point.js --disable"

@@ -19,6 +19,8 @@ import { getLanguageConfig, isValidGuessForLanguage, getQuordleWordsForLanguage 
 import { canBeCoda, canBeOnset, combineCodas, combineVowels, expandHangulToJamoUnits, isConsonant, isHangulSyllable, isVowel, splitCompoundCoda, splitCompoundVowel } from "../engine/src/jamo.ts";
 import { backspaceKoIme, createKoImeState, finalizeKoIme, getKoImeDisplayChar, processKoImeJamo } from "../engine/src/koIme.ts";
 import { classifyKoreanGuess, rankNearbyKoreanWords } from "../engine/src/nearbyWords.ts";
+import { calculatePerformanceMetrics, HINT_COSTS, normalizeAssistanceState } from "../engine/src/assistance.ts";
+import { isKoreanHintAvailable, requestKoreanHint } from "../engine/src/koreanHints.ts";
 import {
   getRemainingGuessCount,
   partitionBoards,
@@ -35,6 +37,7 @@ import {
   loadKoreanRecognitionSnapshot,
 } from "./src/dictionary.js";
 import { getSheetDragAction, renderOverlaySheet, trapOverlayFocus } from "./src/overlaySheet.js";
+import { formatHintPayload, getBoardHintUse, HINT_UI_OPTIONS } from "./src/hintUi.js";
 import {
   createKoreanFeedback,
   createMessageFeedback,
@@ -82,11 +85,13 @@ let lastActivityAt = Date.now();
 let inactivityTimer = null;
 let expiredSessionSnapshot = null;
 let koreanShiftActive = false;
+let imeState = createKoImeState();
 let activityTrackingBound = false;
 let activityViewportBound = false;
 let viewportSyncFrame = null;
 const OVERLAY_LEADERBOARD = 'leaderboard-modal';
 const OVERLAY_DICTIONARY = 'dictionary-sheet';
+const OVERLAY_HINT = 'hint-sheet';
 let activeOverlay = null;
 let overlaySize = 'half';
 let overlayReturnFocusSelector = null;
@@ -102,6 +107,17 @@ let selectedBoardIndex = null;
 let expandedSolvedBoardIndex = null;
 let boardUiGameIdentity = null;
 let pendingBoardSelectionAnnouncement = '';
+let pendingHintRequest = null;
+let hintRequestError = null;
+let hintRequestTimeout = null;
+
+function clearPendingHintRequest() {
+  pendingHintRequest = null;
+  if (hintRequestTimeout) {
+    clearTimeout(hintRequestTimeout);
+    hintRequestTimeout = null;
+  }
+}
 
 function clearGuessFeedback() {
   rejectedGuessRequestId += 1;
@@ -327,6 +343,8 @@ function handleServerMessage(message) {
           break;
         }
         initialStateApplied = true;
+        clearPendingHintRequest();
+        hintRequestError = null;
         restoreSavedPayload({
           gameState: normalizedState,
           gameMode: message.playerState.mode || 'daily',
@@ -338,6 +356,7 @@ function handleServerMessage(message) {
         saveGameState();
         renderApp();
         setupKeyboardListeners();
+        if (activeOverlay) focusActiveOverlay();
       }
       break;
 
@@ -372,6 +391,14 @@ function handleServerMessage(message) {
 
     case 'ERROR':
       console.error('Server error:', message.code, message.message);
+      if (pendingHintRequest || activeOverlay === OVERLAY_HINT) {
+        clearPendingHintRequest();
+        hintRequestError = message.message;
+        renderApp();
+        setupKeyboardListeners();
+        if (activeOverlay === OVERLAY_HINT) focusActiveOverlay();
+        break;
+      }
       setMessageFeedback(message.message, 'server-error');
       renderApp();
       setupKeyboardListeners();
@@ -421,8 +448,32 @@ function showToast(message, duration = 3000) {
 // ========== LOCAL STORAGE PERSISTENCE ==========
 function getStorageKeyDaily(language = currentLanguage) { return `quordle_daily_${language}`; }
 function getStorageKeyPractice(language = currentLanguage) { return `quordle_practice_${language}`; }
+const ACTIVE_MODE_STORAGE_KEY = 'quordle_active_mode';
+
+function getSavedActiveMode() {
+  return localStorage.getItem(ACTIVE_MODE_STORAGE_KEY) === 'practice' ? 'practice' : 'daily';
+}
+
+function saveActiveMode(mode) {
+  localStorage.setItem(ACTIVE_MODE_STORAGE_KEY, mode === 'practice' ? 'practice' : 'daily');
+}
+
 function getStorageKeyForMode(mode, language = currentLanguage) {
   return mode === "daily" ? getStorageKeyDaily(language) : getStorageKeyPractice(language);
+}
+
+function sendHintViaWebSocket(boardIndex, hintType) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify({
+    type: 'HINT',
+    roomId: discordRoomId,
+    dateKey: getTodayDateKey(),
+    visibleUserId: discordUserId,
+    boardIndex,
+    hintType,
+    language: currentLanguage,
+  }));
+  return true;
 }
 
 function getSavedStateTimestamp(payload) {
@@ -536,6 +587,7 @@ function normalizeRestoredGameState(state, language = currentLanguage) {
     gameOver: allSolved || guessCount >= maxGuesses,
     won: allSolved,
     language,
+    assistance: normalizeAssistanceState(state.assistance),
   };
 }
 
@@ -614,6 +666,7 @@ function restoreSavedPayload(payload, { markActive = false } = {}) {
   localStorage.setItem('quordle_language', currentLanguage);
   gameState = payload.gameState;
   gameMode = payload.gameMode || "daily";
+  saveActiveMode(gameMode);
   clearGuessFeedback();
   expiredSessionSnapshot = null;
   koreanShiftActive = false;
@@ -750,7 +803,14 @@ async function serverJoinGame() {
     const response = await fetch(`${API_URL}/api/game/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ roomId: discordRoomId, userId: discordUserId, dateKey, language: currentLanguage }),
+      body: JSON.stringify({
+        roomId: discordRoomId,
+        userId: discordUserId,
+        dateKey,
+        language: currentLanguage,
+        guildId: discordGuildId,
+        profile: userProfile,
+      }),
     });
     if (!response.ok) return null;
     return await response.json();
@@ -904,6 +964,7 @@ function setupLeaveNotification() {
   }
 
   const sendLeaveNotification = () => {
+    const performance = gameState ? calculatePerformanceMetrics(gameState) : null;
     // Use sendBeacon for reliability during page unload
     const payload = JSON.stringify({
       userId: discordUserId,
@@ -916,6 +977,10 @@ function setupLeaveNotification() {
         solvedCount: gameState.boards?.filter(b => b.solved).length || 0,
         gameOver: gameState.gameOver,
         won: gameState.won,
+        hintCount: performance.hintCount,
+        hintPenalty: performance.hintPenalty,
+        assisted: performance.assisted,
+        score: performance.score,
       } : null,
     });
 
@@ -947,8 +1012,35 @@ function getTodayDateKey() {
   return `${year}-${month}-${day}`; // "YYYY-MM-DD" in America/Chicago
 }
 
+async function serverRequestHint(boardIndex, hintType) {
+  if (!discordUserId || !discordRoomId) return { error: 'Server identity is unavailable.', code: 'PLAYER_NOT_FOUND' };
+  try {
+    const response = await fetch(`${API_URL}/api/game/hint`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        roomId: discordRoomId,
+        userId: discordUserId,
+        dateKey: getTodayDateKey(),
+        language: currentLanguage,
+        boardIndex,
+        hintType,
+      }),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      return { error: data?.error || 'Hint request failed.', code: data?.code || 'HINT_REQUEST_FAILED' };
+    }
+    return data;
+  } catch (error) {
+    console.warn('Failed to request hint from server:', error);
+    return { error: 'Hint request failed. Check your connection and try again.', code: 'HINT_REQUEST_FAILED' };
+  }
+}
+
 function startNewDailyGame() {
   gameMode = "daily";
+  saveActiveMode(gameMode);
   uiScreen = "game";
   resetOverlayState();
   resetBoardScrollPosition();
@@ -977,6 +1069,7 @@ function startNewDailyGame() {
 
 function startNewPracticeGame() {
   gameMode = "practice";
+  saveActiveMode(gameMode);
   uiScreen = "game";
   resetOverlayState();
   resetBoardScrollPosition();
@@ -1024,6 +1117,22 @@ function initQuordleGame() {
 }
 
 async function initDailyFromServer() {
+  if (getSavedActiveMode() === 'practice') {
+    const practiceLoadState = loadPracticeState();
+    if (practiceLoadState === "restored") {
+      saveGameState();
+      renderApp();
+      setupKeyboardListeners();
+      return;
+    }
+    if (practiceLoadState === "expired") {
+      uiScreen = "expired";
+      renderApp();
+      setupKeyboardListeners();
+      return;
+    }
+  }
+
   // Try to get state from server via WebSocket (for daily mode with Discord context)
   if (discordUserId && discordRoomId) {
     // Connect WebSocket - it will send JOIN and receive STATE
@@ -1176,7 +1285,9 @@ function focusActiveOverlay() {
     const overlay = document.querySelector(`[data-overlay-sheet="${activeOverlay}"]`);
     const preferred = activeOverlay === OVERLAY_DICTIONARY
       ? overlay?.querySelector('.dictionary-word-select, .dictionary-retry, .overlay-sheet-close')
-      : overlay?.querySelector('.overlay-sheet-close');
+      : activeOverlay === OVERLAY_HINT
+        ? overlay?.querySelector('.hint-option:not([disabled]), .overlay-sheet-close')
+        : overlay?.querySelector('.overlay-sheet-close');
     preferred?.focus();
   });
 }
@@ -1199,6 +1310,8 @@ function resetOverlayState() {
   overlaySize = 'half';
   overlayReturnFocusSelector = null;
   dictionarySelectedWord = null;
+  clearPendingHintRequest();
+  hintRequestError = null;
 }
 
 function ensureKoreanDictionaryLoaded() {
@@ -1235,10 +1348,11 @@ function ensureKoreanDictionaryLoaded() {
     });
 }
 
-function renderDictionaryButton() {
+function renderLearningControls() {
   if (currentLanguage !== 'ko') return '';
   const eligibleWords = getDictionaryEligibleWords(gameState);
-  const disabled = eligibleWords.length === 0;
+  const dictionaryDisabled = eligibleWords.length === 0;
+  const hintDisabled = gameState.gameOver || !Number.isInteger(selectedBoardIndex);
   return `
     <div class="learning-controls">
       <button
@@ -1247,12 +1361,159 @@ function renderDictionaryButton() {
         aria-haspopup="dialog"
         aria-controls="${OVERLAY_DICTIONARY}"
         aria-expanded="${activeOverlay === OVERLAY_DICTIONARY}"
-        ${disabled ? 'disabled' : ''}
-        aria-label="${disabled ? 'Submit a valid Korean word to use the dictionary' : 'Open dictionary for submitted Korean words'}"
+        ${dictionaryDisabled ? 'disabled' : ''}
+        aria-label="${dictionaryDisabled ? 'Submit a valid Korean word to use the dictionary' : 'Open dictionary for submitted Korean words'}"
       >사전 <span aria-hidden="true">⌕</span></button>
-      ${disabled ? '<span class="learning-controls-hint">Submit a word to unlock</span>' : ''}
+      <button
+        class="hint-trigger"
+        type="button"
+        aria-haspopup="dialog"
+        aria-controls="${OVERLAY_HINT}"
+        aria-expanded="${activeOverlay === OVERLAY_HINT}"
+        ${hintDisabled ? 'disabled' : ''}
+        aria-label="${hintDisabled ? 'Hints are unavailable' : `Open hints for selected board ${selectedBoardIndex + 1}`}"
+      >힌트 <span aria-hidden="true">?</span></button>
     </div>
   `;
+}
+
+function openHintOverlay() {
+  if (activeOverlay || currentLanguage !== 'ko' || gameState.gameOver || !Number.isInteger(selectedBoardIndex)) return;
+  hintRequestError = null;
+  activeOverlay = OVERLAY_HINT;
+  overlaySize = 'half';
+  overlayReturnFocusSelector = '.hint-trigger';
+  renderApp();
+  setupKeyboardListeners();
+  focusActiveOverlay();
+}
+
+function renderHintResult(type, payload) {
+  const formatted = formatHintPayload(type, payload);
+  if (!formatted) return '';
+  const lang = type === 'reveal-first-syllable' ? ' lang="ko"' : '';
+  return `<div class="hint-option-result" role="status" aria-live="polite"${lang}>${escapeHtml(formatted)}</div>`;
+}
+
+function renderHintOverlay() {
+  if (activeOverlay !== OVERLAY_HINT) return '';
+  const boardIndex = selectedBoardIndex;
+  const board = Number.isInteger(boardIndex) ? gameState.boards[boardIndex] : null;
+  if (!board || board.solved || gameState.gameOver) {
+    return renderOverlaySheet({
+      id: OVERLAY_HINT,
+      title: 'Hints · 힌트',
+      body: '<div class="hint-status">Select an unsolved board to use hints.</div>',
+      size: overlaySize,
+      className: 'hint-sheet',
+    });
+  }
+
+  const options = HINT_UI_OPTIONS.map((option) => {
+    const used = getBoardHintUse(gameState.assistance, boardIndex, option.type);
+    const available = used || isKoreanHintAvailable(board.targetWord, option.type);
+    const pending = pendingHintRequest === `${boardIndex}:${option.type}`;
+    const disabled = Boolean(used) || !available || pendingHintRequest !== null;
+    const status = used ? 'Used' : pending ? 'Requesting…' : available ? `−${HINT_COSTS[option.type]} points` : 'Unavailable';
+    return `
+      <article class="hint-option-card ${used ? 'hint-option-used' : ''} ${!available ? 'hint-option-unavailable' : ''}">
+        <button
+          class="hint-option"
+          type="button"
+          data-hint-type="${option.type}"
+          ${disabled ? 'disabled' : ''}
+          aria-label="${escapeHtml(option.label)}, ${escapeHtml(status)}"
+        >
+          <span class="hint-option-heading">
+            <strong>${escapeHtml(option.label)}</strong>
+            <span>${escapeHtml(status)}</span>
+          </span>
+          <span class="hint-option-description">${escapeHtml(option.description)}</span>
+        </button>
+        ${used ? renderHintResult(option.type, used.payload) : ''}
+      </article>
+    `;
+  }).join('');
+  const performance = calculatePerformanceMetrics(gameState);
+  const error = hintRequestError
+    ? `<div class="hint-error" role="alert">${escapeHtml(hintRequestError)}</div>`
+    : '';
+  const body = `
+    <div class="hint-sheet-summary">
+      <strong>Selected board #${boardIndex + 1}</strong>
+      <span>${performance.hintCount} ${performance.hintCount === 1 ? 'hint' : 'hints'} used · ${performance.hintPenalty} points in penalties</span>
+    </div>
+    ${error}
+    <div class="hint-options">${options}</div>
+  `;
+  return renderOverlaySheet({
+    id: OVERLAY_HINT,
+    title: 'Hints · 힌트',
+    body,
+    size: overlaySize,
+    className: 'hint-sheet',
+  });
+}
+
+async function requestBoardHint(boardIndex, hintType) {
+  if (pendingHintRequest || currentLanguage !== 'ko') return;
+  const requestKey = `${boardIndex}:${hintType}`;
+  pendingHintRequest = requestKey;
+  hintRequestError = null;
+  renderApp();
+  setupKeyboardListeners();
+
+  if (gameMode === 'daily' && discordUserId && discordRoomId) {
+    if (sendHintViaWebSocket(boardIndex, hintType)) {
+      hintRequestTimeout = setTimeout(() => {
+        if (pendingHintRequest !== requestKey) return;
+        clearPendingHintRequest();
+        hintRequestError = 'The hint response timed out. Retrying is safe and will not charge twice.';
+        renderApp();
+        setupKeyboardListeners();
+        if (activeOverlay === OVERLAY_HINT) focusActiveOverlay();
+      }, 8000);
+      return;
+    }
+
+    const serverState = await serverRequestHint(boardIndex, hintType);
+    clearPendingHintRequest();
+    if (serverState?.error) {
+      hintRequestError = serverState.error;
+    } else if (serverState?.gameState) {
+      const nextLanguage = serverState.language || currentLanguage;
+      const normalizedState = normalizeRestoredGameState(serverState.gameState, nextLanguage);
+      if (normalizedState) {
+        restoreSavedPayload({
+          gameState: normalizedState,
+          gameMode: serverState.gameMode || gameMode,
+          language: nextLanguage,
+          dateKey: serverState.dateKey || getTodayDateKey(),
+          lastActiveAt: Date.now(),
+          savedAt: Date.now(),
+        }, { markActive: true });
+        saveGameState();
+      } else {
+        hintRequestError = 'The server returned an invalid hint state.';
+      }
+    }
+    renderApp();
+    setupKeyboardListeners();
+    if (activeOverlay === OVERLAY_HINT) focusActiveOverlay();
+    return;
+  }
+
+  const result = requestKoreanHint(gameState, boardIndex, hintType, Date.now());
+  clearPendingHintRequest();
+  if (!result.ok) {
+    hintRequestError = result.message;
+  } else {
+    gameState = result.state;
+    saveGameState();
+  }
+  renderApp();
+  setupKeyboardListeners();
+  if (activeOverlay === OVERLAY_HINT) focusActiveOverlay();
 }
 
 function openDictionary(word = null, returnFocusSelector = '.dictionary-trigger') {
@@ -1538,12 +1799,13 @@ function renderGameScreen() {
 
       <section class="game-input-dock" aria-label="Guess controls">
         ${statusHtml}
-        ${renderDictionaryButton()}
+        ${renderLearningControls()}
         ${currentLanguage === 'ko' ? renderKoreanKeyboard() : renderKeyboard()}
       </section>
 
       ${renderLeaderboardModal()}
       ${renderDictionaryOverlay()}
+      ${renderHintOverlay()}
     </div>
   `;
 
@@ -1613,7 +1875,8 @@ function renderKoreanLearningReview() {
 
 function renderResultsScreen() {
   const app = document.querySelector('#app');
-  const solvedCount = gameState.boards.filter(b => b.solved).length;
+  const performance = calculatePerformanceMetrics(gameState);
+  const solvedCount = performance.solvedCount;
   const icon = gameState.won ? 'Solved' : 'Finished';
   const message = gameState.won ? 'You Won!' : 'Game Over';
   const bannerClass = gameState.won ? 'results-won' : 'results-lost';
@@ -1673,6 +1936,17 @@ function renderResultsScreen() {
               <span class="results-stat-value">${gameState.guessCount}</span>
               <span class="results-stat-label">guesses</span>
             </div>
+            <div class="results-stat">
+              <span class="results-stat-value">${performance.hintCount}</span>
+              <span class="results-stat-label">hints</span>
+            </div>
+            <div class="results-stat">
+              <span class="results-stat-value">${performance.score}</span>
+              <span class="results-stat-label">score</span>
+            </div>
+          </div>
+          <div class="results-assistance ${performance.assisted ? 'results-assisted' : 'results-unassisted'}">
+            ${performance.assisted ? `Assisted · ${performance.hintPenalty}-point hint penalty` : 'Unassisted'}
           </div>
           ${answersHtml}
         </div>
@@ -1782,8 +2056,13 @@ function renderLeaderboardEntries(leaderboard) {
     const profile = entry.profile || {};
     const displayName = profile.displayName || entry.visibleUserId.slice(0, 8);
     const avatarUrl = profile.avatarUrl;
+    const hintCount = Number.isFinite(entry.hintCount) ? entry.hintCount : 0;
+    const score = Number.isFinite(entry.score)
+      ? entry.score
+      : Math.max(0, (25 * entry.solvedCount) - (2 * Math.max(0, entry.guessCount - entry.solvedCount)));
+    const assisted = entry.assisted === true || hintCount > 0;
     const avatarHtml = avatarUrl
-      ? `<img src="${avatarUrl}" alt="${displayName}" class="leaderboard-avatar" onerror="this.style.display='none'" />`
+      ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(displayName)}" class="leaderboard-avatar" onerror="this.style.display='none'" />`
       : `<div class="leaderboard-avatar-placeholder"></div>`;
 
     return `
@@ -1792,9 +2071,11 @@ function renderLeaderboardEntries(leaderboard) {
         <span class="leaderboard-status ${statusClass}" title="${statusLabel}" aria-label="${statusLabel}"></span>
         <div class="leaderboard-profile">
           ${avatarHtml}
-          <span class="leaderboard-name">${displayName}${youBadge}</span>
+          <span class="leaderboard-name">${escapeHtml(displayName)}${youBadge}</span>
         </div>
-        <span class="leaderboard-score">${entry.solvedCount}/4</span>
+        <span class="leaderboard-solved">${entry.solvedCount}/4</span>
+        <span class="leaderboard-score" aria-label="Score ${score}">${score}p</span>
+        <span class="leaderboard-hints ${assisted ? 'leaderboard-assisted' : 'leaderboard-unassisted'}" aria-label="${assisted ? `${hintCount} hints used` : 'Unassisted'}">${assisted ? `${hintCount}h` : 'U'}</span>
         <span class="leaderboard-guesses">${entry.guessCount}g</span>
       </div>
     `;
@@ -1912,22 +2193,26 @@ function renderActiveBoard(board, index) {
         <span>${remainingGuesses} ${remainingGuesses === 1 ? 'guess' : 'guesses'} remaining</span>
       </div>`
     : '';
-  const selected = selectedBoardIndex === index;
+  const hintsEnabled = currentLanguage === 'ko';
+  const selected = hintsEnabled && selectedBoardIndex === index;
   const headerId = `board-header-${index}`;
-
-  return `
-    <section class="board board-active ${selected ? 'board-selected' : ''}" aria-labelledby="${headerId}">
-      <button
+  const headerHtml = hintsEnabled
+    ? `<button
         class="board-select-button"
         id="${headerId}"
         type="button"
         data-select-board="${index}"
         aria-pressed="${selected}"
-        aria-label="Select board ${index + 1}${selected ? ', currently selected' : ''}"
+        aria-label="Select board ${index + 1} for hints${selected ? ', currently selected' : ''}"
       >
         <span>#${index + 1}</span>
         <span class="board-selected-indicator">${selected ? 'Selected' : 'Select'}</span>
-      </button>
+      </button>`
+    : `<div class="board-static-header" id="${headerId}"><span>#${index + 1}</span></div>`;
+
+  return `
+    <section class="board board-active ${selected ? 'board-selected' : ''}" aria-labelledby="${headerId}">
+      ${headerHtml}
       ${rows.join('')}
       ${remainingHtml}
     </section>
@@ -2046,8 +2331,6 @@ function renderKoreanKeyboard() {
 //   2: onset + vowel → composed syllable (가)
 //   3: onset + vowel + coda → composed syllable with coda (간)
 //   4: onset + vowel + compound coda → composed syllable with compound coda (갈ㅂ→값)
-
-let imeState = createKoImeState();
 
 function imeReset() {
   imeState = createKoImeState();
@@ -2438,6 +2721,7 @@ function setupKeyboardListeners() {
       if (selectedBoardIndex !== boardIndex) {
         selectedBoardIndex = boardIndex;
         pendingBoardSelectionAnnouncement = `Board ${boardIndex + 1} selected`;
+        hintRequestError = null;
       }
       renderApp();
       setupKeyboardListeners();
@@ -2468,6 +2752,19 @@ function setupKeyboardListeners() {
   if (dictionaryTrigger) {
     dictionaryTrigger.addEventListener('click', () => openDictionary(null, '.dictionary-trigger'));
   }
+
+  const hintTrigger = document.querySelector('.hint-trigger:not([disabled])');
+  if (hintTrigger) {
+    hintTrigger.addEventListener('click', openHintOverlay);
+  }
+
+  document.querySelectorAll('[data-hint-type]:not([disabled])').forEach((button) => {
+    button.addEventListener('click', () => {
+      const hintType = button.dataset.hintType;
+      if (!Number.isInteger(selectedBoardIndex) || !hintType) return;
+      requestBoardHint(selectedBoardIndex, hintType);
+    });
+  });
 
   document.querySelectorAll('[data-dictionary-word]').forEach((button) => {
     button.addEventListener('click', () => {

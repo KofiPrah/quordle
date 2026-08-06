@@ -9,6 +9,8 @@ import { fileURLToPath } from "url";
 import Redis from "ioredis";
 import { evaluateGuessKo } from "@quordle/engine/evaluatorKo";
 import { KO_ANSWER_WORDS, isValidKoreanGuess } from "@quordle/engine/koreanLexicon";
+import { calculatePerformanceMetrics, normalizeAssistanceState } from "@quordle/engine/assistance";
+import { requestKoreanHint } from "@quordle/engine/koreanHints";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -96,6 +98,17 @@ function makeRoomPlayersSetKey(roomId, dateKey, language = 'en') {
   return `roomPlayers:${roomId}:${dateKey}:${language}`;
 }
 
+function normalizePersistedPlayer(player) {
+  if (!player?.gameState) return player;
+  return {
+    ...player,
+    gameState: {
+      ...player.gameState,
+      assistance: normalizeAssistanceState(player.gameState.assistance),
+    },
+  };
+}
+
 const app = express();
 const port = process.env.PORT || 3001;
 const server = createServer(app);
@@ -179,7 +192,7 @@ async function loadPlayerFromRedis(roomId, dateKey, visibleUserId, language = 'e
     console.log('[Redis LOAD] Attempting to load:', key);
     const data = await redis.get(key);
     if (data) {
-      const parsed = JSON.parse(data);
+      const parsed = normalizePersistedPlayer(JSON.parse(data));
       const guessCount = parsed.gameState?.guessCount || 0;
       const boardGuesses = parsed.gameState?.boards?.map(b => b.guesses?.length || 0) || [];
       console.log('[Redis LOAD OK]', key, '- guesses:', guessCount, 'boards:', boardGuesses, 'bytes:', data.length);
@@ -211,7 +224,7 @@ async function rebuildLeaderboardFromRedis(roomId, dateKey, language = 'en') {
     const playerPromises = visibleUserIds.map(async (visibleUserId) => {
       const key = makePlayerRedisKey(roomId, dateKey, visibleUserId, language);
       const data = await redis.get(key);
-      return data ? JSON.parse(data) : null;
+      return data ? normalizePersistedPlayer(JSON.parse(data)) : null;
     });
 
     const players = await Promise.all(playerPromises);
@@ -322,12 +335,16 @@ function setPlayer(playerState) {
 /** Convert player state to leaderboard entry */
 function toLeaderboardEntry(player) {
   const gs = player.gameState;
-  const solvedCount = gs.boards.filter(b => b.solved).length;
+  const performance = calculatePerformanceMetrics(gs);
   return {
     visibleUserId: player.visibleUserId,
     profile: player.profile || { displayName: player.visibleUserId, avatarUrl: null },
-    solvedCount,
-    guessCount: gs.guessCount,
+    solvedCount: performance.solvedCount,
+    guessCount: performance.guessCount,
+    hintCount: performance.hintCount,
+    hintPenalty: performance.hintPenalty,
+    assisted: performance.assisted,
+    score: performance.score,
     gameOver: gs.gameOver,
     won: gs.won,
     finishedAt: player.finishedAt,
@@ -336,16 +353,13 @@ function toLeaderboardEntry(player) {
   };
 }
 
-/** Sort leaderboard: finished first, most solved, fewest guesses, earliest finish */
+/** Sort leaderboard: most solved, highest score, fewest guesses, earliest finish */
 function sortLeaderboard(entries) {
   return [...entries].sort((a, b) => {
-    if (a.gameOver !== b.gameOver) return a.gameOver ? -1 : 1;
     if (a.solvedCount !== b.solvedCount) return b.solvedCount - a.solvedCount;
+    if (a.score !== b.score) return b.score - a.score;
     if (a.guessCount !== b.guessCount) return a.guessCount - b.guessCount;
-    if (a.finishedAt !== null && b.finishedAt !== null) {
-      return a.finishedAt - b.finishedAt;
-    }
-    return 0;
+    return (a.finishedAt ?? Number.POSITIVE_INFINITY) - (b.finishedAt ?? Number.POSITIVE_INFINITY);
   });
 }
 
@@ -369,7 +383,10 @@ function createPlayerState(roomId, dateKey, visibleUserId, gameState, profile = 
     mode: 'daily',
     language,
     profile,
-    gameState,
+    gameState: {
+      ...gameState,
+      assistance: normalizeAssistanceState(gameState.assistance),
+    },
     createdAt: now,
     updatedAt: now,
     finishedAt: null,
@@ -427,6 +444,27 @@ const gameStateStore = {
   },
 
   async set(roomId, dateKey, userId, state, language = 'en') {
+    const player = getPlayer(roomId, dateKey, userId, language);
+    if (player) {
+      const now = Date.now();
+      const gameState = {
+        ...state.gameState,
+        assistance: normalizeAssistanceState(state.gameState?.assistance),
+      };
+      const updatedPlayer = {
+        ...player,
+        gameState,
+        language,
+        updatedAt: now,
+        finishedAt: gameState.gameOver && !player.finishedAt ? now : player.finishedAt,
+      };
+      setPlayer(updatedPlayer);
+      broadcastToRoomByKey(
+        makeRoomKey(roomId, dateKey, language),
+        { type: 'LEADERBOARD', leaderboard: getOrCreateRoom(roomId, dateKey, language).leaderboard, language },
+      );
+      return;
+    }
     const key = this._makeKey(roomId, dateKey, userId, language);
     this._store.set(key, { ...state, language });
     this._store.delete(this._makeLegacyKey(roomId, dateKey, userId));
@@ -634,6 +672,7 @@ wss.on("connection", (ws, req) => {
           // Publish DAILY_FINISHED event if game just ended
           if (newGameOver && hasRedisConnection()) {
             const solvedCount = newBoards.filter(b => b.solved).length;
+            const performance = calculatePerformanceMetrics(newGameState);
             const resolvedGuildId = roomGuildMap.get(roomId) || null;
             // roomId === channelId (set by client from discordSdk.channelId)
             const finishEvent = JSON.stringify({
@@ -649,6 +688,10 @@ wss.on("connection", (ws, req) => {
               guessCount: newGuessCount,
               solvedBoards: solvedCount,
               totalBoards: 4,
+              hintCount: performance.hintCount,
+              hintPenalty: performance.hintPenalty,
+              assisted: performance.assisted,
+              score: performance.score,
               language,
               timestamp: Date.now(),
             });
@@ -673,6 +716,46 @@ wss.on("connection", (ws, req) => {
             console.log('[LEADERBOARD DEBUG] GUESS - leaderboard payload length:', room.leaderboard.length);
           }
           broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard, language });
+          break;
+        }
+
+        case "HINT": {
+          const { roomId, dateKey, visibleUserId, boardIndex, hintType, language: hintLanguage } = message;
+          if (!roomId || !dateKey || !visibleUserId || !Number.isInteger(boardIndex) || typeof hintType !== 'string') {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing or invalid hint request fields' }));
+            return;
+          }
+          if (hintLanguage !== 'ko') {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_LANGUAGE', message: 'Hints are currently available only for Korean games.' }));
+            return;
+          }
+          const language = 'ko';
+
+          const playerState = getPlayer(roomId, dateKey, visibleUserId, language);
+          if (!playerState) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'PLAYER_NOT_FOUND', message: 'Player not found. Send JOIN first.' }));
+            return;
+          }
+
+          const result = requestKoreanHint(playerState.gameState, boardIndex, hintType, Date.now());
+          if (!result.ok) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: result.code, message: result.message }));
+            return;
+          }
+
+          const updatedPlayerState = result.duplicate
+            ? { ...playerState, gameState: result.state }
+            : { ...playerState, gameState: result.state, updatedAt: Date.now() };
+          if (!result.duplicate) setPlayer(updatedPlayerState);
+
+          ws.send(JSON.stringify({ type: 'STATE', playerState: updatedPlayerState }));
+          if (!result.duplicate) {
+            const room = getOrCreateRoom(roomId, dateKey, language);
+            broadcastToRoomByKey(
+              makeRoomKey(roomId, dateKey, language),
+              { type: 'LEADERBOARD', leaderboard: room.leaderboard, language },
+            );
+          }
           break;
         }
 
@@ -963,6 +1046,10 @@ function createGameState(targetWords, maxGuesses, language = 'en') {
     gameOver: false,
     won: false,
     language,
+    assistance: {
+      scoringVersion: 1,
+      hints: [],
+    },
   };
 }
 
@@ -1213,7 +1300,7 @@ app.post("/api/token", async (req, res) => {
 // JOIN: Get or create game state for a player in a room
 app.post("/api/game/join", async (req, res) => {
   try {
-    const { roomId, userId, dateKey: clientDateKey, language: reqLanguage } = req.body;
+    const { roomId, userId, dateKey: clientDateKey, language: reqLanguage, guildId, profile } = req.body;
     const language = (reqLanguage === 'ko') ? 'ko' : 'en';
     if (!roomId || !userId) {
       return res.status(400).json({ error: "roomId and userId required" });
@@ -1223,20 +1310,37 @@ app.post("/api/game/join", async (req, res) => {
     const dateKey = (clientDateKey && /^\d{4}-\d{2}-\d{2}$/.test(clientDateKey))
       ? clientDateKey
       : getTodayDateKey();
-    let state = await gameStateStore.get(roomId, dateKey, userId, language);
+    if (guildId) roomGuildMap.set(roomId, guildId);
+    let playerState = await getPlayerAsync(roomId, dateKey, userId, language);
+    let state = playerState ? {
+      gameState: playerState.gameState,
+      gameMode: playerState.mode,
+      dateKey: playerState.dateKey,
+      language: playerState.language,
+    } : await gameStateStore.get(roomId, dateKey, userId, language);
 
-    if (!state) {
-      // Create new daily game
+    if (!playerState) {
       const targetWords = getDailyTargets(dateKey, language);
-      state = {
-        gameState: createGameState(targetWords, undefined, language),
-        gameMode: "daily",
-        dateKey,
-        language,
+      const gameState = state?.gameState ?? createGameState(targetWords, undefined, language);
+      const cleanProfile = {
+        displayName: (profile?.displayName || userId).slice(0, 100),
+        avatarUrl: profile?.avatarUrl || null,
       };
-      await gameStateStore.set(roomId, dateKey, userId, state, language);
+      playerState = createPlayerState(roomId, dateKey, userId, gameState, cleanProfile, language);
+      setPlayer(playerState);
+      await gameStateStore.delete(roomId, dateKey, userId, language);
+      state = {
+        gameState: playerState.gameState,
+        gameMode: playerState.mode,
+        dateKey: playerState.dateKey,
+        language: playerState.language,
+      };
     }
 
+    broadcastToRoomByKey(
+      makeRoomKey(roomId, dateKey, language),
+      { type: 'LEADERBOARD', leaderboard: getOrCreateRoom(roomId, dateKey, language).leaderboard, language },
+    );
     res.json(state);
   } catch (err) {
     console.error("JOIN error:", err);
@@ -1323,6 +1427,65 @@ app.post("/api/game/guess", async (req, res) => {
   } catch (err) {
     console.error("GUESS error:", err);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// HINT: Apply one server-authoritative Korean hint to an unsolved board
+app.post("/api/game/hint", async (req, res) => {
+  try {
+    const { roomId, userId, boardIndex, hintType, dateKey: clientDateKey, language: reqLanguage } = req.body;
+    if (!roomId || !userId || !Number.isInteger(boardIndex) || typeof hintType !== 'string') {
+      return res.status(400).json({ error: 'roomId, userId, boardIndex, and hintType required', code: 'INVALID_MESSAGE' });
+    }
+    if (reqLanguage !== 'ko') {
+      return res.status(400).json({ error: 'Hints are currently available only for Korean games.', code: 'INVALID_LANGUAGE' });
+    }
+    const language = 'ko';
+
+    const dateKey = (clientDateKey && /^\d{4}-\d{2}-\d{2}$/.test(clientDateKey))
+      ? clientDateKey
+      : getTodayDateKey();
+    const playerState = await getPlayerAsync(roomId, dateKey, userId, language);
+    const legacyState = playerState ? null : await gameStateStore.get(roomId, dateKey, userId, language);
+    const gameState = playerState?.gameState ?? legacyState?.gameState;
+    if (!gameState) {
+      return res.status(404).json({ error: 'No game found. Call /api/game/join first.', code: 'PLAYER_NOT_FOUND' });
+    }
+
+    const result = requestKoreanHint(gameState, boardIndex, hintType, Date.now());
+    if (!result.ok) {
+      const status = result.code === 'HINT_UNAVAILABLE'
+        ? 422
+        : (result.code === 'GAME_OVER' || result.code === 'BOARD_SOLVED' ? 409 : 400);
+      return res.status(status).json({ error: result.message, code: result.code });
+    }
+
+    if (playerState) {
+      const updatedPlayerState = result.duplicate
+        ? { ...playerState, gameState: result.state }
+        : { ...playerState, gameState: result.state, updatedAt: Date.now() };
+      if (!result.duplicate) {
+        setPlayer(updatedPlayerState);
+        const room = getOrCreateRoom(roomId, dateKey, language);
+        broadcastToRoomByKey(
+          makeRoomKey(roomId, dateKey, language),
+          { type: 'LEADERBOARD', leaderboard: room.leaderboard, language },
+        );
+      }
+      return res.json({
+        gameState: updatedPlayerState.gameState,
+        gameMode: updatedPlayerState.mode,
+        dateKey: updatedPlayerState.dateKey,
+        language: updatedPlayerState.language,
+      });
+    }
+
+    const state = { ...legacyState, gameState: result.state, language };
+    await gameStateStore.set(roomId, dateKey, userId, state, language);
+    return res.json(state);
+  } catch (err) {
+    console.error('HINT error:', err);
+    return res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
   }
 });
 

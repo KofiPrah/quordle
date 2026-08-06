@@ -27,6 +27,7 @@ function bulkEntry({
   lexicalUnit = '단어',
   wordType,
   vocabularyLevel = '중급',
+  semanticCategory = '정치와 행정 > 공공 기관',
 } = {}) {
   return {
     Lemma: { feat: { att: 'writtenForm', val: word } },
@@ -44,6 +45,7 @@ function bulkEntry({
       { att: 'partOfSpeech', val: partOfSpeech },
       ...(wordType ? [{ att: 'wordType', val: wordType }] : []),
       { att: 'vocabularyLevel', val: vocabularyLevel },
+      ...(semanticCategory ? [{ att: 'semanticCategory', val: semanticCategory }] : []),
     ],
     val: String(code),
   };
@@ -61,6 +63,10 @@ describe('KRDICT bulk parsing', () => {
       definition: 'An established organization.',
       sourceTargetCode: 10,
     });
+    expect(result.semanticCategory).toEqual({
+      korean: '정치와 행정 > 공공 기관',
+      english: 'Politics and administration > Public institutions',
+    });
   });
 
   it('rejects missing English translations and proper nouns', () => {
@@ -76,6 +82,10 @@ describe('KRDICT bulk parsing', () => {
     expect(entry.romanization).toBe('gigwan');
     expect(entry.units).toEqual(['기', '관']);
     expect(entry.senses.map((sense) => sense.sourceTargetCode)).toEqual([20, 10]);
+    expect(entry.semanticCategories).toEqual([{
+      korean: '정치와 행정 > 공공 기관',
+      english: 'Politics and administration > Public institutions',
+    }]);
   });
 
   it('romanizes the published pronunciation before falling back to the headword', () => {

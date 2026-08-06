@@ -16,6 +16,14 @@
         "./koreanLexicon": {
             "import": "./dist/koreanLexicon.js",
             "types": "./dist/koreanLexicon.d.ts"
+        },
+        "./assistance": {
+            "import": "./dist/assistance.js",
+            "types": "./dist/assistance.d.ts"
+        },
+        "./koreanHints": {
+            "import": "./dist/koreanHints.js",
+            "types": "./dist/koreanHints.d.ts"
         }
     },
     "scripts": {

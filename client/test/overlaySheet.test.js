@@ -44,6 +44,24 @@ test('focus trapping wraps both ends of the dialog', () => {
   }
 });
 
+test('focus trapping skips controls hidden by responsive sheet styles', () => {
+  const previousDocument = globalThis.document;
+  let focused = null;
+  const hiddenHandle = { getClientRects: () => [], focus: () => { focused = 'hidden'; } };
+  const firstVisible = { getClientRects: () => [{}], focus: () => { focused = 'first-visible'; } };
+  const lastVisible = { getClientRects: () => [{}], focus: () => { focused = 'last-visible'; } };
+  const overlay = { querySelectorAll: () => [hiddenHandle, firstVisible, lastVisible] };
+
+  try {
+    globalThis.document = { activeElement: lastVisible };
+    trapOverlayFocus({ key: 'Tab', shiftKey: false, preventDefault() {} }, overlay, () => {});
+    assert.equal(focused, 'first-visible');
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
 test('Escape delegates overlay dismissal and prevents gameplay handling', () => {
   let closed = false;
   let prevented = false;

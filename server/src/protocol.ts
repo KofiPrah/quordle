@@ -1,4 +1,5 @@
-import type { BoardState, GameState } from '@quordle/engine';
+import { calculatePerformanceMetrics } from '@quordle/engine/assistance';
+import type { GameState, HintType } from '@quordle/engine';
 
 // ============================================================================
 // Keys
@@ -53,6 +54,10 @@ export interface LeaderboardEntry {
     profile: UserProfile;
     solvedCount: number;       // 0-4 boards solved
     guessCount: number;        // total guesses made
+    hintCount: number;
+    hintPenalty: number;
+    assisted: boolean;
+    score: number;
     gameOver: boolean;
     won: boolean;
     finishedAt: number | null; // timestamp when game completed (for tiebreaker)
@@ -103,6 +108,16 @@ export interface GuessMessage {
     language?: Language;
 }
 
+export interface HintMessage {
+    type: 'HINT';
+    roomId: RoomId;
+    dateKey: DateKey;
+    visibleUserId: VisibleUserId;
+    boardIndex: number;
+    hintType: HintType;
+    language: Language;
+}
+
 export interface LeaveMessage {
     type: 'LEAVE';
     roomId: RoomId;
@@ -111,7 +126,7 @@ export interface LeaveMessage {
 }
 
 /** Union of all client-to-server messages */
-export type ClientMessage = JoinMessage | GuessMessage | LeaveMessage;
+export type ClientMessage = JoinMessage | GuessMessage | HintMessage | LeaveMessage;
 
 /** All valid client message types */
 export type ClientMessageType = ClientMessage['type'];
@@ -156,6 +171,11 @@ export type ServerMessageType = ServerMessage['type'];
 export const ErrorCodes = {
     INVALID_MESSAGE: 'INVALID_MESSAGE',
     INVALID_GUESS: 'INVALID_GUESS',
+    INVALID_LANGUAGE: 'INVALID_LANGUAGE',
+    INVALID_BOARD: 'INVALID_BOARD',
+    INVALID_HINT: 'INVALID_HINT',
+    HINT_UNAVAILABLE: 'HINT_UNAVAILABLE',
+    BOARD_SOLVED: 'BOARD_SOLVED',
     GAME_OVER: 'GAME_OVER',
     ROOM_NOT_FOUND: 'ROOM_NOT_FOUND',
     PLAYER_NOT_FOUND: 'PLAYER_NOT_FOUND',
@@ -171,7 +191,7 @@ export type ErrorCode = typeof ErrorCodes[keyof typeof ErrorCodes];
 export function isClientMessage(msg: unknown): msg is ClientMessage {
     if (typeof msg !== 'object' || msg === null) return false;
     const m = msg as Record<string, unknown>;
-    return m.type === 'JOIN' || m.type === 'GUESS' || m.type === 'LEAVE';
+    return m.type === 'JOIN' || m.type === 'GUESS' || m.type === 'HINT' || m.type === 'LEAVE';
 }
 
 export function isJoinMessage(msg: unknown): msg is JoinMessage {
@@ -194,6 +214,20 @@ export function isGuessMessage(msg: unknown): msg is GuessMessage {
         typeof m.dateKey === 'string' &&
         typeof m.visibleUserId === 'string' &&
         typeof m.guess === 'string'
+    );
+}
+
+export function isHintMessage(msg: unknown): msg is HintMessage {
+    if (typeof msg !== 'object' || msg === null) return false;
+    const m = msg as Record<string, unknown>;
+    return (
+        m.type === 'HINT' &&
+        typeof m.roomId === 'string' &&
+        typeof m.dateKey === 'string' &&
+        typeof m.visibleUserId === 'string' &&
+        (m.language === 'en' || m.language === 'ko') &&
+        Number.isInteger(m.boardIndex) &&
+        typeof m.hintType === 'string'
     );
 }
 
@@ -293,32 +327,33 @@ export function parseRoomKey(key: string): RoomKey | null {
 /** Convert PlayerState to LeaderboardEntry */
 export function toLeaderboardEntry(player: PlayerState): LeaderboardEntry {
     const gs = player.gameState;
-    const solvedCount = gs.boards.filter((b: BoardState) => b.solved).length;
+    const performance = calculatePerformanceMetrics(gs);
     return {
         visibleUserId: player.visibleUserId,
         profile: player.profile,
-        solvedCount,
-        guessCount: gs.guessCount,
+        solvedCount: performance.solvedCount,
+        guessCount: performance.guessCount,
+        hintCount: performance.hintCount,
+        hintPenalty: performance.hintPenalty,
+        assisted: performance.assisted,
+        score: performance.score,
         gameOver: gs.gameOver,
         won: gs.won,
         finishedAt: player.finishedAt,
     };
 }
 
-/** Sort leaderboard: most boards solved, then fewest guesses, then earliest finish */
+/** Sort leaderboard: most boards solved, highest score, then fewest guesses and earliest finish */
 export function sortLeaderboard(entries: LeaderboardEntry[]): LeaderboardEntry[] {
     return [...entries].sort((a, b) => {
-        // Finished players rank above unfinished
-        if (a.gameOver !== b.gameOver) return a.gameOver ? -1 : 1;
         // More boards solved = better
         if (a.solvedCount !== b.solvedCount) return b.solvedCount - a.solvedCount;
+        // Higher score = better
+        if (a.score !== b.score) return b.score - a.score;
         // Fewer guesses = better
         if (a.guessCount !== b.guessCount) return a.guessCount - b.guessCount;
         // Earlier finish = better (tiebreaker)
-        if (a.finishedAt !== null && b.finishedAt !== null) {
-            return a.finishedAt - b.finishedAt;
-        }
-        return 0;
+        return (a.finishedAt ?? Number.POSITIVE_INFINITY) - (b.finishedAt ?? Number.POSITIVE_INFINITY);
     });
 }
 

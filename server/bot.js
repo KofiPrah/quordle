@@ -2,6 +2,7 @@ import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuil
 import dotenv from "dotenv";
 import Redis from "ioredis";
 import cron from "node-cron";
+import { calculatePerformanceMetrics } from "@quordle/engine/assistance";
 
 // Load .env from parent directory in dev, or current directory in production
 dotenv.config({ path: "../.env" });
@@ -354,7 +355,19 @@ function buildLaunchButton() {
 // ========== COMPLETION ANNOUNCEMENT ==========
 
 function buildCompletionEmbed(event) {
-    const { displayName, avatarUrl, dateKey, won, guessCount, solvedBoards, totalBoards, language } = event;
+    const {
+        displayName,
+        avatarUrl,
+        dateKey,
+        won,
+        guessCount,
+        solvedBoards,
+        totalBoards,
+        language,
+        score = 0,
+        hintCount = 0,
+        assisted = hintCount > 0,
+    } = event;
     const isKorean = language === 'ko';
     const resultEmoji = won ? "🏆" : "😔";
     const resultText = won ? "won" : "lost";
@@ -367,7 +380,10 @@ function buildCompletionEmbed(event) {
         .setDescription(`**${displayName}** ${resultText} today's ${gameLabel}!`)
         .addFields(
             { name: isKorean ? "보드" : "Boards", value: `${solvedBoards}/${totalBoards}`, inline: true },
-            { name: isKorean ? "추측" : "Guesses", value: `${guessCount}`, inline: true }
+            { name: isKorean ? "추측" : "Guesses", value: `${guessCount}`, inline: true },
+            { name: "Score", value: `${score}`, inline: true },
+            { name: "Hints", value: `${hintCount}`, inline: true },
+            { name: "Assistance", value: assisted ? "Assisted" : "Unassisted", inline: true }
         )
         .setTimestamp();
 
@@ -439,13 +455,17 @@ async function fetchLeaderboardForChannel(channelId, dateKey) {
             for (const player of players) {
                 if (!player) continue;
                 const gs = player.gameState;
-                const solvedCount = gs.boards.filter(b => b.solved).length;
+                const performance = calculatePerformanceMetrics(gs);
                 entries.push({
                     visibleUserId: player.visibleUserId,
                     displayName: player.profile?.displayName || player.visibleUserId,
                     avatarUrl: player.profile?.avatarUrl || null,
-                    solvedCount,
-                    guessCount: gs.guessCount,
+                    solvedCount: performance.solvedCount,
+                    guessCount: performance.guessCount,
+                    hintCount: performance.hintCount,
+                    hintPenalty: performance.hintPenalty,
+                    assisted: performance.assisted,
+                    score: performance.score,
                     gameOver: gs.gameOver,
                     won: gs.won,
                     finishedAt: player.finishedAt,
@@ -457,13 +477,12 @@ async function fetchLeaderboardForChannel(channelId, dateKey) {
         }
     }
 
-    // Sort: finished > unfinished, more boards > fewer, fewer guesses > more, earlier finish wins ties
+    // Sort: more boards, higher score, fewer guesses, then earlier finish.
     entries.sort((a, b) => {
-        if (a.gameOver !== b.gameOver) return a.gameOver ? -1 : 1;
         if (a.solvedCount !== b.solvedCount) return b.solvedCount - a.solvedCount;
+        if (a.score !== b.score) return b.score - a.score;
         if (a.guessCount !== b.guessCount) return a.guessCount - b.guessCount;
-        if (a.finishedAt !== null && b.finishedAt !== null) return a.finishedAt - b.finishedAt;
-        return 0;
+        return (a.finishedAt ?? Number.POSITIVE_INFINITY) - (b.finishedAt ?? Number.POSITIVE_INFINITY);
     });
 
     return entries;
@@ -479,7 +498,8 @@ function buildLeaderboardSummaryEmbed(dateKey, leaderboard, language = 'en') {
         const entry = leaderboard[i];
         const rank = i < 3 ? rankEmojis[i] : `**${i + 1}.**`;
         const statusEmoji = entry.won ? "\u2705" : entry.gameOver ? "\u274C" : "\u23F3"; // ✅ ❌ ⏳
-        description += `${rank} **${entry.displayName}** — ${entry.solvedCount}/4 boards, ${entry.guessCount} guesses ${statusEmoji}\n`;
+        const assistance = entry.assisted ? `${entry.hintCount} hints, Assisted` : "0 hints, Unassisted";
+        description += `${rank} **${entry.displayName}** — ${entry.solvedCount}/4 boards, ${entry.score} points, ${entry.guessCount} guesses, ${assistance} ${statusEmoji}\n`;
     }
 
     const totalPlayers = leaderboard.length;
@@ -798,7 +818,7 @@ function buildWasPlayingEmbed(profile, gameState) {
 
     // Add game result if available
     if (gameState) {
-        const { solvedCount, guessCount, gameOver, won } = gameState;
+        const { solvedCount, guessCount, gameOver, won, score = 0, hintCount = 0, assisted = hintCount > 0 } = gameState;
         if (gameOver) {
             if (won) {
                 description += `\n🏆 Solved all 4 in ${guessCount} guesses!`;
@@ -808,6 +828,7 @@ function buildWasPlayingEmbed(profile, gameState) {
         } else if (guessCount > 0) {
             description += `\n📊 ${solvedCount}/4 boards • ${guessCount} guesses`;
         }
+        description += `\n${score} points • ${hintCount} hints • ${assisted ? "Assisted" : "Unassisted"}`;
     }
 
     return new EmbedBuilder()

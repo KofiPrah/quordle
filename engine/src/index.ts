@@ -1,6 +1,9 @@
 // Types
 export type {
     Language,
+    HintType,
+    HintUse,
+    AssistanceState,
     LetterResult,
     GuessResult,
     JamoSlot,
@@ -16,6 +19,7 @@ export type {
 
 export type {
     DictionarySense,
+    SemanticCategory,
     KoreanDictionaryEntry,
     KoreanDictionarySnapshot,
     KoreanRecognitionSnapshot,
@@ -28,6 +32,15 @@ export type {
     KoreanNearbySuggestion,
     KoreanNearbyOptions,
 } from './nearbyWords.js';
+
+export type {
+    PerformanceMetrics,
+} from './assistance.js';
+
+export type {
+    KoreanHintErrorCode,
+    KoreanHintResult,
+} from './koreanHints.js';
 
 // Game logic
 export {
@@ -49,6 +62,18 @@ export { evaluateGuessKo, evaluateGuessSyllable } from './evaluatorKo.js';
 
 // Korean vocabulary discovery
 export { classifyKoreanGuess, rankNearbyKoreanWords } from './nearbyWords.js';
+
+// Assistance and Korean learning hints
+export {
+    ASSISTANCE_SCORING_VERSION,
+    HINT_COSTS,
+    createEmptyAssistanceState,
+    normalizeAssistanceState,
+    findHintUse,
+    appendHintUse,
+    calculatePerformanceMetrics,
+} from './assistance.js';
+export { isKoreanHintAvailable, requestKoreanHint } from './koreanHints.js';
 
 // Jamo utilities
 export {

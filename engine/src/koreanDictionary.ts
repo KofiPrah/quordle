@@ -7,6 +7,12 @@ export interface DictionarySense {
     sourceUrl: string;
 }
 
+/** Bilingual semantic category supplied by KRDICT. */
+export interface SemanticCategory {
+    korean: string;
+    english: string;
+}
+
 /** Learning metadata for one accepted two-syllable Korean word. */
 export interface KoreanDictionaryEntry {
     word: string;
@@ -15,6 +21,7 @@ export interface KoreanDictionaryEntry {
     pronunciation?: string;
     romanization: string;
     senses: DictionarySense[];
+    semanticCategories: SemanticCategory[];
     answerEligible: boolean;
     guessEligible: boolean;
 }

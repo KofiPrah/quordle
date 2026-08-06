@@ -1,5 +1,6 @@
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { romanize } from 'koroman';
+import { translateSemanticCategory } from './semantic-category-labels.mjs';
 
 export const KRDICT_SOURCE_NAME = 'National Institute of Korean Language Korean Basic Dictionary';
 export const KRDICT_LICENSE = 'CC BY-SA 2.0 KR';
@@ -163,6 +164,7 @@ export function parseBulkLexicalEntry(entry, candidateWords) {
   return {
     word,
     pronunciation: getPronunciation(entry?.WordForm),
+    semanticCategory: translateSemanticCategory(featureValue(entry?.feat, 'semanticCategory')),
     senses,
   };
 }
@@ -241,6 +243,7 @@ export function createDictionaryCollector(candidateMembership) {
         pronunciation: undefined,
         romanization: '',
         senses: [],
+        semanticCategories: [],
         answerEligible: membership.answerEligible,
         guessEligible: membership.guessEligible,
       };
@@ -249,6 +252,7 @@ export function createDictionaryCollector(candidateMembership) {
         existing.pronunciation = record.pronunciation;
       }
       existing.senses.push(...record.senses);
+      if (record.semanticCategory) existing.semanticCategories.push(record.semanticCategory);
       records.set(record.word, existing);
     },
 
@@ -269,6 +273,10 @@ export function createDictionaryCollector(candidateMembership) {
             ))
             .map(({ homonymOrder: _homonymOrder, senseOrder: _senseOrder, ...sense }) => sense);
 
+          const semanticCategories = [...new Map(
+            entry.semanticCategories.map((category) => [category.korean, category]),
+          ).values()].sort((left, right) => left.korean.localeCompare(right.korean, 'ko'));
+
           return {
             ...entry,
             romanization: romanize(entry.pronunciation || entry.word, {
@@ -277,6 +285,7 @@ export function createDictionaryCollector(candidateMembership) {
               useHyphen: false,
             }),
             senses,
+            semanticCategories,
           };
         })
         .filter((entry) => entry.senses.length > 0)

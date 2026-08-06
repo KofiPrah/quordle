@@ -49,7 +49,9 @@ export function trapOverlayFocus(event, overlay, close) {
   }
   if (event.key !== 'Tab') return;
 
-  const focusable = [...overlay.querySelectorAll(FOCUSABLE_SELECTOR)];
+  const focusable = [...overlay.querySelectorAll(FOCUSABLE_SELECTOR)].filter(
+    (element) => typeof element.getClientRects !== 'function' || element.getClientRects().length > 0,
+  );
   if (focusable.length === 0) {
     event.preventDefault();
     return;
@@ -72,4 +74,3 @@ export function getSheetDragAction(startY, endY, currentSize) {
   if (distance >= 56 && currentSize === 'full') return 'collapse';
   return 'none';
 }
-
