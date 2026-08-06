@@ -59,6 +59,82 @@ let inactivityTimer = null;
 let expiredSessionSnapshot = null;
 let koreanShiftActive = false;
 let activityTrackingBound = false;
+let activityViewportBound = false;
+let viewportSyncFrame = null;
+let leaderboardModalOpen = false;
+let boardScrollTop = 0;
+
+function resetBoardScrollPosition() {
+  boardScrollTop = 0;
+  const boardRegion = document.querySelector('.game-scroll-region');
+  if (boardRegion) {
+    boardRegion.scrollTop = 0;
+  }
+}
+
+function measureActivityViewportHeight() {
+  const candidates = [
+    ['visualViewport', window.visualViewport?.height],
+    ['documentElement', document.documentElement.clientHeight],
+    ['innerHeight', window.innerHeight],
+  ];
+
+  for (const [source, value] of candidates) {
+    if (Number.isFinite(value) && value > 0) {
+      return { height: Math.round(value), source };
+    }
+  }
+
+  return { height: 0, source: 'unavailable' };
+}
+
+function logViewportMetrics(measurement) {
+  if (window.DEBUG_VIEWPORT !== true) return;
+
+  const body = document.body.getBoundingClientRect();
+  const app = document.getElementById('app')?.getBoundingClientRect();
+  const shell = document.querySelector('.quordle-container')?.getBoundingClientRect();
+  const boards = document.querySelector('.game-scroll-region')?.getBoundingClientRect();
+  const dock = document.querySelector('.game-input-dock')?.getBoundingClientRect();
+
+  console.table({
+    measurementSource: measurement.source,
+    measuredHeight: measurement.height,
+    innerHeight: window.innerHeight,
+    visualViewportHeight: window.visualViewport?.height,
+    documentClientHeight: document.documentElement.clientHeight,
+    bodyHeight: body.height,
+    appHeight: app?.height,
+    shellHeight: shell?.height,
+    boardRegionHeight: boards?.height,
+    inputDockHeight: dock?.height,
+  });
+}
+
+function syncActivityViewportHeight() {
+  viewportSyncFrame = null;
+  const measurement = measureActivityViewportHeight();
+  if (measurement.height <= 0) return;
+
+  document.documentElement.style.setProperty('--app-height', `${measurement.height}px`);
+  requestAnimationFrame(() => logViewportMetrics(measurement));
+}
+
+function scheduleActivityViewportSync() {
+  if (viewportSyncFrame !== null) return;
+  viewportSyncFrame = requestAnimationFrame(syncActivityViewportHeight);
+}
+
+function setupActivityViewport() {
+  if (activityViewportBound) return;
+  activityViewportBound = true;
+
+  scheduleActivityViewportSync();
+  window.addEventListener('resize', scheduleActivityViewportSync, { passive: true });
+  window.addEventListener('orientationchange', scheduleActivityViewportSync, { passive: true });
+  window.visualViewport?.addEventListener('resize', scheduleActivityViewportSync, { passive: true });
+  window.visualViewport?.addEventListener('scroll', scheduleActivityViewportSync, { passive: true });
+}
 
 // ========== WEBSOCKET CONNECTION ==========
 function getUserProfile() {
@@ -779,6 +855,8 @@ function getTodayDateKey() {
 function startNewDailyGame() {
   gameMode = "daily";
   uiScreen = "game";
+  leaderboardModalOpen = false;
+  resetBoardScrollPosition();
   initialStateApplied = false;
   expiredSessionSnapshot = null;
   koreanShiftActive = false;
@@ -804,6 +882,8 @@ function startNewDailyGame() {
 function startNewPracticeGame() {
   gameMode = "practice";
   uiScreen = "game";
+  leaderboardModalOpen = false;
+  resetBoardScrollPosition();
   initialStateApplied = false;
   expiredSessionSnapshot = null;
   koreanShiftActive = false;
@@ -840,6 +920,7 @@ function resumeExpiredSession() {
 }
 
 function initQuordleGame() {
+  setupActivityViewport();
   setupActivityTracking();
   // For daily mode, try server-side persistence first
   initDailyFromServer();
@@ -913,6 +994,11 @@ async function initDailyFromServer() {
 }
 
 function renderApp() {
+  const currentBoardRegion = document.querySelector('.game-scroll-region');
+  if (currentBoardRegion) {
+    boardScrollTop = currentBoardRegion.scrollTop;
+  }
+
   if (uiScreen === "expired") {
     renderExpiredScreen();
   } else if (uiScreen === "results") {
@@ -920,6 +1006,7 @@ function renderApp() {
   } else {
     renderGameScreen();
   }
+  scheduleActivityViewportSync();
   scheduleInactivityTimeout();
 }
 
@@ -950,12 +1037,71 @@ function renderResultsLinkButton() {
   `;
 }
 
+function renderLeaderboardButton() {
+  return `
+    <button
+      class="leaderboard-trigger"
+      type="button"
+      aria-haspopup="dialog"
+      aria-expanded="${leaderboardModalOpen}"
+      aria-controls="leaderboard-modal"
+    >
+      <span class="leaderboard-trigger-icon" aria-hidden="true">&#127942;</span>
+      <span class="leaderboard-trigger-label">Scores</span>
+    </button>
+  `;
+}
+
+function renderLeaderboardModal() {
+  if (!leaderboardModalOpen) return '';
+
+  return `
+    <div class="leaderboard-modal-backdrop">
+      <section
+        class="leaderboard-modal"
+        id="leaderboard-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="leaderboard-modal-title"
+      >
+        <div class="leaderboard-modal-header">
+          <h2 class="leaderboard-modal-title" id="leaderboard-modal-title">Leaderboards</h2>
+          <button class="leaderboard-modal-close" type="button" aria-label="Close leaderboards">&times;</button>
+        </div>
+        <div class="leaderboard-modal-content" id="leaderboard-panel">
+          ${renderLeaderboardContent()}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function openLeaderboardModal() {
+  if (leaderboardModalOpen) return;
+  leaderboardModalOpen = true;
+  renderApp();
+  setupKeyboardListeners();
+  requestAnimationFrame(() => document.querySelector('.leaderboard-modal-close')?.focus());
+}
+
+function closeLeaderboardModal() {
+  if (!leaderboardModalOpen) return;
+  leaderboardModalOpen = false;
+  renderApp();
+  setupKeyboardListeners();
+  requestAnimationFrame(() => document.querySelector('.leaderboard-trigger')?.focus());
+}
+
 function renderGameScreen() {
   const app = document.querySelector('#app');
   const solvedCount = gameState.boards.filter(b => b.solved).length;
   const lang = currentLanguage;
   const currentGuessDisplay = getCurrentGuessDisplayText();
-  const errorHtml = guessError ? `<div class="guess-error">${guessError}</div>` : '';
+  const errorHtml = `
+    <div class="guess-error-slot" aria-live="polite" aria-atomic="true">
+      ${guessError ? `<div class="guess-error">${guessError}</div>` : ''}
+    </div>
+  `;
 
   // Single compact status row for both active and finished games.
   const statusHtml = gameState.gameOver
@@ -997,24 +1143,29 @@ function renderGameScreen() {
     <div class="quordle-container ${lang === 'ko' ? 'lang-ko' : 'lang-en'}">
       <div class="game-header">
         <h1 class="game-title">Quordle${gameMode === 'practice' ? ' <span class="mode-badge">Practice</span>' : ''}</h1>
-        ${langToggle}
-      </div>
-      
-      ${statusHtml}
-      
-      <div class="game-layout">
-        <div class="boards-grid">
-          ${gameState.boards.map((board, i) => renderBoard(board, i)).join('')}
-        </div>
-        
-        <div class="leaderboard-panel" id="leaderboard-panel">
-          ${renderLeaderboardContent()}
+        <div class="game-header-actions">
+          ${langToggle}
+          ${renderLeaderboardButton()}
         </div>
       </div>
 
-      ${currentLanguage === 'ko' ? renderKoreanKeyboard() : renderKeyboard()}
+      <main class="boards-grid game-scroll-region" aria-label="Quordle boards">
+        ${gameState.boards.map((board, i) => renderBoard(board, i)).join('')}
+      </main>
+
+      <section class="game-input-dock" aria-label="Guess controls">
+        ${statusHtml}
+        ${currentLanguage === 'ko' ? renderKoreanKeyboard() : renderKeyboard()}
+      </section>
+
+      ${renderLeaderboardModal()}
     </div>
   `;
+
+  const boardRegion = app.querySelector('.game-scroll-region');
+  if (boardRegion) {
+    boardRegion.scrollTop = boardScrollTop;
+  }
 }
 
 function renderResultsScreen() {
@@ -1060,7 +1211,10 @@ function renderResultsScreen() {
     <div class="quordle-container ${lang === 'ko' ? 'lang-ko' : 'lang-en'}">
       <div class="game-header">
         <h1 class="game-title">Quordle${gameMode === 'practice' ? ' <span class="mode-badge">Practice</span>' : ''}</h1>
-        ${langToggle}
+        <div class="game-header-actions">
+          ${langToggle}
+          ${renderLeaderboardButton()}
+        </div>
       </div>
       
       <div class="results-screen">
@@ -1088,7 +1242,7 @@ function renderResultsScreen() {
         ${gameMode === 'daily' ? `<div class="results-footer">${lang === 'ko' ? '내일 다시 도전하세요!' : 'Come back tomorrow for the next Daily'}</div>` : ''}
       </div>
       
-      <div class="keyboard-spacer"></div>
+      ${renderLeaderboardModal()}
     </div>
   `;
 }
@@ -1109,6 +1263,9 @@ function renderExpiredScreen() {
     <div class="quordle-container ${currentLanguage === 'ko' ? 'lang-ko' : 'lang-en'}">
       <div class="game-header">
         <h1 class="game-title">Quordle</h1>
+        <div class="game-header-actions">
+          ${renderLeaderboardButton()}
+        </div>
       </div>
 
       <div class="results-screen">
@@ -1135,7 +1292,7 @@ function renderExpiredScreen() {
         </div>
       </div>
 
-      <div class="keyboard-spacer"></div>
+      ${renderLeaderboardModal()}
     </div>
   `;
 }
@@ -1553,7 +1710,7 @@ function imeBackspace() {
 }
 
 function handleKeyPress(key) {
-  if (!gameState || gameState.gameOver || uiScreen === "expired") return;
+  if (!gameState || gameState.gameOver || uiScreen === "expired" || leaderboardModalOpen) return;
 
   const lang = currentLanguage;
   const wordLen = getLanguageConfig(lang).wordLength;
@@ -1696,6 +1853,62 @@ async function submitGuessWithPersistence(guess) {
 }
 
 function setupKeyboardListeners() {
+  const boardRegion = document.querySelector('.game-scroll-region');
+  if (boardRegion) {
+    boardRegion.addEventListener('scroll', () => {
+      boardScrollTop = boardRegion.scrollTop;
+    }, { passive: true });
+  }
+
+  const leaderboardTrigger = document.querySelector('.leaderboard-trigger');
+  if (leaderboardTrigger) {
+    leaderboardTrigger.addEventListener('click', openLeaderboardModal);
+  }
+
+  const leaderboardClose = document.querySelector('.leaderboard-modal-close');
+  if (leaderboardClose) {
+    leaderboardClose.addEventListener('click', closeLeaderboardModal);
+  }
+
+  const leaderboardBackdrop = document.querySelector('.leaderboard-modal-backdrop');
+  if (leaderboardBackdrop) {
+    leaderboardBackdrop.addEventListener('click', (event) => {
+      if (event.target === leaderboardBackdrop) {
+        closeLeaderboardModal();
+      }
+    });
+  }
+
+  const leaderboardModal = document.querySelector('.leaderboard-modal');
+  if (leaderboardModal) {
+    leaderboardModal.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeLeaderboardModal();
+        return;
+      }
+
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(leaderboardModal.querySelectorAll(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+  }
+
   // On-screen keyboard
   document.querySelectorAll('.key').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1791,6 +2004,14 @@ const QWERTY_TO_JAMO = {
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
 
+  if (leaderboardModalOpen) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeLeaderboardModal();
+    }
+    return;
+  }
+
   if (e.key === 'Enter') {
     handleKeyPress(KEY_ENTER);
   } else if (e.key === 'Backspace') {
@@ -1836,6 +2057,8 @@ function switchLanguage(newLang) {
   // Switch language
   currentLanguage = newLang;
   localStorage.setItem('quordle_language', newLang);
+  leaderboardModalOpen = false;
+  resetBoardScrollPosition();
   expiredSessionSnapshot = null;
   koreanShiftActive = false;
   imeReset();

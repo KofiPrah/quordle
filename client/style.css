@@ -21,7 +21,6 @@
   --key-min-width: clamp(30px, 8.4vw, 38px);
   --key-font-size: clamp(0.8rem, 2vw, 1rem);
   --key-padding: clamp(7px, 1.7vw, 11px);
-  --activity-top-offset: 0px;
 }
 
 a {
@@ -34,14 +33,18 @@ a:hover {
   color: #535bf2;
 }
 
-body {
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
-  min-height: 100dvh;
   overflow: hidden;
+}
+
+body {
+  min-width: 0;
 }
 
 h1 {
@@ -50,13 +53,7 @@ h1 {
 }
 
 #app {
-  width: 100%;
-  max-width: 1280px;
-  margin: 0 auto;
   text-align: center;
-  height: 100vh;
-  height: 100dvh;
-  overflow: hidden;
 }
 
 .logo {
@@ -114,23 +111,23 @@ button:focus-visible {
 
 .quordle-container {
   display: grid;
-  grid-template-columns: 1fr clamp(260px, 22vw, 380px);
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   grid-template-areas:
-    "header  header"
-    "status  status"
-    "main    sidebar"
-    "keyboard keyboard";
+    "header"
+    "main"
+    "dock";
   gap: clamp(0.2rem, 0.8vh, 0.6rem);
-  padding: clamp(0.25rem, 1vh, 1rem);
-  padding-top: calc(clamp(0.25rem, 1vh, 1rem) + env(safe-area-inset-top, 0px) + var(--activity-top-offset));
-  max-width: 100%;
+  padding: max(clamp(0.25rem, 1vh, 1rem), env(safe-area-inset-top, 0px)) clamp(0.25rem, 1vh, 1rem) 0;
+  max-width: 1280px;
   width: 100%;
-  height: 100vh;
-  height: 100dvh;
-  /* Dynamic viewport height for mobile browsers */
+  height: var(--app-height, 100%);
+  max-height: 100%;
+  min-height: 0;
+  margin: 0 auto;
   box-sizing: border-box;
   overflow: hidden;
+  position: relative;
 }
 
 .game-title {
@@ -142,7 +139,6 @@ button:focus-visible {
 }
 
 .game-status-wrap {
-  grid-area: status;
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
@@ -309,6 +305,9 @@ button:focus-visible {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
   align-self: stretch;
 }
 
@@ -403,12 +402,32 @@ button:focus-visible {
   background-color: #d9534f;
   border-radius: 999px;
   display: inline-block;
-  align-self: flex-start;
+}
+
+.guess-error-slot {
+  min-height: 1.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.game-input-dock {
+  grid-area: dock;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(0.15rem, 0.45vh, 0.35rem);
+  position: relative;
+  z-index: 20;
+  overflow: hidden;
+  padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
+  background: #242424;
 }
 
 /* Keyboard */
 .keyboard {
-  grid-area: keyboard;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -627,15 +646,9 @@ button:focus-visible {
   color: #fff;
 }
 
-/* ========== GAME LAYOUT WITH LEADERBOARD ========== */
-.game-layout {
-  display: contents;
-  /* Children participate in parent grid */
-}
-
 /* ========== RESULTS SCREEN ========== */
 .results-screen {
-  grid-area: main / main / keyboard / sidebar;
+  grid-area: main;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -786,17 +799,93 @@ button:focus-visible {
   font-style: italic;
 }
 
-.keyboard-spacer {
-  grid-area: keyboard;
+/* ========== LEADERBOARD ========== */
+.leaderboard-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 2rem;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
-/* ========== LEADERBOARD PANEL ========== */
-.leaderboard-panel {
-  grid-area: sidebar;
-  min-width: 0;
-  max-width: 100%;
+.leaderboard-trigger:hover {
+  border-color: #5865f2;
+  background: rgba(88, 101, 242, 0.2);
+}
+
+.leaderboard-trigger-icon {
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.leaderboard-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: max(0.75rem, env(safe-area-inset-top, 0px)) 0.75rem max(0.75rem, env(safe-area-inset-bottom, 0px));
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.leaderboard-modal {
+  width: min(720px, 92%);
+  max-height: min(80%, 640px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 16px;
+  background: #242424;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  text-align: left;
+}
+
+.leaderboard-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.leaderboard-modal-title {
+  margin: 0;
+  color: #fff;
+  font-size: 1.1rem;
+}
+
+.leaderboard-modal-close {
+  width: 2.25rem;
+  height: 2.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.leaderboard-modal-content {
+  min-height: 0;
   overflow-y: auto;
-  max-height: 100%;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 1rem;
 }
 
 .leaderboard {
@@ -929,7 +1018,7 @@ button:focus-visible {
 /* ========== TOAST NOTIFICATIONS ========== */
 .toast {
   position: fixed;
-  top: calc(env(safe-area-inset-top, 0px) + var(--activity-top-offset) + 0.75rem);
+  top: calc(env(safe-area-inset-top, 0px) + 0.75rem);
   left: 50%;
   transform: translateX(-50%) translateY(-100%);
   background: rgba(0, 0, 0, 0.85);
@@ -950,10 +1039,9 @@ button:focus-visible {
 
 /* ========== RESPONSIVE ADJUSTMENTS ========== */
 
-/* Mobile layout: single column, leaderboard above keyboard */
+/* Mobile layout */
 @media (max-width: 700px) {
   :root {
-    --activity-top-offset: clamp(3rem, 8vh, 4.75rem);
     --tile: clamp(20px, min(7.4vw, 3.95vh), 30px);
     --tile-condensed: clamp(10px, min(3.55vw, 1.9vh), 15px);
     --tile-gap: clamp(1px, 0.35vw, 3px);
@@ -965,20 +1053,8 @@ button:focus-visible {
   }
 
   .quordle-container {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto auto minmax(0, 1fr);
-    grid-template-areas:
-      "header"
-      "status"
-      "main"
-      "sidebar"
-      "keyboard";
     gap: clamp(0.12rem, 0.4vh, 0.34rem);
     padding-inline: clamp(0.25rem, 1vw, 0.5rem);
-  }
-
-  .results-screen {
-    grid-area: status / status / keyboard / keyboard;
   }
 
   .game-header {
@@ -1043,7 +1119,6 @@ button:focus-visible {
 
   .boards-grid {
     padding: 0;
-    overflow: hidden;
     padding-bottom: 0;
     align-content: start;
     align-items: start;
@@ -1067,57 +1142,24 @@ button:focus-visible {
     z-index: 1;
   }
 
-  .leaderboard-panel {
-    display: flex;
-    gap: 0.5rem;
-    max-height: clamp(74px, 11.5vh, 96px);
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding-bottom: 0.15rem;
-    scroll-snap-type: x proximity;
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
-    align-items: stretch;
+  .leaderboard-modal-backdrop {
+    place-items: end center;
+    padding-inline: 0;
+    padding-bottom: 0;
   }
 
-  .leaderboard-panel::-webkit-scrollbar {
-    display: none;
-  }
-
-  .leaderboard {
-    flex: 0 0 min(320px, calc(100vw - 1rem));
-    padding: 0.65rem;
-    scroll-snap-align: start;
-    max-height: clamp(74px, 11.5vh, 96px);
-    overflow-y: auto;
-  }
-
-  .leaderboard+.leaderboard {
-    margin-top: 0;
-  }
-
-  .leaderboard-title {
-    margin-bottom: 0.5rem;
-    font-size: 0.9rem;
-  }
-
-  .leaderboard-entry {
-    padding: 0.35rem 0.4rem;
-    font-size: 0.75rem;
-    min-height: 1.8rem;
-  }
-
-  .leaderboard-avatar,
-  .leaderboard-avatar-placeholder {
-    width: 20px;
-    height: 20px;
+  .leaderboard-modal {
+    width: 100%;
+    max-height: min(72%, 620px);
+    border-radius: 16px 16px 0 0;
+    border-bottom: 0;
   }
 }
 
 /* Short viewports on desktop: constrain leaderboard height */
 @media (max-height: 700px) and (min-width: 701px) {
-  .leaderboard-panel {
-    max-height: 280px;
+  .leaderboard-modal {
+    max-height: 90%;
   }
 
   .leaderboard-entry {
@@ -1172,7 +1214,6 @@ button:focus-visible {
 /* Very short viewports (embedded Discord Activities, landscape phones) */
 @media (max-height: 500px) {
   :root {
-    --activity-top-offset: clamp(2.25rem, 6vh, 3rem);
     --tile: clamp(10px, min(4vw, 2.5vh), 18px);
     --tile-condensed: clamp(5px, min(1.8vw, 1.05vh), 9px);
     --key-height: clamp(32px, 5.15vh, 40px);
@@ -1180,14 +1221,6 @@ button:focus-visible {
 
   .quordle-container {
     gap: clamp(0.15rem, 0.5vh, 0.4rem);
-    grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto auto minmax(0, 1fr);
-    grid-template-areas:
-      "header"
-      "status"
-      "main"
-      "sidebar"
-      "keyboard";
   }
 
   .game-title {
@@ -1207,7 +1240,6 @@ button:focus-visible {
   }
 
   .results-screen {
-    grid-area: status / status / keyboard / keyboard;
     padding: 0.5rem;
     gap: 0.75rem;
   }
@@ -1229,28 +1261,8 @@ button:focus-visible {
     font-size: 1.5rem;
   }
 
-  .leaderboard-panel {
-    display: flex;
-    gap: 0.35rem;
-    max-height: clamp(64px, 14vh, 82px);
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-
-  .leaderboard {
-    flex: 0 0 clamp(240px, 42vw, 320px);
-    padding: 0.45rem;
-    max-height: clamp(64px, 14vh, 82px);
-    overflow-y: auto;
-  }
-
-  .leaderboard+.leaderboard {
-    margin-top: 0;
-  }
-
-  .leaderboard-title {
-    margin-bottom: 0.35rem;
-    padding-bottom: 0.3rem;
+  .leaderboard-modal {
+    max-height: 92%;
   }
 }
 
@@ -1280,14 +1292,30 @@ button:focus-visible {
 .game-header {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 1rem;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: nowrap;
   grid-area: header;
+  min-width: 0;
 }
 
 .game-header .game-title {
   grid-area: unset;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.game-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  min-width: 0;
+  flex-shrink: 0;
 }
 
 /* Language toggle buttons */
