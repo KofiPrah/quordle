@@ -44,6 +44,22 @@ test('post-game eligibility adds every answer without duplicating guesses', () =
   assert.deepEqual(eligible, ['기차', '학교', '기관', '사과']);
 });
 
+test('Chinese dictionary eligibility hides unsolved targets until game over', () => {
+  const state = {
+    language: 'zh',
+    gameOver: false,
+    boards: [
+      { targetWord: '学生', guesses: ['学校'], solved: false },
+      { targetWord: '老师', guesses: ['学校'], solved: false },
+      { targetWord: '朋友', guesses: ['学校'], solved: false },
+      { targetWord: '工作', guesses: ['学校'], solved: false },
+    ],
+  };
+  assert.deepEqual(getDictionaryEligibleWords(state), ['学校']);
+  assert.equal(getDictionaryEligibleWords(state).includes('学生'), false);
+  assert.deepEqual(getDictionaryEligibleWords({ ...state, gameOver: true }), ['学校', '学生', '老师', '朋友', '工作']);
+});
+
 test('explicit nearby suggestions are eligible without exposing unrelated answers', () => {
   const eligible = getDictionaryEligibleWords(createState(), entries, ['기관']);
   assert.deepEqual(eligible, ['기차', '학교', '기관']);

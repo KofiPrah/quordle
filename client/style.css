@@ -2110,6 +2110,178 @@ button:focus-visible {
   }
 }
 
+/* ========== PHASE 7: SIMPLIFIED CHINESE ========== */
+
+.lang-zh {
+  font-family: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', Inter, system-ui, sans-serif;
+}
+
+.lang-zh .tile {
+  position: relative;
+  overflow: visible;
+  font-size: clamp(1rem, 3vw, 1.65rem);
+  text-transform: none;
+}
+
+.lang-zh .row-condensed .tile {
+  height: calc(var(--tile-condensed) + 0.42rem);
+  font-size: clamp(0.7rem, 2vw, 1.05rem);
+}
+
+.tile-pinyin {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  left: 1px;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.9);
+  font-family: Inter, system-ui, sans-serif;
+  font-size: clamp(0.34rem, 1vw, 0.5rem);
+  font-weight: 650;
+  line-height: 1;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-condensed .tile-pinyin {
+  display: block;
+  font-size: clamp(0.27rem, 0.72vw, 0.4rem);
+}
+
+.chinese-input-wrap {
+  min-width: min(15rem, 54vw);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.chinese-guess-input {
+  width: min(13rem, 46vw);
+  min-height: 2rem;
+  box-sizing: border-box;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.28);
+  color: #fff;
+  font-family: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', Inter, sans-serif;
+  font-size: 1rem;
+  padding: 0.3rem 0.55rem;
+}
+
+.chinese-guess-input:focus-visible {
+  border-color: #a5b4fc;
+  outline: 2px solid rgba(165, 180, 252, 0.45);
+  outline-offset: 1px;
+}
+
+.chinese-selected-pinyin {
+  color: #c7d2fe;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.chinese-input-help,
+.chinese-candidate-status,
+.chinese-candidate-summary {
+  color: #a1a1aa;
+  font-size: 0.72rem;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.chinese-candidate-error {
+  color: #fca5a5;
+}
+
+.chinese-candidates-shell {
+  width: min(100%, 42rem);
+  margin-inline: auto;
+}
+
+.chinese-candidates {
+  max-height: min(8.25rem, 20vh);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(5.2rem, 1fr));
+  gap: 0.3rem;
+  margin-top: 0.3rem;
+  padding: 0.25rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.chinese-candidate {
+  min-height: 2.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.055);
+  color: #f4f4f5;
+}
+
+.chinese-candidate:hover,
+.chinese-candidate:focus-visible {
+  border-color: #818cf8;
+  background: rgba(88, 101, 242, 0.2);
+}
+
+.chinese-candidate strong {
+  font-size: 1rem;
+}
+
+.chinese-candidate span {
+  color: #c7d2fe;
+  font-size: 0.67rem;
+}
+
+.solved-board-pinyin {
+  overflow: hidden;
+  color: #a7f3d0;
+  font-size: 0.58rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lang-zh .solved-board-toggle {
+  grid-template-columns: auto auto minmax(0, 1fr) minmax(0, 1fr) auto auto;
+}
+
+@media (max-width: 480px) {
+  .lang-btn {
+    padding-inline: 0.22rem;
+  }
+
+  .chinese-input-wrap {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .chinese-guess-input {
+    width: 100%;
+  }
+
+  .chinese-candidates {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-height: 600px) {
+  .chinese-candidates {
+    max-height: 4.5rem;
+  }
+
+  .chinese-candidate {
+    min-height: 2.15rem;
+  }
+}
+
 /* Combined: narrow AND short (typical Discord Activity viewport) */
 @media (max-width: 480px) and (max-height: 700px) {
   :root {

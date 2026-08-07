@@ -6,6 +6,12 @@ import {
     koAnswerWordsSet,
     koGuessWordsSet,
 } from './koreanLexicon.js';
+import {
+    ZH_ANSWER_WORDS,
+    ZH_GUESS_WORDS_LIST,
+    zhAnswerWordsSet,
+    zhGuessWordsSet,
+} from './chineseLexicon.js';
 
 // ========== ENGLISH CONFIG ==========
 const enGuessWordsSet = new Set([...GUESS_WORDS, ...WORD_LIST]);
@@ -29,10 +35,21 @@ const KO_CONFIG: LanguageConfig = {
     guessWords: koGuessWordsSet,
 };
 
+// ========== SIMPLIFIED CHINESE CONFIG ==========
+const ZH_CONFIG: LanguageConfig = {
+    wordLength: 2,
+    maxGuesses: 9,
+    validateCharRegex: /^\p{Script=Han}+$/u,
+    filterCharRegex: /[^\p{Script=Han}]/gu,
+    answerWords: ZH_ANSWER_WORDS,
+    guessWords: zhGuessWordsSet,
+};
+
 // ========== LOOKUP ==========
 const LANGUAGE_CONFIGS: Record<Language, LanguageConfig> = {
     en: EN_CONFIG,
     ko: KO_CONFIG,
+    zh: ZH_CONFIG,
 };
 
 export function getLanguageConfig(language: Language): LanguageConfig {
@@ -63,4 +80,13 @@ export function getQuordleWordsForLanguage(language: Language): [string, string,
 }
 
 // Re-export the Korean word lists for server-side use
-export { KO_ANSWER_WORDS, KO_GUESS_WORDS_LIST, koAnswerWordsSet, koGuessWordsSet };
+export {
+    KO_ANSWER_WORDS,
+    KO_GUESS_WORDS_LIST,
+    koAnswerWordsSet,
+    koGuessWordsSet,
+    ZH_ANSWER_WORDS,
+    ZH_GUESS_WORDS_LIST,
+    zhAnswerWordsSet,
+    zhGuessWordsSet,
+};

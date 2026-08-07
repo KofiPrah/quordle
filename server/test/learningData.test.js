@@ -8,9 +8,11 @@ import {
 import { createAppSessionToken, verifyAppSessionToken } from '../sessionAuth.js';
 
 const accepted = new Set(['기관', '기차']);
+const acceptedChinese = new Set(['学生', '学校']);
 const recognized = new Set(['기관', '기차', '학일']);
 const validators = {
   isAcceptedKoreanWord: (word) => accepted.has(word),
+  isAcceptedChineseWord: (word) => acceptedChinese.has(word),
   isRecognizedKoreanWord: (word) => recognized.has(word),
 };
 const eventIds = new Map();
@@ -143,6 +145,32 @@ test('saved words are idempotent and recall only in a later round', async () => 
     dateKey: '2026-08-07', mode: 'practice', roundId: 'two', roundStartedAt: clock - 1,
   }), false);
   assert.ok((await service.getSavedWords('user'))[0].recalledAt);
+});
+
+test('Chinese learning events and Saved Words are accepted and isolated from legacy Korean fields', async () => {
+  const service = createLearningDataService({
+    enabled: true,
+    hmacSecret: 'analytics-secret',
+    allowMemoryFallback: true,
+    ...validators,
+  });
+  const chineseEvent = normalizeLearningEvent(event('definition_viewed', {
+    suffix: 'zh-definition', language: 'zh', word: '学生',
+  }), { client: true, ...validators });
+  assert.equal(chineseEvent.ok, true);
+
+  const savedKey = `learning:v1:saved:${service.actorHash('multilingual-user')}`;
+  service._memory.saved.set(savedKey, new Map([
+    ['기관', JSON.stringify({ word: '기관', savedAt: 1, source: 'dictionary', recalledAt: null })],
+  ]));
+  await service.saveWord('multilingual-user', '学生', { language: 'zh' });
+  assert.deepEqual((await service.getSavedWords('multilingual-user', 'ko')).map((record) => record.word), ['기관']);
+  assert.deepEqual((await service.getSavedWords('multilingual-user', 'zh')).map((record) => record.word), ['学生']);
+  assert.equal((await service.getSavedWords('multilingual-user', 'zh'))[0].language, 'zh');
+
+  await service.saveWord('multilingual-user', '기관', { language: 'ko' });
+  await service.unsaveWord('multilingual-user', '기관', { language: 'ko' });
+  assert.deepEqual(await service.getSavedWords('multilingual-user', 'ko'), []);
 });
 
 test('production-style service fails closed without Redis', () => {

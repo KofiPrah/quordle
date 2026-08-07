@@ -6,7 +6,7 @@ import type { GameState, HintType } from '@quordle/engine';
 // ============================================================================
 
 /** Supported languages */
-export type Language = 'en' | 'ko';
+export type Language = 'en' | 'ko' | 'zh';
 
 /** Unique identifier for a Discord Activity instance (room) */
 export type RoomId = string;
@@ -123,6 +123,7 @@ export interface LeaveMessage {
     roomId: RoomId;
     dateKey: DateKey;
     visibleUserId: VisibleUserId;
+    language?: Language;
 }
 
 /** Union of all client-to-server messages */
@@ -225,7 +226,7 @@ export function isHintMessage(msg: unknown): msg is HintMessage {
         typeof m.roomId === 'string' &&
         typeof m.dateKey === 'string' &&
         typeof m.visibleUserId === 'string' &&
-        (m.language === 'en' || m.language === 'ko') &&
+        (m.language === 'en' || m.language === 'ko' || m.language === 'zh') &&
         Number.isInteger(m.boardIndex) &&
         typeof m.hintType === 'string'
     );

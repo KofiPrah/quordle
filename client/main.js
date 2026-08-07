@@ -13,8 +13,9 @@ const WS_URL = API_URL
 // Import Quordle engine
 import { createGame, submitGuess, setCurrentGuess, validateGuess, getSolvedCount, computeKeyboardBoardMap } from "../engine/src/game.ts";
 import { evaluateGuess } from "../engine/src/evaluator.ts";
-import { getQuordleWords, isValidGuess } from "../engine/src/words.ts";
+import { isValidGuess } from "../engine/src/words.ts";
 import { getDailyTargets } from "../engine/src/daily.ts";
+import { toChineseDictionaryViewModel, toKoreanDictionaryViewModel } from "../engine/src/dictionaryViewModel.ts";
 import { getLanguageConfig, isValidGuessForLanguage, getQuordleWordsForLanguage } from "../engine/src/languageConfig.ts";
 import { canBeCoda, canBeOnset, combineCodas, combineVowels, expandHangulToJamoUnits, isConsonant, isHangulSyllable, isVowel, splitCompoundCoda, splitCompoundVowel } from "../engine/src/jamo.ts";
 import { backspaceKoIme, createKoImeState, finalizeKoIme, getKoImeDisplayChar, processKoImeJamo } from "../engine/src/koIme.ts";
@@ -58,6 +59,22 @@ import {
   removeLocalSavedWord,
   upsertLocalSavedWord,
 } from "./src/learningData.js";
+import {
+  chineseDictionaryMetadata,
+  getLoadedChineseDictionaryEntry,
+  getPrimaryChinesePronunciation,
+  loadChineseDictionaryEntries,
+  loadChineseDictionaryEntry,
+  loadChinesePinyinCandidates,
+} from "./src/chineseDictionary.js";
+import {
+  appendChinesePinyinKey,
+  backspaceChineseInput,
+  createChineseInputState,
+  getChineseInputValue,
+  selectChineseCandidate,
+  updateChineseInput,
+} from "./src/chineseInput.js";
 
 // Will eventually store the authenticated user's access_token
 let auth;
@@ -65,7 +82,9 @@ let gameState;
 let guessFeedback = null;
 let gameMode = "daily"; // "daily" | "practice"
 let uiScreen = "game"; // "game" | "results"
-let currentLanguage = localStorage.getItem('quordle_language') || 'en'; // 'en' | 'ko'
+const SUPPORTED_LANGUAGES = new Set(['en', 'ko', 'zh']);
+const storedLanguage = localStorage.getItem('quordle_language');
+let currentLanguage = SUPPORTED_LANGUAGES.has(storedLanguage) ? storedLanguage : 'en';
 
 // Discord context for server-side persistence
 let discordUserId = null;
@@ -79,6 +98,7 @@ let ws = null;
 let wsReconnectTimeout = null;
 let leaderboardEn = []; // English room leaderboard
 let leaderboardKo = []; // Korean room leaderboard
+let leaderboardZh = []; // Simplified Chinese room leaderboard
 let initialStateApplied = false; // Prevents double init from WS STATE + REST join race
 const SESSION_TIMEOUT_MS = 45 * 60 * 1000;
 const KEY_ENTER = "ENTER";
@@ -116,6 +136,13 @@ let dictionaryEntrySource = 'dictionary';
 let koreanRecognitionSnapshot = null;
 let koreanNearbyCandidates = null;
 let rejectedGuessRequestId = 0;
+let chineseInputState = createChineseInputState();
+let chinesePinyinCandidates = [];
+let chineseCandidateLoadState = 'idle';
+let chineseCandidateRequestId = 0;
+let chineseCompositionActive = false;
+let chineseDictionaryLoadState = 'idle';
+let chineseDictionaryLoadError = null;
 let boardScrollTop = 0;
 let selectedBoardIndex = null;
 let expandedSolvedBoardIndex = null;
@@ -209,6 +236,7 @@ function trackLearningEvent(type, details = {}, stableKey = null) {
 }
 
 function getDictionarySupplementalWords() {
+  if (currentLanguage !== 'ko') return [];
   return [
     ...getSafeFeedbackSuggestionWords(),
     ...getSavedDictionarySupplementalWords(gameState, savedWords),
@@ -236,7 +264,7 @@ function renderSaveWordButton(word, source = 'dictionary') {
 async function toggleSavedWord(word, source = 'dictionary') {
   if (pendingSavedWord || savedWordsLoadState === 'loading' || savedWordsLoadState === 'idle') return;
   const normalized = word.normalize('NFC');
-  const optimistic = getOptimisticSavedWordToggle(savedWords, normalized, source);
+  const optimistic = getOptimisticSavedWordToggle(savedWords, normalized, source, Date.now(), currentLanguage);
   const { previous, existing } = optimistic;
   pendingSavedWord = normalized;
   savedWordsError = null;
@@ -253,6 +281,7 @@ async function toggleSavedWord(word, source = 'dictionary') {
           Authorization: `Bearer ${appSessionToken}`,
         },
         body: JSON.stringify({
+          language: currentLanguage,
           source,
           dateKey: getTodayDateKey(),
           mode: gameMode,
@@ -266,10 +295,10 @@ async function toggleSavedWord(word, source = 'dictionary') {
       }
       savedWordsLoadState = 'loaded-server';
     } else if (existing) {
-      savedWords = removeLocalSavedWord(localStorage, normalized);
+      savedWords = removeLocalSavedWord(localStorage, normalized, currentLanguage);
       savedWordsLoadState = 'loaded-local';
     } else {
-      savedWords = upsertLocalSavedWord(localStorage, normalized, source);
+      savedWords = upsertLocalSavedWord(localStorage, normalized, source, Date.now(), currentLanguage);
       savedWordsLoadState = 'loaded-local';
     }
   } catch (error) {
@@ -289,12 +318,25 @@ async function toggleSavedWord(word, source = 'dictionary') {
 }
 
 function loadLocalSavedWordState() {
-  savedWords = readLocalSavedWords(localStorage);
+  if (!['ko', 'zh'].includes(currentLanguage)) {
+    savedWords = [];
+    savedWordsLoadState = 'loaded-local';
+    savedWordsError = null;
+    return;
+  }
+  savedWords = readLocalSavedWords(localStorage, currentLanguage);
   savedWordsLoadState = 'loaded-local';
   savedWordsError = null;
 }
 
 async function loadSavedWords() {
+  if (!['ko', 'zh'].includes(currentLanguage)) {
+    savedWords = [];
+    savedWordsLoadState = 'loaded-server';
+    savedWordsError = null;
+    return;
+  }
+  const requestedLanguage = currentLanguage;
   if (!appSessionToken) {
     if (discordSdk) {
       savedWordsLoadState = 'error';
@@ -308,11 +350,12 @@ async function loadSavedWords() {
   savedWordsLoadState = 'loading';
   savedWordsError = null;
   try {
-    const response = await fetch(`${API_URL}/api/learning/saved-words?language=ko`, {
+    const response = await fetch(`${API_URL}/api/learning/saved-words?language=${requestedLanguage}`, {
       headers: { Authorization: `Bearer ${appSessionToken}` },
     });
     if (!response.ok) throw new Error(`Saved Words request failed (${response.status})`);
     const payload = await response.json();
+    if (currentLanguage !== requestedLanguage) return;
     savedWords = Array.isArray(payload.words) ? payload.words : [];
     savedWordsLoadState = 'loaded-server';
   } catch (error) {
@@ -324,7 +367,7 @@ async function loadSavedWords() {
     }
     console.warn('[Learning] Failed to load Saved Words:', error.message);
   }
-  if (currentLanguage === 'ko' && gameState) {
+  if (currentLanguage === requestedLanguage && gameState) {
     renderApp();
     setupKeyboardListeners();
   }
@@ -395,6 +438,76 @@ function resetBoardUiState() {
   expandedSolvedBoardIndex = null;
   boardUiGameIdentity = null;
   pendingBoardSelectionAnnouncement = '';
+}
+
+function resetChineseInput(value = '') {
+  chineseCandidateRequestId += 1;
+  chinesePinyinCandidates = [];
+  chineseCandidateLoadState = 'idle';
+  chineseInputState = updateChineseInput(createChineseInputState(), value);
+}
+
+function syncChineseGuessState() {
+  if (!gameState || currentLanguage !== 'zh') return;
+  gameState = setCurrentGuess(gameState, chineseInputState.selectedWord || '');
+}
+
+function focusChineseInput() {
+  requestAnimationFrame(() => {
+    const input = document.querySelector('.chinese-guess-input');
+    if (!input) return;
+    input.focus();
+    const end = input.value.length;
+    input.setSelectionRange?.(end, end);
+  });
+}
+
+async function resolveChinesePinyinDraft() {
+  const draft = chineseInputState.draft;
+  const requestId = chineseCandidateRequestId + 1;
+  chineseCandidateRequestId = requestId;
+  if (!draft || chineseInputState.selectedWord || currentLanguage !== 'zh') {
+    chinesePinyinCandidates = [];
+    chineseCandidateLoadState = 'idle';
+    return;
+  }
+  chineseCandidateLoadState = 'loading';
+  renderApp();
+  setupKeyboardListeners();
+  focusChineseInput();
+  try {
+    const candidates = await loadChinesePinyinCandidates(draft);
+    if (requestId !== chineseCandidateRequestId
+      || currentLanguage !== 'zh'
+      || chineseInputState.draft !== draft
+      || chineseInputState.selectedWord) return;
+    chinesePinyinCandidates = candidates;
+    chineseCandidateLoadState = 'loaded';
+  } catch (error) {
+    console.error('Failed to load Chinese pinyin candidates:', error);
+    if (requestId !== chineseCandidateRequestId || currentLanguage !== 'zh' || chineseInputState.draft !== draft) return;
+    chinesePinyinCandidates = [];
+    chineseCandidateLoadState = 'error';
+    chineseInputState = { ...chineseInputState, error: 'Pinyin candidates could not be loaded.' };
+  }
+  renderApp();
+  setupKeyboardListeners();
+  focusChineseInput();
+}
+
+function applyChineseInput(nextState, { loadCandidates = true } = {}) {
+  chineseInputState = nextState;
+  syncChineseGuessState();
+  if (loadCandidates && chineseInputState.source === 'pinyin' && !chineseInputState.selectedWord) {
+    resolveChinesePinyinDraft();
+    return;
+  }
+  chineseCandidateRequestId += 1;
+  chinesePinyinCandidates = [];
+  chineseCandidateLoadState = 'idle';
+  renderApp();
+  setupKeyboardListeners();
+  focusChineseInput();
 }
 
 function getBoardUiGameIdentity() {
@@ -613,6 +726,8 @@ function handleServerMessage(message) {
         const lbLang = message.language || currentLanguage;
         if (lbLang === 'ko') {
           leaderboardKo = message.leaderboard || [];
+        } else if (lbLang === 'zh') {
+          leaderboardZh = message.leaderboard || [];
         } else {
           leaderboardEn = message.leaderboard || [];
         }
@@ -833,10 +948,10 @@ function normalizeRestoredGameState(state, language = currentLanguage) {
   }
 
   let currentGuess = typeof state.currentGuess === 'string' ? state.currentGuess : '';
-  if (language === 'ko') {
-    currentGuess = currentGuess.replace(languageConfig.filterCharRegex, '').slice(0, languageConfig.wordLength);
-  } else {
+  if (language === 'en') {
     currentGuess = currentGuess.toLowerCase().replace(languageConfig.filterCharRegex, '').slice(0, languageConfig.wordLength);
+  } else {
+    currentGuess = currentGuess.normalize('NFC').replace(languageConfig.filterCharRegex, '').slice(0, languageConfig.wordLength);
   }
 
   const maxGuesses = Number.isFinite(state.maxGuesses) ? state.maxGuesses : languageConfig.maxGuesses;
@@ -946,6 +1061,10 @@ function restoreSavedPayload(payload, { markActive = false } = {}) {
   expiredSessionSnapshot = null;
   koreanShiftActive = false;
   imeReset();
+  resetChineseInput(currentLanguage === 'zh' ? gameState.currentGuess : '');
+  if (currentLanguage === 'zh') {
+    ensureChineseDictionaryLoaded(getDictionaryEligibleWords(gameState));
+  }
   lastActivityAt = markActive ? Date.now() : getSavedStateTimestamp(payload);
   setUiScreenFromGameState();
   return true;
@@ -1259,6 +1378,7 @@ function setupLeaveNotification() {
       guildId: discordGuildId,
       channelId: discordChannelId,
       dateKey: getTodayDateKey(),
+      language: currentLanguage,
       profile: userProfile,
       gameState: gameState ? {
         guessCount: gameState.guessCount,
@@ -1337,6 +1457,7 @@ function startNewDailyGame() {
   expiredSessionSnapshot = null;
   koreanShiftActive = false;
   imeReset();
+  resetChineseInput();
   const dateKey = getTodayDateKey();
   currentRoundId = `daily:${dateKey}:${currentLanguage}`;
   roundStartedAt = Date.now();
@@ -1368,11 +1489,10 @@ function startNewPracticeGame() {
   expiredSessionSnapshot = null;
   koreanShiftActive = false;
   imeReset();
+  resetChineseInput();
   currentRoundId = `practice:${crypto.randomUUID()}`;
   roundStartedAt = Date.now();
-  const targetWords = currentLanguage === 'ko'
-    ? getQuordleWordsForLanguage('ko')
-    : getQuordleWords();
+  const targetWords = getQuordleWordsForLanguage(currentLanguage);
   gameState = createGame({ targetWords, language: currentLanguage });
   clearGuessFeedback();
   lastActivityAt = Date.now();
@@ -1520,8 +1640,71 @@ function getCurrentGuessDisplayText() {
   const lang = currentLanguage;
   const display = lang === 'ko'
     ? `${gameState.currentGuess}${compositionDisplayChar()}`
-    : gameState.currentGuess.toUpperCase();
+    : lang === 'zh'
+      ? getChineseInputValue(chineseInputState)
+      : gameState.currentGuess.toUpperCase();
   return display || '-';
+}
+
+function renderChineseGuessControl() {
+  const value = getChineseInputValue(chineseInputState);
+  return `<label class="chinese-input-wrap" for="chinese-guess-input">
+    <span class="sr-only">Chinese characters or pinyin</span>
+    <input
+      class="chinese-guess-input"
+      id="chinese-guess-input"
+      type="text"
+      inputmode="text"
+      autocomplete="off"
+      autocapitalize="none"
+      spellcheck="false"
+      maxlength="32"
+      value="${escapeHtml(value)}"
+      aria-describedby="chinese-input-help"
+      aria-controls="chinese-pinyin-candidates"
+      ${gameState.gameOver ? 'disabled' : ''}
+    />
+    ${chineseInputState.selectedPinyin
+      ? `<span class="chinese-selected-pinyin">${escapeHtml(chineseInputState.selectedPinyin)}</span>`
+      : ''}
+  </label>`;
+}
+
+function renderChinesePinyinCandidates() {
+  if (currentLanguage !== 'zh') return '';
+  if (chineseInputState.error) {
+    return `<div class="chinese-candidate-status chinese-candidate-error" id="chinese-input-help" role="alert">${escapeHtml(chineseInputState.error)}</div>`;
+  }
+  if (chineseInputState.selectedWord) {
+    return `<div class="chinese-input-help" id="chinese-input-help">Press Enter to submit, or Backspace to choose another candidate.</div>`;
+  }
+  if (!chineseInputState.draft) {
+    return `<div class="chinese-input-help" id="chinese-input-help">Type two Simplified Chinese characters or pinyin.</div>`;
+  }
+  if (chineseCandidateLoadState === 'loading') {
+    return `<div class="chinese-candidate-status" id="chinese-input-help" role="status">Finding pinyin candidates…</div>`;
+  }
+  if (chineseCandidateLoadState === 'error') {
+    return `<div class="chinese-candidate-status chinese-candidate-error" id="chinese-input-help" role="alert">${escapeHtml(chineseInputState.error)}</div>`;
+  }
+  if (chineseCandidateLoadState === 'loaded' && chinesePinyinCandidates.length === 0) {
+    return `<div class="chinese-candidate-status" id="chinese-input-help" role="status">No accepted Chinese words match this pinyin.</div>`;
+  }
+  if (chinesePinyinCandidates.length === 0) return '<span id="chinese-input-help" class="sr-only">Pinyin candidates will appear below.</span>';
+  return `<div class="chinese-candidates-shell">
+    <div class="chinese-candidate-summary" id="chinese-input-help" role="status">${chinesePinyinCandidates.length} matching ${chinesePinyinCandidates.length === 1 ? 'word' : 'words'}. Choose one, then press Enter.</div>
+    <div class="chinese-candidates" id="chinese-pinyin-candidates" role="listbox" aria-label="Matching Chinese words">
+      ${chinesePinyinCandidates.map((candidate, index) => `<button
+        type="button"
+        class="chinese-candidate"
+        role="option"
+        data-chinese-candidate="${escapeHtml(candidate.word)}"
+        data-chinese-candidate-index="${index}"
+        data-chinese-pinyin="${escapeHtml(candidate.pinyinMarked)}"
+        aria-label="${escapeHtml(candidate.word)}, ${escapeHtml(candidate.pinyinMarked)}"
+      ><strong lang="zh-Hans">${escapeHtml(candidate.word)}</strong><span>${escapeHtml(candidate.pinyinMarked)}</span></button>`).join('')}
+    </div>
+  </div>`;
 }
 
 function renderResultsLinkButton() {
@@ -1646,8 +1829,40 @@ function ensureKoreanDictionaryLoaded() {
     });
 }
 
+function ensureChineseDictionaryLoaded(words = null) {
+  const eligibleWords = words ?? getDictionaryEligibleWords(gameState);
+  const missingWords = eligibleWords.filter((word) => !getLoadedChineseDictionaryEntry(word));
+  if (missingWords.length === 0) {
+    chineseDictionaryLoadState = 'loaded';
+    chineseDictionaryLoadError = null;
+    return;
+  }
+  if (chineseDictionaryLoadState === 'loading') return;
+  chineseDictionaryLoadState = 'loading';
+  chineseDictionaryLoadError = null;
+  loadChineseDictionaryEntries(missingWords)
+    .then(() => {
+      chineseDictionaryLoadState = 'loaded';
+      if (currentLanguage === 'zh') {
+        renderApp();
+        setupKeyboardListeners();
+        if (activeOverlay) focusActiveOverlay();
+      }
+    })
+    .catch((error) => {
+      console.error('Failed to load Chinese dictionary data:', error);
+      chineseDictionaryLoadState = 'error';
+      chineseDictionaryLoadError = 'Dictionary data could not be loaded.';
+      if (currentLanguage === 'zh') {
+        renderApp();
+        setupKeyboardListeners();
+        if (activeOverlay) focusActiveOverlay();
+      }
+    });
+}
+
 function renderLearningControls() {
-  if (currentLanguage !== 'ko') return '';
+  if (!['ko', 'zh'].includes(currentLanguage)) return '';
   const eligibleWords = getDictionaryEligibleWords(gameState);
   const dictionaryDisabled = eligibleWords.length === 0;
   const hintDisabled = gameState.gameOver || !Number.isInteger(selectedBoardIndex);
@@ -1660,9 +1875,9 @@ function renderLearningControls() {
         aria-controls="${OVERLAY_DICTIONARY}"
         aria-expanded="${activeOverlay === OVERLAY_DICTIONARY}"
         ${dictionaryDisabled ? 'disabled' : ''}
-        aria-label="${dictionaryDisabled ? 'Submit a valid Korean word to use the dictionary' : 'Open dictionary for submitted Korean words'}"
-      >사전 <span aria-hidden="true">⌕</span></button>
-      <button
+        aria-label="${dictionaryDisabled ? `Submit a valid ${currentLanguage === 'zh' ? 'Chinese' : 'Korean'} word to use the dictionary` : `Open dictionary for submitted ${currentLanguage === 'zh' ? 'Chinese' : 'Korean'} words`}"
+      >${currentLanguage === 'zh' ? 'Dictionary' : '사전'} <span aria-hidden="true">⌕</span></button>
+      ${currentLanguage === 'ko' ? `<button
         class="hint-trigger"
         type="button"
         aria-haspopup="dialog"
@@ -1670,7 +1885,7 @@ function renderLearningControls() {
         aria-expanded="${activeOverlay === OVERLAY_HINT}"
         ${hintDisabled ? 'disabled' : ''}
         aria-label="${hintDisabled ? 'Hints are unavailable' : `Open hints for selected board ${selectedBoardIndex + 1}`}"
-      >힌트 <span aria-hidden="true">?</span></button>
+      >힌트 <span aria-hidden="true">?</span></button>` : ''}
     </div>
   `;
 }
@@ -1821,7 +2036,7 @@ function openDictionary(word = null, returnFocusSelector = '.dictionary-trigger'
   if (activeOverlay && activeOverlay !== OVERLAY_DICTIONARY) return;
   const eligibleWords = getDictionaryEligibleWords(
     gameState,
-    dictionarySnapshot?.entries ?? null,
+    currentLanguage === 'ko' ? (dictionarySnapshot?.entries ?? null) : null,
     getDictionarySupplementalWords(),
   );
   if (eligibleWords.length === 0) return;
@@ -1834,7 +2049,8 @@ function openDictionary(word = null, returnFocusSelector = '.dictionary-trigger'
   activeOverlay = OVERLAY_DICTIONARY;
   overlaySize = 'half';
   overlayReturnFocusSelector = returnFocusSelector;
-  ensureKoreanDictionaryLoaded();
+  if (currentLanguage === 'ko') ensureKoreanDictionaryLoaded();
+  else ensureChineseDictionaryLoaded(eligibleWords);
   trackLearningEvent('dictionary_opened', {
     ...(dictionarySelectedWord ? { word: dictionarySelectedWord } : {}),
     surface: dictionaryEntrySource,
@@ -1857,34 +2073,52 @@ function renderDictionarySense(sense, index) {
       <div class="dictionary-sense-heading">
         <span class="dictionary-sense-number">${index + 1}</span>
         <strong>${translations}</strong>
-        <span class="dictionary-part-of-speech">${escapeHtml(sense.partOfSpeech)}</span>
-        <a class="dictionary-sense-source" href="${escapeHtml(sense.sourceUrl)}" target="_blank" rel="noopener noreferrer">Source</a>
+        ${sense.partOfSpeech ? `<span class="dictionary-part-of-speech">${escapeHtml(sense.partOfSpeech)}</span>` : ''}
+        ${sense.sourceUrl ? `<a class="dictionary-sense-source" href="${escapeHtml(sense.sourceUrl)}" target="_blank" rel="noopener noreferrer">Source</a>` : ''}
       </div>
-      <p>${escapeHtml(sense.definition)}</p>
+      ${sense.definition ? `<p>${escapeHtml(sense.definition)}</p>` : ''}
     </li>
   `;
 }
 
 function renderDictionaryEntry(entry, source = dictionaryEntrySource) {
   if (!entry) return '<div class="dictionary-empty">No dictionary entry is available for this word.</div>';
+  const view = currentLanguage === 'zh'
+    ? toChineseDictionaryViewModel(entry)
+    : toKoreanDictionaryViewModel(entry);
+  const languageTag = view.language === 'zh' ? 'zh-Hans' : 'ko';
+  const alternateForms = view.alternateForms.length > 0
+    ? `<div class="dictionary-pronunciation"><span>Traditional</span> <span lang="zh-Hant">${view.alternateForms.map(escapeHtml).join(' · ')}</span></div>`
+    : '';
   return `
-    <article class="dictionary-entry">
+    <article class="dictionary-entry dictionary-entry-${view.language}">
       <div class="dictionary-word-row">
-        <h3 lang="ko">${escapeHtml(entry.word)}</h3>
-        <span class="dictionary-romanization">${escapeHtml(entry.romanization)}</span>
-        ${renderSaveWordButton(entry.word, source)}
+        <h3 lang="${languageTag}">${escapeHtml(view.display)}</h3>
+        ${view.romanization ? `<span class="dictionary-romanization">${escapeHtml(view.romanization)}</span>` : ''}
+        ${renderSaveWordButton(view.normalized, source)}
       </div>
-      ${entry.pronunciation && entry.pronunciation !== entry.word
-        ? `<div class="dictionary-pronunciation"><span>Pronunciation</span> <span lang="ko">${escapeHtml(entry.pronunciation)}</span></div>`
+      ${alternateForms}
+      ${view.numericPronunciation ? `<div class="dictionary-pronunciation"><span>Numbered pinyin</span> ${escapeHtml(view.numericPronunciation)}</div>` : ''}
+      ${view.pronunciation && view.language === 'ko' && view.pronunciation !== view.display
+        ? `<div class="dictionary-pronunciation"><span>Pronunciation</span> <span lang="ko">${escapeHtml(view.pronunciation)}</span></div>`
         : ''}
       <ol class="dictionary-senses">
-        ${entry.senses.map(renderDictionarySense).join('')}
+        ${view.senses.map(renderDictionarySense).join('')}
       </ol>
     </article>
   `;
 }
 
 function renderDictionaryAttribution() {
+  if (currentLanguage === 'zh') {
+    const metadata = chineseDictionaryMetadata;
+    return `<footer class="dictionary-attribution">
+      Chinese dictionary data derived from
+      <a href="${escapeHtml(metadata.dictionaryUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(metadata.source)}</a>
+      (${escapeHtml(metadata.sourceUpdatedAt)}; SHA-256 ${escapeHtml(metadata.sourceSha256)}), licensed under
+      <a href="${escapeHtml(metadata.licenseUrl)}" target="_blank" rel="noopener noreferrer">CC BY-SA 4.0</a>.
+    </footer>`;
+  }
   const metadata = dictionarySnapshot?.metadata;
   if (!metadata) return '';
   return `
@@ -1899,17 +2133,20 @@ function renderDictionaryAttribution() {
 function renderDictionaryOverlay() {
   if (activeOverlay !== OVERLAY_DICTIONARY) return '';
   let body;
-  if (dictionaryLoadState === 'error') {
+  const isChinese = currentLanguage === 'zh';
+  const loadState = isChinese ? chineseDictionaryLoadState : dictionaryLoadState;
+  const loadError = isChinese ? chineseDictionaryLoadError : dictionaryLoadError;
+  if (loadState === 'error') {
     body = `<div class="dictionary-status" role="alert">
-      <p>${escapeHtml(dictionaryLoadError)}</p>
+      <p>${escapeHtml(loadError)}</p>
       <button class="dictionary-retry" type="button">Retry</button>
     </div>`;
-  } else if (!dictionarySnapshot) {
+  } else if ((!isChinese && !dictionarySnapshot) || (isChinese && loadState !== 'loaded')) {
     body = '<div class="dictionary-status" role="status">Loading dictionary…</div>';
   } else {
     const eligibleWords = getDictionaryEligibleWords(
       gameState,
-      dictionarySnapshot.entries,
+      isChinese ? null : dictionarySnapshot.entries,
       getDictionarySupplementalWords(),
     );
     const selectedWord = eligibleWords.includes(dictionarySelectedWord)
@@ -1920,18 +2157,18 @@ function renderDictionaryOverlay() {
       `<option value="${escapeHtml(word)}" ${word === selectedWord ? 'selected' : ''}>${escapeHtml(word)}</option>`
     )).join('');
     body = eligibleWords.length === 0
-      ? '<div class="dictionary-status">Submit a valid Korean word to view its meaning.</div>'
+      ? `<div class="dictionary-status">Submit a valid ${isChinese ? 'Chinese' : 'Korean'} word to view its meaning.</div>`
       : `<div class="dictionary-toolbar">
           <label for="dictionary-word-select">Available word</label>
           <select class="dictionary-word-select" id="dictionary-word-select">${options}</select>
         </div>
-        ${renderDictionaryEntry(getKoreanDictionaryEntry(selectedWord, dictionarySnapshot), dictionaryEntrySource)}
+        ${renderDictionaryEntry(isChinese ? getLoadedChineseDictionaryEntry(selectedWord) : getKoreanDictionaryEntry(selectedWord, dictionarySnapshot), dictionaryEntrySource)}
         ${renderDictionaryAttribution()}`;
   }
 
   return renderOverlaySheet({
     id: OVERLAY_DICTIONARY,
-    title: 'Dictionary · 사전',
+    title: isChinese ? 'Dictionary · 词典' : 'Dictionary · 사전',
     body,
     size: overlaySize,
     className: 'dictionary-sheet',
@@ -1989,7 +2226,7 @@ function bindActiveOverlayInteractions() {
     wordSelect.addEventListener('change', () => {
       const eligibleWords = getDictionaryEligibleWords(
         gameState,
-        dictionarySnapshot?.entries ?? null,
+        currentLanguage === 'ko' ? (dictionarySnapshot?.entries ?? null) : null,
         getDictionarySupplementalWords(),
       );
       if (!eligibleWords.includes(wordSelect.value)) return;
@@ -2012,7 +2249,10 @@ function bindActiveOverlayInteractions() {
     retry.addEventListener('click', () => {
       dictionaryLoadState = 'idle';
       dictionaryLoadError = null;
-      ensureKoreanDictionaryLoaded();
+      chineseDictionaryLoadState = 'idle';
+      chineseDictionaryLoadError = null;
+      if (currentLanguage === 'ko') ensureKoreanDictionaryLoaded();
+      else ensureChineseDictionaryLoaded();
       renderApp();
       setupKeyboardListeners();
       focusActiveOverlay();
@@ -2060,6 +2300,9 @@ function renderGameScreen() {
   const solvedCount = gameState.boards.filter(b => b.solved).length;
   const lang = currentLanguage;
   const currentGuessDisplay = getCurrentGuessDisplayText();
+  const currentGuessControl = lang === 'zh'
+    ? renderChineseGuessControl()
+    : `<span class="guess-text">${currentGuessDisplay}</span>`;
   const selectionAnnouncement = pendingBoardSelectionAnnouncement;
   pendingBoardSelectionAnnouncement = '';
   const errorHtml = renderGuessFeedback();
@@ -2078,7 +2321,7 @@ function renderGameScreen() {
         <div class="game-status game-status-live">
           <div class="game-status-main">
             <span class="game-status-label">Current</span>
-            <span class="guess-text">${currentGuessDisplay}</span>
+            ${currentGuessControl}
           </div>
         </div>
         ${errorHtml}
@@ -2089,6 +2332,7 @@ function renderGameScreen() {
     <div class="lang-toggle">
       <button class="lang-btn ${lang === 'en' ? 'lang-btn-active' : ''}" data-lang="en">🇺🇸 EN</button>
       <button class="lang-btn ${lang === 'ko' ? 'lang-btn-active' : ''}" data-lang="ko">🇰🇷 KO</button>
+      <button class="lang-btn ${lang === 'zh' ? 'lang-btn-active' : ''}" data-lang="zh">🇨🇳 ZH</button>
     </div>
   `;
   const headerStats = `
@@ -2103,7 +2347,7 @@ function renderGameScreen() {
   `;
 
   app.innerHTML = `
-    <div class="quordle-container ${lang === 'ko' ? 'lang-ko' : 'lang-en'}">
+    <div class="quordle-container lang-${lang}">
       <div class="game-header">
         <h1 class="game-title">Quordle${gameMode === 'practice' ? ' <span class="mode-badge">Practice</span>' : ''}</h1>
         <div class="game-header-actions">
@@ -2121,6 +2365,7 @@ function renderGameScreen() {
 
       <section class="game-input-dock" aria-label="Guess controls">
         ${statusHtml}
+        ${renderChinesePinyinCandidates()}
         ${renderLearningControls()}
         ${currentLanguage === 'ko' ? renderKoreanKeyboard() : renderKeyboard()}
       </section>
@@ -2198,8 +2443,56 @@ function renderKoreanLearningReview() {
   </div>`;
 }
 
+function renderChineseLearningReview() {
+  const answerWords = gameState.boards.map((board) => board.targetWord);
+  ensureChineseDictionaryLoaded(answerWords);
+  if (chineseDictionaryLoadState === 'error') {
+    return `<div class="answers-reveal chinese-learning-review">
+      <div class="answers-title">答案 · Answer review</div>
+      <div class="dictionary-status" role="alert">
+        <p>${escapeHtml(chineseDictionaryLoadError)}</p>
+        <button class="dictionary-inline-retry" type="button">Retry</button>
+      </div>
+    </div>`;
+  }
+  if (answerWords.some((word) => !getLoadedChineseDictionaryEntry(word))) {
+    return `<div class="answers-reveal chinese-learning-review">
+      <div class="answers-title">答案 · Answer review</div>
+      <div class="dictionary-status" role="status">Loading answer meanings…</div>
+    </div>`;
+  }
+
+  const cards = gameState.boards.map((board, index) => {
+    const entry = getLoadedChineseDictionaryEntry(board.targetWord);
+    const primary = getPrimaryChinesePronunciation(entry);
+    const [firstSense, ...additional] = entry?.senses ?? [];
+    return `<article class="learning-card ${board.solved ? 'answer-solved' : 'answer-missed'}" data-review-word="${escapeHtml(board.targetWord)}">
+      <div class="learning-card-header">
+        <span class="learning-card-number">#${index + 1}</span>
+        <div><strong lang="zh-Hans">${escapeHtml(entry?.word ?? board.targetWord)}</strong><span>${escapeHtml(primary?.pinyinMarked ?? '')}</span></div>
+        <span class="answer-status" aria-label="${board.solved ? 'Solved' : 'Missed'}">${board.solved ? '✓' : '✗'}</span>
+      </div>
+      ${firstSense ? `<div class="learning-card-primary"><strong>${(firstSense.glosses ?? []).map(escapeHtml).join('; ')}</strong></div>` : '<p>Definition unavailable.</p>'}
+      ${additional.length > 0 ? `<details class="learning-card-more">
+        <summary>${additional.length} more ${additional.length === 1 ? 'meaning' : 'meanings'}</summary>
+        <ol>${additional.map((sense) => `<li>${(sense.glosses ?? []).map(escapeHtml).join('; ')}</li>`).join('')}</ol>
+      </details>` : ''}
+      <div class="learning-card-actions">
+        <button class="learning-card-open" type="button" data-dictionary-word="${escapeHtml(entry.word)}">Full entry</button>
+        ${renderSaveWordButton(entry.word, 'post-game')}
+      </div>
+    </article>`;
+  }).join('');
+
+  return `<div class="answers-reveal chinese-learning-review">
+    <div class="answers-title">答案 · Answer review</div>
+    <div class="learning-card-list">${cards}</div>
+    ${renderDictionaryAttribution()}
+  </div>`;
+}
+
 function renderSavedWordsCollection() {
-  if (currentLanguage !== 'ko' || !gameState?.gameOver) return '';
+  if (!['ko', 'zh'].includes(currentLanguage) || !gameState?.gameOver) return '';
   if (savedWordsLoadState === 'idle' || savedWordsLoadState === 'loading') {
     return `<section class="saved-words-collection" aria-labelledby="saved-words-title">
       <div class="answers-title" id="saved-words-title">Saved Words</div>
@@ -2215,26 +2508,45 @@ function renderSavedWordsCollection() {
       </div>
     </section>`;
   }
-  if (!dictionarySnapshot) {
+  if (currentLanguage === 'ko' && !dictionarySnapshot) {
     ensureKoreanDictionaryLoaded();
     return `<section class="saved-words-collection" aria-labelledby="saved-words-title">
       <div class="answers-title" id="saved-words-title">Saved Words</div>
       <div class="dictionary-status" role="status">Loading saved vocabulary…</div>
     </section>`;
   }
-  const collection = getSavedWordsForResults(gameState, savedWords, dictionarySnapshot.entries);
+  if (currentLanguage === 'zh') {
+    const savedChineseWords = savedWords.map((record) => record.word);
+    ensureChineseDictionaryLoaded(savedChineseWords);
+    if (savedChineseWords.some((word) => !getLoadedChineseDictionaryEntry(word))) {
+      return `<section class="saved-words-collection" aria-labelledby="saved-words-title">
+        <div class="answers-title" id="saved-words-title">Saved Words</div>
+        <div class="dictionary-status" role="status">Loading saved vocabulary…</div>
+      </section>`;
+    }
+  }
+  const dictionaryEntries = currentLanguage === 'ko'
+    ? dictionarySnapshot.entries
+    : Object.fromEntries(savedWords.map((record) => [record.word, getLoadedChineseDictionaryEntry(record.word)]).filter(([, entry]) => entry));
+  const collection = getSavedWordsForResults(gameState, savedWords, dictionaryEntries);
   const storageNote = savedWordsLoadState === 'loaded-local'
     ? '<p class="saved-words-storage-note">Saved on this device only.</p>'
     : '';
   const cards = collection.map((record) => {
-    const entry = getKoreanDictionaryEntry(record.word, dictionarySnapshot);
-    const primary = entry?.senses?.[0];
-    if (!entry || !primary) return '';
+    const entry = currentLanguage === 'ko'
+      ? getKoreanDictionaryEntry(record.word, dictionarySnapshot)
+      : getLoadedChineseDictionaryEntry(record.word);
+    const primarySense = entry?.senses?.[0];
+    if (!entry || !primarySense) return '';
+    const label = currentLanguage === 'ko'
+      ? entry.romanization
+      : getPrimaryChinesePronunciation(entry)?.pinyinMarked;
+    const translations = currentLanguage === 'ko' ? primarySense.translations : primarySense.glosses;
     return `<article class="saved-word-card">
       <div class="saved-word-copy">
-        <strong lang="ko">${escapeHtml(entry.word)}</strong>
-        <span>${escapeHtml(entry.romanization)}</span>
-        <p>${primary.translations.map(escapeHtml).join('; ')}</p>
+        <strong lang="${currentLanguage === 'ko' ? 'ko' : 'zh-Hans'}">${escapeHtml(entry.word)}</strong>
+        <span>${escapeHtml(label)}</span>
+        <p>${(translations ?? []).map(escapeHtml).join('; ')}</p>
       </div>
       <div class="saved-word-actions">
         <button type="button" class="learning-card-open" data-dictionary-word="${escapeHtml(entry.word)}">Full entry</button>
@@ -2246,14 +2558,14 @@ function renderSavedWordsCollection() {
     <div class="answers-title" id="saved-words-title">Saved Words <span>${collection.length}</span></div>
     ${storageNote}
     ${savedWordsError ? `<p class="saved-words-inline-error" role="alert">${escapeHtml(savedWordsError)}</p>` : ''}
-    ${cards || '<p class="saved-words-empty">Save Korean words from the dictionary or answer review to build your collection.</p>'}
+    ${cards || `<p class="saved-words-empty">Save ${currentLanguage === 'zh' ? 'Chinese' : 'Korean'} words from the dictionary or answer review to build your collection.</p>`}
   </section>`;
 }
 
 function setupPostGameReviewObserver() {
   reviewObserver?.disconnect();
   reviewObserver = null;
-  if (currentLanguage !== 'ko' || !gameState?.gameOver || typeof IntersectionObserver !== 'function') return;
+  if (!['ko', 'zh'].includes(currentLanguage) || !gameState?.gameOver || typeof IntersectionObserver !== 'function') return;
   reviewObserver = new IntersectionObserver((entries, observer) => {
     entries.forEach((entry) => {
       if (!entry.isIntersecting || entry.intersectionRatio < 0.5) return;
@@ -2275,18 +2587,19 @@ function renderResultsScreen() {
   const message = gameState.won ? 'You Won!' : 'Game Over';
   const bannerClass = gameState.won ? 'results-won' : 'results-lost';
   const lang = currentLanguage;
-  if (lang === 'ko') trackLearningEvent('post_game_review_opened', {}, 'post-game-review-opened');
+  if (['ko', 'zh'].includes(lang)) trackLearningEvent('post_game_review_opened', {}, 'post-game-review-opened');
 
   // Language toggle
   const langToggle = `
     <div class="lang-toggle">
       <button class="lang-btn ${lang === 'en' ? 'lang-btn-active' : ''}" data-lang="en">🇺🇸 EN</button>
       <button class="lang-btn ${lang === 'ko' ? 'lang-btn-active' : ''}" data-lang="ko">🇰🇷 KO</button>
+      <button class="lang-btn ${lang === 'zh' ? 'lang-btn-active' : ''}" data-lang="zh">🇨🇳 ZH</button>
     </div>
   `;
 
   // Answers reveal (always show on results)
-  const answersHtml = lang === 'ko' ? renderKoreanLearningReview() : `
+  const answersHtml = lang === 'ko' ? renderKoreanLearningReview() : lang === 'zh' ? renderChineseLearningReview() : `
     <div class="answers-reveal">
       <div class="answers-title">Answers</div>
       <div class="answers-list">
@@ -2309,7 +2622,7 @@ function renderResultsScreen() {
     : '';
 
   app.innerHTML = `
-    <div class="quordle-container ${lang === 'ko' ? 'lang-ko' : 'lang-en'}">
+    <div class="quordle-container lang-${lang}">
       <div class="game-header">
         <h1 class="game-title">Quordle${gameMode === 'practice' ? ' <span class="mode-badge">Practice</span>' : ''}</h1>
         <div class="game-header-actions">
@@ -2319,7 +2632,7 @@ function renderResultsScreen() {
       </div>
       
       <div class="results-screen">
-        <div class="results-card ${bannerClass} ${lang === 'ko' ? 'results-card-learning' : ''}">
+        <div class="results-card ${bannerClass} ${['ko', 'zh'].includes(lang) ? 'results-card-learning' : ''}">
           <div class="results-icon">${icon}</div>
           <div class="results-message">${message}</div>
           <div class="results-stats">
@@ -2375,7 +2688,7 @@ function renderExpiredScreen() {
     : '';
 
   app.innerHTML = `
-    <div class="quordle-container ${currentLanguage === 'ko' ? 'lang-ko' : 'lang-en'}">
+    <div class="quordle-container lang-${currentLanguage}">
       <div class="game-header">
         <h1 class="game-title">Quordle</h1>
         <div class="game-header-actions">
@@ -2419,25 +2732,23 @@ function renderLeaderboard() {
   }
 }
 
-/** Fetch the other language's leaderboard via REST API */
+/** Fetch the other languages' leaderboards via REST API. */
 function fetchOtherLanguageLeaderboard() {
   if (!discordRoomId) return;
   const dateKey = getTodayDateKey();
-  const otherLang = currentLanguage === 'ko' ? 'en' : 'ko';
-  const url = `${API_URL}/api/room/${discordRoomId}/${dateKey}/leaderboard?language=${otherLang}`;
-  fetch(url)
-    .then(res => res.ok ? res.json() : null)
-    .then(data => {
-      if (data && data.leaderboard) {
-        if (otherLang === 'ko') {
-          leaderboardKo = data.leaderboard;
-        } else {
-          leaderboardEn = data.leaderboard;
-        }
+  ['en', 'ko', 'zh'].filter((language) => language !== currentLanguage).forEach((language) => {
+    const url = `${API_URL}/api/room/${discordRoomId}/${dateKey}/leaderboard?language=${language}`;
+    fetch(url)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (!data?.leaderboard) return;
+        if (language === 'ko') leaderboardKo = data.leaderboard;
+        else if (language === 'zh') leaderboardZh = data.leaderboard;
+        else leaderboardEn = data.leaderboard;
         renderLeaderboard();
-      }
-    })
-    .catch(err => console.warn('Failed to fetch other language leaderboard:', err));
+      })
+      .catch(err => console.warn(`Failed to fetch ${language} leaderboard:`, err));
+  });
 }
 
 function renderLeaderboardEntries(leaderboard) {
@@ -2499,12 +2810,12 @@ function renderSingleLeaderboard(title, leaderboard) {
 function renderLeaderboardContent() {
   const enHtml = renderSingleLeaderboard('English Leaderboard', leaderboardEn);
   const koHtml = renderSingleLeaderboard('Korean Leaderboard', leaderboardKo);
+  const zhHtml = renderSingleLeaderboard('Chinese Leaderboard', leaderboardZh);
 
   // Show the current language's leaderboard first
-  if (currentLanguage === 'ko') {
-    return koHtml + enHtml;
-  }
-  return enHtml + koHtml;
+  if (currentLanguage === 'ko') return koHtml + zhHtml + enHtml;
+  if (currentLanguage === 'zh') return zhHtml + koHtml + enHtml;
+  return enHtml + koHtml + zhHtml;
 }
 
 // renderBanner removed — game status is now inline in renderGameScreen,
@@ -2529,7 +2840,10 @@ function renderBoardRegion() {
 function renderSolvedBoardCard(board, index) {
   const expanded = expandedSolvedBoardIndex === index;
   const solvedGuessCount = board.solvedOnGuess ?? board.guesses.length;
-  const answer = currentLanguage === 'ko' ? board.targetWord : board.targetWord.toUpperCase();
+  const answer = currentLanguage === 'en' ? board.targetWord.toUpperCase() : board.targetWord;
+  const chinesePronunciation = currentLanguage === 'zh'
+    ? getPrimaryChinesePronunciation(getLoadedChineseDictionaryEntry(board.targetWord))
+    : null;
   const historyId = `solved-board-history-${index}`;
   const rows = [];
   const visibleGuessCount = Math.min(solvedGuessCount, board.guesses.length);
@@ -2552,10 +2866,11 @@ function renderSolvedBoardCard(board, index) {
         <span class="solved-board-check" aria-hidden="true">✓</span>
         <span class="solved-board-number">#${index + 1}</span>
         <strong class="solved-board-answer">${answer}</strong>
+        ${chinesePronunciation ? `<span class="solved-board-pinyin">${escapeHtml(chinesePronunciation.pinyinMarked)}</span>` : ''}
         <span class="solved-board-meta">${solvedGuessCount} ${solvedGuessCount === 1 ? 'guess' : 'guesses'}</span>
         <span class="solved-board-chevron" aria-hidden="true">${expanded ? '▴' : '▾'}</span>
       </button>
-      ${currentLanguage === 'ko' ? `<button
+      ${['ko', 'zh'].includes(currentLanguage) ? `<button
         class="solved-board-meaning"
         type="button"
         data-dictionary-word="${escapeHtml(board.targetWord)}"
@@ -2619,7 +2934,13 @@ function renderActiveBoard(board, index) {
 function renderRow(guess, result, isCurrent = false, isCondensed = false, koResult = null) {
   const lang = currentLanguage;
   const wordLen = getLanguageConfig(lang).wordLength;
-  const chars = lang === 'ko' ? Array.from(guess.padEnd(wordLen, ' ')) : guess.padEnd(wordLen, ' ').split('');
+  const chars = lang === 'en' ? guess.padEnd(wordLen, ' ').split('') : Array.from(guess.padEnd(wordLen, ' '));
+  const chinesePronunciation = lang === 'zh'
+    ? (isCurrent && chineseInputState.selectedPinyin
+      ? chineseInputState.selectedPinyin
+      : getPrimaryChinesePronunciation(getLoadedChineseDictionaryEntry(guess.trim()))?.pinyinMarked)
+    : null;
+  const chineseSyllables = chinesePronunciation?.split(/\s+/u) ?? [];
 
   const tiles = chars.map((ch, i) => {
     let tileClass = 'tile';
@@ -2629,7 +2950,7 @@ function renderRow(guess, result, isCurrent = false, isCondensed = false, koResu
       tileClass += ' tile-filled';
     }
 
-    const display = lang === 'ko' ? ch.trim() : ch.trim().toUpperCase();
+    const display = lang === 'en' ? ch.trim().toUpperCase() : ch.trim();
 
     let jamoHintHtml = '';
     if (lang === 'ko' && koResult && koResult[i] && koResult[i].jamoHints && result && result[i] !== 'correct') {
@@ -2645,7 +2966,10 @@ function renderRow(guess, result, isCurrent = false, isCondensed = false, koResu
       }
     }
 
-    return `<div class="${tileClass}">${display}${jamoHintHtml}</div>`;
+    const pinyinHtml = lang === 'zh' && chineseSyllables[i]
+      ? `<span class="tile-pinyin">${escapeHtml(chineseSyllables[i])}</span>`
+      : '';
+    return `<div class="${tileClass}">${display}${jamoHintHtml}${pinyinHtml}</div>`;
   }).join('');
 
   const rowClass = isCondensed ? 'row row-condensed' : 'row';
@@ -2977,7 +3301,44 @@ function handleKeyPress(key) {
   const lang = currentLanguage;
   const wordLen = getLanguageConfig(lang).wordLength;
 
-  if (lang === 'ko') {
+  if (lang === 'zh') {
+    if (key === KEY_ENTER) {
+      const guess = chineseInputState.selectedWord.normalize('NFC');
+      if (Array.from(guess).length !== wordLen) {
+        chineseInputState = {
+          ...chineseInputState,
+          error: chineseInputState.draft
+            ? 'Choose a matching Chinese word before pressing Enter.'
+            : 'Enter a two-character Simplified Chinese word.',
+        };
+        setMessageFeedback(chineseInputState.error, 'word-list-error');
+        renderApp();
+        setupKeyboardListeners();
+        focusChineseInput();
+        return;
+      }
+      if (!isValidGuessForLanguage(guess, 'zh')) {
+        setMessageFeedback('Not in the Chinese word list', 'word-list-error');
+        if (gameMode === 'daily') reportDailyInvalidGuess(guess);
+        else trackLearningEvent('invalid_guess_submitted', { classification: 'not-in-list' });
+        renderApp();
+        setupKeyboardListeners();
+        focusChineseInput();
+        return;
+      }
+      const validation = validateGuess(guess, 'zh');
+      if (validation.valid) {
+        clearGuessFeedback();
+        submitGuessWithPersistence(guess);
+      }
+    } else if (key === KEY_BACKSPACE) {
+      clearGuessFeedback();
+      applyChineseInput(backspaceChineseInput(chineseInputState));
+    } else if (key.length === 1 && /^[A-Z]$/i.test(key)) {
+      clearGuessFeedback();
+      applyChineseInput(appendChinesePinyinKey(chineseInputState, key));
+    }
+  } else if (lang === 'ko') {
     // ===== Korean mode =====
     if (key === KEY_SHIFT) {
       koreanShiftActive = !koreanShiftActive;
@@ -3098,12 +3459,20 @@ function recordPracticeGuessTransition(previousState, nextState, guess) {
 }
 
 async function submitGuessWithPersistence(guess) {
+  if (currentLanguage === 'zh') {
+    try {
+      await loadChineseDictionaryEntry(guess);
+    } catch (error) {
+      console.warn('Chinese pronunciation could not be loaded for the guess row:', error);
+    }
+  }
   // Immediately clear currentGuess to prevent double-submit.
   // In the WS path, state update is async (server responds with STATE),
   // so without this, a rapid second Enter press would pass the length === 5
   // guard in handleKeyPress and send the same guess again.
   clearGuessFeedback();
   gameState = setCurrentGuess(gameState, '');
+  if (currentLanguage === 'zh') resetChineseInput();
   const previousGameState = gameState;
   koreanShiftActive = false;
   renderApp();
@@ -3241,7 +3610,10 @@ function setupKeyboardListeners() {
     inlineRetry.addEventListener('click', () => {
       dictionaryLoadState = 'idle';
       dictionaryLoadError = null;
-      ensureKoreanDictionaryLoaded();
+      chineseDictionaryLoadState = 'idle';
+      chineseDictionaryLoadError = null;
+      if (currentLanguage === 'ko') ensureKoreanDictionaryLoaded();
+      else if (currentLanguage === 'zh') ensureChineseDictionaryLoaded(gameState.boards.map((board) => board.targetWord));
       renderApp();
       setupKeyboardListeners();
     });
@@ -3258,6 +3630,39 @@ function setupKeyboardListeners() {
   }
 
   bindActiveOverlayInteractions();
+
+  const chineseInput = document.querySelector('.chinese-guess-input');
+  if (chineseInput) {
+    chineseInput.addEventListener('compositionstart', () => {
+      chineseCompositionActive = true;
+    });
+    chineseInput.addEventListener('compositionend', () => {
+      chineseCompositionActive = false;
+      clearGuessFeedback();
+      applyChineseInput(updateChineseInput(chineseInputState, chineseInput.value));
+    });
+    chineseInput.addEventListener('input', () => {
+      if (chineseCompositionActive) return;
+      clearGuessFeedback();
+      applyChineseInput(updateChineseInput(chineseInputState, chineseInput.value));
+    });
+  }
+
+  document.querySelectorAll('[data-chinese-candidate]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const candidate = chinesePinyinCandidates[Number(button.dataset.chineseCandidateIndex)];
+      if (!candidate) return;
+      clearGuessFeedback();
+      applyChineseInput(selectChineseCandidate(chineseInputState, candidate), { loadCandidates: false });
+    });
+    button.addEventListener('keydown', (event) => {
+      if (!['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft'].includes(event.key)) return;
+      event.preventDefault();
+      const buttons = [...document.querySelectorAll('[data-chinese-candidate]')];
+      const offset = ['ArrowDown', 'ArrowRight'].includes(event.key) ? 1 : -1;
+      buttons[(buttons.indexOf(button) + offset + buttons.length) % buttons.length]?.focus();
+    });
+  });
 
   // On-screen keyboard
   document.querySelectorAll('.key').forEach(btn => {
@@ -3362,9 +3767,23 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
+  if (currentLanguage === 'zh' && e.target?.matches?.('[data-chinese-candidate]') && e.key === 'Enter') {
+    return;
+  }
+  if (currentLanguage === 'zh' && e.target?.matches?.('.chinese-guess-input')) {
+    if (e.isComposing || chineseCompositionActive) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleKeyPress(KEY_ENTER);
+    }
+    return;
+  }
+
   if (e.key === 'Enter') {
+    e.preventDefault();
     handleKeyPress(KEY_ENTER);
   } else if (e.key === 'Backspace') {
+    e.preventDefault();
     handleKeyPress(KEY_BACKSPACE);
   } else if (currentLanguage === 'ko') {
     const ch = e.key;
@@ -3380,6 +3799,7 @@ document.addEventListener('keydown', (e) => {
       handleKeyPress(ch);
     }
   } else if (/^[a-zA-Z]$/.test(e.key)) {
+    e.preventDefault();
     handleKeyPress(e.key.toUpperCase());
   }
 });
@@ -3399,7 +3819,7 @@ window.resetGame = resetGame; // Keep for backwards compat
 
 // Switch language mode
 function switchLanguage(newLang) {
-  if (newLang === currentLanguage) return;
+  if (!SUPPORTED_LANGUAGES.has(newLang) || newLang === currentLanguage) return;
 
   // Save current game before switching
   saveGameState();
@@ -3413,7 +3833,13 @@ function switchLanguage(newLang) {
   expiredSessionSnapshot = null;
   koreanShiftActive = false;
   imeReset();
+  resetChineseInput();
   clearGuessFeedback();
+  savedWords = [];
+  savedWordsLoadState = 'idle';
+  savedWordsError = null;
+  pendingSavedWord = null;
+  loadSavedWords();
 
   // Try to load existing game for the new language
   if (gameMode === 'daily') {
@@ -3451,9 +3877,7 @@ function switchLanguage(newLang) {
     } else {
       currentRoundId = `practice:${crypto.randomUUID()}`;
       roundStartedAt = Date.now();
-      const targetWords = currentLanguage === 'ko'
-        ? getQuordleWordsForLanguage('ko')
-        : getQuordleWords();
+      const targetWords = getQuordleWordsForLanguage(currentLanguage);
       gameState = createGame({ targetWords, language: currentLanguage });
       uiScreen = "game";
       lastActivityAt = Date.now();

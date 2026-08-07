@@ -8,6 +8,7 @@ import {
   getOptimisticSavedWordToggle,
   getSavedWordButtonState,
   getSavedDictionarySupplementalWords,
+  LOCAL_SAVED_WORDS_KEY,
   getSavedWordsForResults,
   readLocalSavedWords,
   removeLocalSavedWord,
@@ -68,11 +69,25 @@ test('local Saved Words are idempotent, newest-first, and removable', () => {
   assert.deepEqual(removeLocalSavedWord(storage, '기차').map((entry) => entry.word), ['기관']);
 });
 
+test('legacy Korean Saved Words migrate once and remain isolated from Chinese', () => {
+  const storage = memoryStorage();
+  storage.setItem(LOCAL_SAVED_WORDS_KEY, JSON.stringify([
+    { word: '기관', savedAt: 10, source: 'dictionary' },
+  ]));
+  assert.deepEqual(readLocalSavedWords(storage, 'ko').map((entry) => entry.word), ['기관']);
+  upsertLocalSavedWord(storage, '学生', 'dictionary', 20, 'zh');
+  assert.deepEqual(readLocalSavedWords(storage, 'zh').map((entry) => entry.word), ['学生']);
+  assert.deepEqual(readLocalSavedWords(storage, 'ko').map((entry) => entry.word), ['기관']);
+  removeLocalSavedWord(storage, '기관', 'ko');
+  assert.deepEqual(readLocalSavedWords(storage, 'ko'), []);
+});
+
 test('complete Saved Words collection is results-only', () => {
   const words = [{ word: '기관', savedAt: 1 }];
   const entries = { 기관: { word: '기관' } };
   assert.deepEqual(getSavedWordsForResults({ gameOver: false, language: 'ko' }, words, entries), []);
   assert.deepEqual(getSavedWordsForResults({ gameOver: true, language: 'ko' }, words, entries), words);
+  assert.deepEqual(getSavedWordsForResults({ gameOver: true, language: 'zh' }, words, entries), []);
   assert.deepEqual(getSavedDictionarySupplementalWords({ gameOver: false }, words), []);
   assert.deepEqual(getSavedDictionarySupplementalWords({ gameOver: true }, words), ['기관']);
 });

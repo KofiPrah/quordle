@@ -11,6 +11,7 @@ import { fileURLToPath } from "url";
 import Redis from "ioredis";
 import { evaluateGuessKo } from "@quordle/engine/evaluatorKo";
 import { KO_ANSWER_WORDS, isValidKoreanGuess } from "@quordle/engine/koreanLexicon";
+import { ZH_ANSWER_WORDS, isValidChineseGuess } from "@quordle/engine/chineseLexicon";
 import { calculatePerformanceMetrics, normalizeAssistanceState } from "@quordle/engine/assistance";
 import { requestKoreanHint } from "@quordle/engine/koreanHints";
 import { createLearningDataService } from "./learningData.js";
@@ -38,10 +39,27 @@ const ANALYTICS_ADMIN_TOKEN = process.env.ANALYTICS_ADMIN_TOKEN || '';
 const ALLOW_DEV_SESSION = process.env.NODE_ENV !== 'production'
   && ['1', 'true'].includes(String(process.env.ALLOW_DEV_SESSION).toLowerCase());
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SUPPORTED_LANGUAGES = new Set(['en', 'ko', 'zh']);
 const LEARNING_CONFIGURATION_COMPLETE = LEARNING_ANALYTICS_ENABLED
   && Boolean(APP_SESSION_SECRET)
   && Boolean(ANALYTICS_HMAC_SECRET)
   && Boolean(ANALYTICS_ADMIN_TOKEN);
+
+function parseLanguage(value) {
+  if (value === undefined || value === null || value === '') return { ok: true, language: 'en' };
+  if (SUPPORTED_LANGUAGES.has(value)) return { ok: true, language: value };
+  return { ok: false, language: null };
+}
+
+function normalizeGuessForLanguage(guess, language) {
+  return language === 'en' ? String(guess ?? '').toLowerCase() : String(guess ?? '').normalize('NFC');
+}
+
+function parseSavedWordsLanguage(value) {
+  if (value === undefined || value === null || value === '') return { ok: true, language: 'ko' };
+  if (value === 'ko' || value === 'zh') return { ok: true, language: value };
+  return { ok: false, language: null };
+}
 
 let koreanRecognitionWords = Object.freeze({});
 let englishGuessWords = new Set();
@@ -129,6 +147,7 @@ const learningData = createLearningDataService({
   redisProvider: () => hasRedisConnection() ? redis : null,
   allowMemoryFallback: process.env.NODE_ENV === 'test',
   isAcceptedKoreanWord: isValidKoreanGuess,
+  isAcceptedChineseWord: isValidChineseGuess,
   isRecognizedKoreanWord: (word) => Boolean(koreanRecognitionWords[word]),
 });
 
@@ -147,7 +166,7 @@ function learningRoute(handler) {
 }
 
 function learningEventBase(player, overrides = {}) {
-  const language = player.language === 'ko' ? 'ko' : 'en';
+  const language = SUPPORTED_LANGUAGES.has(player.language) ? player.language : 'en';
   const dateKey = player.dateKey;
   return {
     version: 1,
@@ -201,11 +220,12 @@ async function recordDailyGuessTransition(player, previousGameState, nextGameSta
     }
   }
 
-  if (player.language === 'ko') {
+  if (['ko', 'zh'].includes(player.language)) {
     await learningData.markSavedWordLaterGuessed(player.visibleUserId, guess, {
+      language: player.language,
       dateKey: player.dateKey,
       mode: 'daily',
-      roundId: `daily:${player.dateKey}:ko`,
+      roundId: `daily:${player.dateKey}:${player.language}`,
       roundStartedAt: player.createdAt,
     }).catch((error) => console.warn('[Learning] Saved-word recall failed:', error.message));
   }
@@ -252,10 +272,8 @@ async function recordDailyInvalidGuess(player, guess, attemptId) {
   if (!player || typeof attemptId !== 'string' || !UUID_RE.test(attemptId)) return;
   if (learningData.available()
     && !(await learningData.checkRateLimit(player.visibleUserId, 'daily-invalid', 60))) return;
-  const language = player.language === 'ko' ? 'ko' : 'en';
-  const normalizedGuess = language === 'ko'
-    ? String(guess ?? '').normalize('NFC')
-    : String(guess ?? '').toLowerCase();
+  const language = SUPPORTED_LANGUAGES.has(player.language) ? player.language : 'en';
+  const normalizedGuess = normalizeGuessForLanguage(guess, language);
   const recognizedKorean = language === 'ko'
     && /^[\uAC00-\uD7A3]{2}$/u.test(normalizedGuess)
     && !isValidKoreanGuess(normalizedGuess)
@@ -682,7 +700,12 @@ wss.on("connection", (ws, req) => {
         // ===== NEW PROTOCOL =====
         case "JOIN": {
           const { roomId, dateKey, visibleUserId, profile, guildId, language: msgLanguage } = message;
-          const language = (msgLanguage === 'ko') ? 'ko' : 'en';
+          const parsedLanguage = parseLanguage(msgLanguage);
+          if (!parsedLanguage.ok) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_LANGUAGE', message: 'Unsupported language' }));
+            return;
+          }
+          const language = parsedLanguage.language;
           if (!roomId || !dateKey || !visibleUserId) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing required fields' }));
             return;
@@ -779,16 +802,19 @@ wss.on("connection", (ws, req) => {
           const {
             roomId, dateKey, visibleUserId, guess, attemptId, language: guessLanguage,
           } = message;
-          const language = guessLanguage === 'ko' ? 'ko' : 'en';
+          const parsedLanguage = parseLanguage(guessLanguage);
+          if (!parsedLanguage.ok) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_LANGUAGE', message: 'Unsupported language' }));
+            return;
+          }
+          const language = parsedLanguage.language;
           if (!roomId || !dateKey || !visibleUserId || !guess || !UUID_RE.test(String(attemptId ?? ''))) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing or invalid fields' }));
             return;
           }
           const playerState = getPlayer(roomId, dateKey, visibleUserId, language);
           if (!playerState || playerState.gameState.gameOver) return;
-          const normalizedGuess = language === 'ko'
-            ? String(guess).normalize('NFC')
-            : String(guess).toLowerCase();
+          const normalizedGuess = normalizeGuessForLanguage(guess, language);
           if (isValidGuessFormat(normalizedGuess, language)) return;
           await recordDailyInvalidGuess(playerState, guess, attemptId);
           ws.send(JSON.stringify({ type: 'ANALYTICS_ACK', event: 'invalid_guess', attemptId }));
@@ -797,7 +823,12 @@ wss.on("connection", (ws, req) => {
 
         case "GUESS": {
           const { roomId, dateKey, visibleUserId, guess, language: guessLanguage } = message;
-          const language = (guessLanguage === 'ko') ? 'ko' : 'en';
+          const parsedLanguage = parseLanguage(guessLanguage);
+          if (!parsedLanguage.ok) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_LANGUAGE', message: 'Unsupported language' }));
+            return;
+          }
+          const language = parsedLanguage.language;
           if (!roomId || !dateKey || !visibleUserId || !guess) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing required fields' }));
             return;
@@ -815,7 +846,7 @@ wss.on("connection", (ws, req) => {
           }
 
           // Validate guess
-          const normalizedGuess = language === 'ko' ? guess : guess.toLowerCase();
+          const normalizedGuess = normalizeGuessForLanguage(guess, language);
           if (!isValidGuessFormat(normalizedGuess, language)) {
             await recordDailyInvalidGuess(
               playerState,
@@ -823,7 +854,8 @@ wss.on("connection", (ws, req) => {
               UUID_RE.test(String(message.attemptId ?? '')) ? message.attemptId : crypto.randomUUID(),
             );
             const expectedLen = getWordLengthForLanguage(language);
-            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_GUESS', message: `Guess must be ${expectedLen} ${language === 'ko' ? 'syllables' : 'letters'}` }));
+            const units = language === 'en' ? 'letters' : language === 'ko' ? 'syllables' : 'characters';
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_GUESS', message: `Guess must be ${expectedLen} ${units}` }));
             return;
           }
 
@@ -981,7 +1013,12 @@ wss.on("connection", (ws, req) => {
           if (!roomId || !dateKey || !visibleUserId) {
             return;
           }
-          const leaveLanguage = (leaveLang === 'ko') ? 'ko' : currentLanguage;
+          const parsedLanguage = leaveLang === undefined ? { ok: true, language: currentLanguage } : parseLanguage(leaveLang);
+          if (!parsedLanguage.ok) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_LANGUAGE', message: 'Unsupported language' }));
+            return;
+          }
+          const leaveLanguage = parsedLanguage.language;
           handleLeave(roomId, dateKey, visibleUserId, ws, leaveLanguage);
           break;
         }
@@ -1177,12 +1214,14 @@ const WORD_LIST = [
 
 /** Get word list for a given language */
 function getWordListForLanguage(language) {
-  return language === 'ko' ? KO_ANSWER_WORDS : WORD_LIST;
+  if (language === 'ko') return KO_ANSWER_WORDS;
+  if (language === 'zh') return ZH_ANSWER_WORDS;
+  return WORD_LIST;
 }
 
 /** Get expected word length for a given language */
 function getWordLengthForLanguage(language) {
-  return language === 'ko' ? 2 : 5;
+  return language === 'en' ? 5 : 2;
 }
 
 /** Get max guesses for a given language */
@@ -1194,6 +1233,9 @@ function getMaxGuessesForLanguage(language) {
 function isValidGuessFormat(guess, language) {
   if (language === 'ko') {
     return guess.length === 2 && /^[\uAC00-\uD7A3]+$/.test(guess) && isValidKoreanGuess(guess);
+  }
+  if (language === 'zh') {
+    return Array.from(guess).length === 2 && /^\p{Script=Han}{2}$/u.test(guess) && isValidChineseGuess(guess);
   }
   return guess.length === 5
     && /^[a-z]+$/.test(guess)
@@ -1220,8 +1262,8 @@ function mulberry32(seed) {
 }
 
 function getDailyTargets(dateKey, language = 'en') {
-  // Korean uses a different seed to guarantee independent daily puzzles
-  const seedInput = language === 'ko' ? `${dateKey}:ko` : dateKey;
+  // Preserve the historical English seed while namespacing additional languages.
+  const seedInput = language === 'en' ? dateKey : `${dateKey}:${language}`;
   const seed = dateKeyToSeed(seedInput);
   const random = mulberry32(seed);
   const wordList = getWordListForLanguage(language);
@@ -1330,9 +1372,10 @@ app.post('/api/analytics/events', learningRoute(async (req, res) => {
       !result.duplicate
       && result.event.type === 'valid_guess_submitted'
       && result.event.mode === 'practice'
-      && result.event.language === 'ko'
+      && ['ko', 'zh'].includes(result.event.language)
     ) {
       await learningData.markSavedWordLaterGuessed(userId, result.event.word, {
+        language: result.event.language,
         dateKey: result.event.dateKey,
         mode: 'practice',
         roundId: result.event.roundId,
@@ -1352,11 +1395,12 @@ app.get('/api/learning/saved-words', learningRoute(async (req, res) => {
   if (!(await learningData.checkRateLimit(userId, 'saved-words-read', 60))) {
     return res.status(429).json({ error: 'Saved Words rate limit exceeded' });
   }
-  if (req.query.language && req.query.language !== 'ko') {
-    return res.status(400).json({ error: 'Saved Words currently supports Korean only' });
+  const parsedLanguage = parseSavedWordsLanguage(req.query.language);
+  if (!parsedLanguage.ok) {
+    return res.status(400).json({ error: 'Saved Words supports ko or zh', code: 'INVALID_LANGUAGE' });
   }
-  const words = await learningData.getSavedWords(userId);
-  return res.json({ version: 1, language: 'ko', storage: 'server', words });
+  const words = await learningData.getSavedWords(userId, parsedLanguage.language);
+  return res.json({ version: 2, language: parsedLanguage.language, storage: 'server', words });
 }));
 
 app.put('/api/learning/saved-words/:word', learningRoute(async (req, res) => {
@@ -1368,14 +1412,19 @@ app.put('/api/learning/saved-words/:word', learningRoute(async (req, res) => {
   if (!(await learningData.checkRateLimit(userId, 'saved-words', 30))) {
     return res.status(429).json({ error: 'Saved Words rate limit exceeded' });
   }
+  const parsedLanguage = parseSavedWordsLanguage(req.body?.language);
+  if (!parsedLanguage.ok) {
+    return res.status(400).json({ error: 'Saved Words supports ko or zh', code: 'INVALID_LANGUAGE' });
+  }
   try {
     const result = await learningData.saveWord(userId, req.params.word, {
+      language: parsedLanguage.language,
       source: req.body?.source,
       dateKey: req.body?.dateKey,
       mode: req.body?.mode,
       roundId: req.body?.roundId,
     });
-    return res.status(result.created ? 201 : 200).json({ version: 1, ...result });
+    return res.status(result.created ? 201 : 200).json({ version: 2, language: parsedLanguage.language, ...result });
   } catch (error) {
     const status = error.message === 'INVALID_WORD' ? 400 : 503;
     return res.status(status).json({ error: error.message, code: error.message });
@@ -1391,13 +1440,18 @@ app.delete('/api/learning/saved-words/:word', learningRoute(async (req, res) => 
   if (!(await learningData.checkRateLimit(userId, 'saved-words', 30))) {
     return res.status(429).json({ error: 'Saved Words rate limit exceeded' });
   }
+  const parsedLanguage = parseSavedWordsLanguage(req.body?.language);
+  if (!parsedLanguage.ok) {
+    return res.status(400).json({ error: 'Saved Words supports ko or zh', code: 'INVALID_LANGUAGE' });
+  }
   try {
     const result = await learningData.unsaveWord(userId, req.params.word, {
+      language: parsedLanguage.language,
       dateKey: req.body?.dateKey,
       mode: req.body?.mode,
       roundId: req.body?.roundId,
     });
-    return res.json({ version: 1, ...result });
+    return res.json({ version: 2, language: parsedLanguage.language, ...result });
   } catch (error) {
     const status = error.message === 'INVALID_WORD' ? 400 : 503;
     return res.status(status).json({ error: error.message, code: error.message });
@@ -1429,7 +1483,11 @@ app.get('/api/admin/analytics/summary', learningRoute(async (req, res) => {
 // Activity leave notification - triggers "was playing" message in Discord
 app.post("/api/activity/leave", async (req, res) => {
   try {
-    const { userId, guildId, channelId, dateKey, profile, gameState } = req.body;
+    const { userId, guildId, channelId, dateKey, profile, gameState, language: reqLanguage } = req.body;
+    const parsedLanguage = parseLanguage(reqLanguage);
+    if (!parsedLanguage.ok) {
+      return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
+    }
 
     if (!userId || !guildId || !channelId) {
       return res.status(400).json({ error: "userId, guildId, channelId required" });
@@ -1443,6 +1501,7 @@ app.post("/api/activity/leave", async (req, res) => {
         guildId,
         channelId,
         dateKey: dateKey || getTodayDateKey(),
+        language: parsedLanguage.language,
         profile: profile || { displayName: 'Player', avatarUrl: null },
         gameState: gameState || null,
         timestamp: Date.now(),
@@ -1462,19 +1521,28 @@ app.post("/api/activity/leave", async (req, res) => {
 // GET leaderboard for a room (rebuilds from Redis if cache empty)
 app.get("/api/room/:roomId/:dateKey/leaderboard", async (req, res) => {
   const { roomId, dateKey } = req.params;
-  const language = (req.query.language === 'ko') ? 'ko' : 'en';
+  const parsedLanguage = parseLanguage(req.query.language);
+  if (!parsedLanguage.ok) {
+    return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
+  }
+  const language = parsedLanguage.language;
   if (!roomId || !dateKey) {
     return res.status(400).json({ error: "roomId and dateKey required" });
   }
 
   // Try to rebuild from Redis if room not in memory
   const room = await getOrCreateRoomAsync(roomId, dateKey, language);
-  res.json({ leaderboard: room.leaderboard });
+  res.json({ language, leaderboard: room.leaderboard });
 });
 
 // GET players in a room (from Redis roomPlayers set)
 app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
   const { roomId, dateKey } = req.params;
+  const parsedLanguage = parseLanguage(req.query.language);
+  if (!parsedLanguage.ok) {
+    return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
+  }
+  const language = parsedLanguage.language;
   if (!roomId || !dateKey) {
     return res.status(400).json({ error: "roomId and dateKey required" });
   }
@@ -1485,12 +1553,12 @@ app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
   // Try Redis first for authoritative list
   if (hasRedisConnection()) {
     try {
-      const setKey = makeRoomPlayersSetKey(roomId, dateKey);
+      const setKey = makeRoomPlayersSetKey(roomId, dateKey, language);
       visibleUserIds = await redis.smembers(setKey);
 
       // Also load player details from Redis
       for (const visibleUserId of visibleUserIds) {
-        const playerKey = makePlayerRedisKey(roomId, dateKey, visibleUserId);
+        const playerKey = makePlayerRedisKey(roomId, dateKey, visibleUserId, language);
         const data = await redis.get(playerKey);
         if (data) {
           const parsed = JSON.parse(data);
@@ -1516,7 +1584,7 @@ app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
 
   // Fallback to in-memory if Redis empty/unavailable
   if (visibleUserIds.length === 0) {
-    const room = roomStateStore.get(makeRoomKey(roomId, dateKey));
+    const room = roomStateStore.get(makeRoomKey(roomId, dateKey, language));
     if (room) {
       visibleUserIds = Array.from(room.players.keys());
       for (const [visibleUserId, player] of room.players) {
@@ -1534,6 +1602,7 @@ app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
   res.json({
     roomId,
     dateKey,
+    language,
     count: visibleUserIds.length,
     visibleUserIds,
     playerDetails,
@@ -1543,11 +1612,15 @@ app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
 // GET player state
 app.get("/api/room/:roomId/:dateKey/player/:visibleUserId", (req, res) => {
   const { roomId, dateKey, visibleUserId } = req.params;
+  const parsedLanguage = parseLanguage(req.query.language);
+  if (!parsedLanguage.ok) {
+    return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
+  }
   if (!roomId || !dateKey || !visibleUserId) {
     return res.status(400).json({ error: "roomId, dateKey, and visibleUserId required" });
   }
 
-  const playerState = getPlayer(roomId, dateKey, visibleUserId);
+  const playerState = getPlayer(roomId, dateKey, visibleUserId, parsedLanguage.language);
   if (!playerState) {
     return res.status(404).json({ error: "Player not found" });
   }
@@ -1691,7 +1764,11 @@ app.post("/api/token", async (req, res) => {
 app.post("/api/game/join", async (req, res) => {
   try {
     const { roomId, userId, dateKey: clientDateKey, language: reqLanguage, guildId, profile } = req.body;
-    const language = (reqLanguage === 'ko') ? 'ko' : 'en';
+    const parsedLanguage = parseLanguage(reqLanguage);
+    if (!parsedLanguage.ok) {
+      return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
+    }
+    const language = parsedLanguage.language;
     if (!roomId || !userId) {
       return res.status(400).json({ error: "roomId and userId required" });
     }
@@ -1746,7 +1823,11 @@ app.post('/api/game/invalid-guess', async (req, res) => {
     const {
       roomId, userId, guess, attemptId, dateKey: clientDateKey, language: reqLanguage,
     } = req.body;
-    const language = reqLanguage === 'ko' ? 'ko' : 'en';
+    const parsedLanguage = parseLanguage(reqLanguage);
+    if (!parsedLanguage.ok) {
+      return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
+    }
+    const language = parsedLanguage.language;
     if (!roomId || !userId || !guess || !UUID_RE.test(String(attemptId ?? ''))) {
       return res.status(400).json({ error: 'roomId, userId, guess, and UUID attemptId required' });
     }
@@ -1756,9 +1837,7 @@ app.post('/api/game/invalid-guess', async (req, res) => {
     const player = await getPlayerAsync(roomId, dateKey, userId, language);
     if (!player) return res.status(404).json({ error: 'No game found. Call /api/game/join first.' });
     if (player.gameState.gameOver) return res.status(204).end();
-    const normalizedGuess = language === 'ko'
-      ? String(guess).normalize('NFC')
-      : String(guess).toLowerCase();
+    const normalizedGuess = normalizeGuessForLanguage(guess, language);
     if (isValidGuessFormat(normalizedGuess, language)) {
       return res.status(400).json({ error: 'Guess is accepted by the current lexicon' });
     }
@@ -1774,7 +1853,11 @@ app.post('/api/game/invalid-guess', async (req, res) => {
 app.post("/api/game/guess", async (req, res) => {
   try {
     const { roomId, userId, guess, dateKey: clientDateKey, language: reqLanguage } = req.body;
-    const language = (reqLanguage === 'ko') ? 'ko' : 'en';
+    const parsedLanguage = parseLanguage(reqLanguage);
+    if (!parsedLanguage.ok) {
+      return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
+    }
+    const language = parsedLanguage.language;
     if (!roomId || !userId || !guess) {
       return res.status(400).json({ error: "roomId, userId, and guess required" });
     }
@@ -1796,7 +1879,7 @@ app.post("/api/game/guess", async (req, res) => {
     }
 
     // Validate guess format (language-aware)
-    const normalizedGuess = language === 'ko' ? guess : guess.toLowerCase();
+    const normalizedGuess = normalizeGuessForLanguage(guess, language);
     if (!isValidGuessFormat(normalizedGuess, language)) {
       if (existingPlayer) {
         await recordDailyInvalidGuess(

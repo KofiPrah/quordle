@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import Redis from "ioredis";
 import cron from "node-cron";
 import { calculatePerformanceMetrics } from "@quordle/engine/assistance";
+import { getBotCompletionStatus, getBotLanguagePresentation } from "./botPresentation.js";
 
 // Load .env from parent directory in dev, or current directory in production
 dotenv.config({ path: "../.env" });
@@ -368,19 +369,18 @@ function buildCompletionEmbed(event) {
         hintCount = 0,
         assisted = hintCount > 0,
     } = event;
-    const isKorean = language === 'ko';
-    const resultEmoji = won ? "🏆" : "😔";
-    const resultText = won ? "won" : "lost";
+    const presentation = getBotLanguagePresentation(language);
+    const { emoji: resultEmoji, label: resultText } = getBotCompletionStatus(won);
     const color = won ? 0x2ecc71 : 0xe74c3c; // green or red
-    const gameLabel = isKorean ? "Daily Quordle 🇰🇷" : "Daily Quordle";
+    const gameLabel = `${presentation.label} Daily Quordle`;
 
     const embed = new EmbedBuilder()
         .setColor(color)
         .setTitle(`${resultEmoji} ${gameLabel} — ${dateKey}`)
         .setDescription(`**${displayName}** ${resultText} today's ${gameLabel}!`)
         .addFields(
-            { name: isKorean ? "보드" : "Boards", value: `${solvedBoards}/${totalBoards}`, inline: true },
-            { name: isKorean ? "추측" : "Guesses", value: `${guessCount}`, inline: true },
+            { name: presentation.boardsLabel, value: `${solvedBoards}/${totalBoards}`, inline: true },
+            { name: presentation.guessesLabel, value: `${guessCount}`, inline: true },
             { name: "Score", value: `${score}`, inline: true },
             { name: "Hints", value: `${hintCount}`, inline: true },
             { name: "Assistance", value: assisted ? "Assisted" : "Unassisted", inline: true }
@@ -406,7 +406,7 @@ async function handleDailyFinished(event) {
     // Track this channel as active (for daily reset broadcasts)
     await trackActiveChannel(guildId, channelId);
 
-    // Dedup check (language-aware so en and ko completions are tracked separately)
+    // Dedup check is language-aware so each puzzle can be reported independently.
     const alreadyPosted = await hasCompletionBeenPosted(guildId, channelId, dateKey, visibleUserId, lang);
     if (alreadyPosted) {
         console.log(`[Bot] Already posted completion for ${displayName} in ${channelId} on ${dateKey} (${lang})`);
@@ -438,7 +438,7 @@ async function fetchLeaderboardForChannel(channelId, dateKey) {
     if (!redis) return [];
 
     const entries = [];
-    for (const language of ["en", "ko"]) {
+    for (const language of ["en", "ko", "zh"]) {
         try {
             const setKey = `roomPlayers:${channelId}:${dateKey}:${language}`;
             const visibleUserIds = await redis.smembers(setKey);
@@ -491,7 +491,7 @@ async function fetchLeaderboardForChannel(channelId, dateKey) {
 function buildLeaderboardSummaryEmbed(dateKey, leaderboard, language = 'en') {
     const displayDate = formatDateForDisplay(dateKey);
     const rankEmojis = ["\uD83E\uDD47", "\uD83E\uDD48", "\uD83E\uDD49"]; // 🥇🥈🥉
-    const langLabel = language === 'ko' ? '🇰🇷 Korean' : '🇺🇸 English';
+    const langLabel = getBotLanguagePresentation(language).label;
 
     let description = "";
     for (let i = 0; i < leaderboard.length; i++) {
@@ -547,7 +547,7 @@ async function announceLeaderboardSummaryToChannel(guildId, channelId, dateKey) 
         }
 
         const embeds = [];
-        for (const lang of ['en', 'ko']) {
+        for (const lang of ['en', 'ko', 'zh']) {
             if (byLanguage[lang] && byLanguage[lang].length > 0) {
                 embeds.push(buildLeaderboardSummaryEmbed(dateKey, byLanguage[lang], lang));
             }
@@ -774,7 +774,7 @@ async function handleResultsCommand(interaction) {
         }
 
         const embeds = [];
-        for (const lang of ['en', 'ko']) {
+        for (const lang of ['en', 'ko', 'zh']) {
             if (byLanguage[lang] && byLanguage[lang].length > 0) {
                 embeds.push(buildLeaderboardSummaryEmbed(dateKey, byLanguage[lang], lang));
             }
@@ -811,10 +811,11 @@ async function handlePlayButton(interaction) {
 
 // ========== "WAS PLAYING" MESSAGE ==========
 
-function buildWasPlayingEmbed(profile, gameState) {
+function buildWasPlayingEmbed(profile, gameState, language = 'en') {
     const displayName = profile?.displayName || "Someone";
+    const languageLabel = getBotLanguagePresentation(language).label;
 
-    let description = `**${displayName}** was playing Daily Quordle`;
+    let description = `**${displayName}** was playing ${languageLabel} Daily Quordle`;
 
     // Add game result if available
     if (gameState) {
@@ -838,10 +839,10 @@ function buildWasPlayingEmbed(profile, gameState) {
 }
 
 async function handleActivityLeave(event) {
-    const { userId, guildId, channelId, profile, gameState } = event;
+    const { userId, guildId, channelId, profile, gameState, language = 'en' } = event;
 
     // Dedupe check
-    const dedupeKey = `${guildId}:${channelId}:${userId}`;
+    const dedupeKey = `${guildId}:${channelId}:${language}:${userId}`;
     const lastLeave = recentLeaves.get(dedupeKey);
     const now = Date.now();
 
@@ -865,7 +866,7 @@ async function handleActivityLeave(event) {
             return;
         }
 
-        const embed = buildWasPlayingEmbed(profile, gameState);
+        const embed = buildWasPlayingEmbed(profile, gameState, language);
         const components = [buildPlayButton()];
 
         await channel.send({ embeds: [embed], components });

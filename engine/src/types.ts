@@ -1,5 +1,24 @@
 /** Supported languages */
-export type Language = 'en' | 'ko';
+export type Language = 'en' | 'ko' | 'zh';
+
+/** Language-neutral learning metadata consumed by shared dictionary UI. */
+export interface LanguageWord {
+    id: string;
+    language: Language;
+    display: string;
+    normalized: string;
+    units: string[];
+    translations: string[];
+    definitions?: string[];
+    romanization?: string;
+    pronunciation?: string;
+    partOfSpeech?: string[];
+    tags?: string[];
+    frequencyRank?: number;
+    difficulty?: number;
+    answerEligible: boolean;
+    guessEligible: boolean;
+}
 
 /** Korean learning hints available during an active round. */
 export type HintType = 'part-of-speech' | 'semantic-category' | 'batchim-count' | 'reveal-first-syllable';

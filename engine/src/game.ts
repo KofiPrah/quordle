@@ -53,12 +53,22 @@ export function createGame(config: GameConfig): GameState {
 
 export function validateGuess(guess: string, language: Language = 'en'): { valid: boolean; error?: string } {
     const config = getLanguageConfig(language);
-    if (guess.length !== config.wordLength) {
-        return { valid: false, error: `Guess must be ${config.wordLength} ${language === 'ko' ? 'syllables' : 'letters'}` };
+    if (Array.from(guess).length !== config.wordLength) {
+        const units = language === 'ko' ? 'syllables' : language === 'zh' ? 'characters' : 'letters';
+        return { valid: false, error: `Guess must be ${config.wordLength} ${units}` };
     }
 
     if (!config.validateCharRegex.test(guess)) {
-        return { valid: false, error: language === 'ko' ? 'Guess must contain only Korean syllables' : 'Guess must contain only letters' };
+        const error = language === 'ko'
+            ? 'Guess must contain only Korean syllables'
+            : language === 'zh'
+                ? 'Guess must contain only Simplified Chinese characters'
+                : 'Guess must contain only letters';
+        return { valid: false, error };
+    }
+
+    if (language === 'zh' && !config.guessWords.has(guess.normalize('NFC'))) {
+        return { valid: false, error: 'Not in the Chinese word list' };
     }
 
     return { valid: true };
@@ -75,7 +85,7 @@ export function submitGuess(state: GameState, guess: string): GameState {
         return state;
     }
 
-    const normalizedGuess = language === 'ko' ? guess : guess.toLowerCase();
+    const normalizedGuess = language === 'en' ? guess.toLowerCase() : guess.normalize('NFC');
     const newBoards = state.boards.map((board) => {
         if (board.solved) {
             const prevResult = board.results[board.results.length - 1];
@@ -139,7 +149,7 @@ export function setCurrentGuess(state: GameState, guess: string): GameState {
     const config = getLanguageConfig(language);
     let limited: string;
 
-    if (language === 'ko') {
+    if (language === 'ko' || language === 'zh') {
         limited = guess.replace(config.filterCharRegex, '').slice(0, config.wordLength);
     } else {
         limited = guess.slice(0, config.wordLength).toLowerCase().replace(config.filterCharRegex, '');

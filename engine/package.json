@@ -24,12 +24,22 @@
         "./koreanHints": {
             "import": "./dist/koreanHints.js",
             "types": "./dist/koreanHints.d.ts"
+        },
+        "./chineseLexicon": {
+            "import": "./dist/chineseLexicon.js",
+            "types": "./dist/chineseLexicon.d.ts"
+        },
+        "./pinyin": {
+            "import": "./dist/pinyin.js",
+            "types": "./dist/pinyin.d.ts"
         }
     },
     "scripts": {
         "build": "tsc",
         "dictionary:refresh": "node --max-old-space-size=2048 scripts/generate-ko-dictionary.mjs",
         "dictionary:verify": "npm run build && node scripts/verify-ko-dictionary.mjs",
+        "dictionary:refresh:zh": "node --max-old-space-size=2048 scripts/generate-zh-dictionary.mjs",
+        "dictionary:verify:zh": "npm run build && node scripts/verify-zh-dictionary.mjs",
         "test": "vitest run",
         "test:watch": "vitest"
     },

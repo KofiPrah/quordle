@@ -58,7 +58,7 @@ function chronologicalSubmittedWords(gameState) {
 }
 
 export function getDictionaryEligibleWords(gameState, entries = null, supplementalWords = []) {
-  if (!gameState || gameState.language !== 'ko' || !Array.isArray(gameState.boards)) return [];
+  if (!gameState || !['ko', 'zh'].includes(gameState.language) || !Array.isArray(gameState.boards)) return [];
   const eligible = [];
   const seen = new Set();
   const add = (word) => {

@@ -40,6 +40,25 @@ limited to the accepted game lexicon.
 The key is build-time only and must never use a `VITE_` prefix. See
 `THIRD_PARTY_NOTICES.md` for dictionary attribution and licensing.
 
+## Chinese dictionary snapshot
+
+Chinese mode uses a checked-in CC-CEDICT v1 snapshot split into a compact
+accepted/answer lexicon, pinyin candidate shards, and lazy dictionary shards.
+The 64 daily-answer words are maintained explicitly in
+`engine/src/zhAnswerWords.seed.txt`; verification fails if the source does not
+contain every reviewed answer.
+
+To rebuild from an official UTF-8 CC-CEDICT `.txt`, `.gz`, or `.zip` export:
+
+```powershell
+cd engine
+npm run dictionary:refresh:zh -- C:\path\to\cedict_ts.u8.gz
+npm run dictionary:verify:zh
+```
+
+The generated metadata records the source release timestamp and archive
+SHA-256. See `THIRD_PARTY_NOTICES.md` for attribution and CC BY-SA 4.0 terms.
+
 ## Korean hints and scoring
 
 Korean games provide four one-time hints per unsolved board: part of speech
@@ -70,7 +89,7 @@ post-game review engagement. Unrecognized input text is discarded; only
 KRDICT-confirmed real-but-unaccepted Korean words may appear in word-frequency
 aggregates.
 
-Cross-device Korean Saved Words use the authenticated Discord identity. The
+Cross-device Korean and Chinese Saved Words use the authenticated Discord identity. The
 analytics store uses an HMAC pseudonym instead of the Discord ID, display name,
 guild, or room. Aggregate and cohort keys expire after 180 days, event
 idempotency keys after 30 days, and Saved Words remain until the player removes

@@ -1,6 +1,11 @@
 export const LEARNING_EVENT_VERSION = 1;
 export const ANALYTICS_QUEUE_STORAGE_KEY = 'quordle_learning_events_v1';
 export const LOCAL_SAVED_WORDS_KEY = 'quordle_saved_words_ko_v1';
+export const LOCAL_SAVED_WORDS_MIGRATION_KEY = 'quordle_saved_words_ko_v1_imported';
+export const LOCAL_SAVED_WORDS_KEYS = Object.freeze({
+  ko: 'quordle_saved_words_ko_v2',
+  zh: 'quordle_saved_words_zh_v2',
+});
 
 function hash32(value, seed) {
   let hash = seed >>> 0;
@@ -125,49 +130,81 @@ export function createLearningEventQueue(options) {
   };
 }
 
-export function readLocalSavedWords(storage, key = LOCAL_SAVED_WORDS_KEY) {
+function normalizeSavedWordLanguage(language) {
+  return language === 'zh' ? 'zh' : 'ko';
+}
+
+export function getLocalSavedWordsKey(language = 'ko') {
+  return LOCAL_SAVED_WORDS_KEYS[normalizeSavedWordLanguage(language)];
+}
+
+function normalizeSavedWordRecords(records, language) {
+  return [...new Map(records
+    .filter((entry) => entry && typeof entry.word === 'string' && Number.isFinite(entry.savedAt))
+    .map((entry) => [entry.word.normalize('NFC'), {
+      ...entry,
+      word: entry.word.normalize('NFC'),
+      language,
+    }])).values()]
+    .sort((left, right) => right.savedAt - left.savedAt || left.word.localeCompare(right.word, language));
+}
+
+export function readLocalSavedWords(storage, language = 'ko') {
+  const normalizedLanguage = normalizeSavedWordLanguage(language);
+  const key = getLocalSavedWordsKey(normalizedLanguage);
   try {
-    const value = safeParse(storage?.getItem(key), []);
-    if (!Array.isArray(value)) return [];
-    return value
-      .filter((entry) => entry && typeof entry.word === 'string' && Number.isFinite(entry.savedAt))
-      .sort((left, right) => right.savedAt - left.savedAt || left.word.localeCompare(right.word, 'ko'));
+    const currentValue = safeParse(storage?.getItem(key), []);
+    const current = Array.isArray(currentValue) ? currentValue : [];
+    if (normalizedLanguage !== 'ko' || storage?.getItem(LOCAL_SAVED_WORDS_MIGRATION_KEY)) {
+      return normalizeSavedWordRecords(current, normalizedLanguage);
+    }
+
+    const legacyValue = safeParse(storage?.getItem(LOCAL_SAVED_WORDS_KEY), []);
+    const legacy = Array.isArray(legacyValue) ? legacyValue : [];
+    const migrated = normalizeSavedWordRecords([...current, ...legacy], 'ko');
+    storage?.setItem(key, JSON.stringify(migrated));
+    storage?.setItem(LOCAL_SAVED_WORDS_MIGRATION_KEY, '1');
+    return migrated;
   } catch {
     return [];
   }
 }
 
-export function writeLocalSavedWords(storage, words, key = LOCAL_SAVED_WORDS_KEY) {
-  const normalized = [...new Map(words.map((entry) => [entry.word.normalize('NFC'), {
-    ...entry,
-    word: entry.word.normalize('NFC'),
-  }])).values()]
-    .sort((left, right) => right.savedAt - left.savedAt || left.word.localeCompare(right.word, 'ko'));
+export function writeLocalSavedWords(storage, words, language = 'ko') {
+  const normalizedLanguage = normalizeSavedWordLanguage(language);
+  const normalized = normalizeSavedWordRecords(words, normalizedLanguage);
+  const key = getLocalSavedWordsKey(normalizedLanguage);
   storage?.setItem(key, JSON.stringify(normalized));
   return normalized;
 }
 
-export function upsertLocalSavedWord(storage, word, source = 'dictionary', now = Date.now()) {
+export function upsertLocalSavedWord(storage, word, source = 'dictionary', now = Date.now(), language = 'ko') {
+  const normalizedLanguage = normalizeSavedWordLanguage(language);
   const normalized = word.normalize('NFC');
-  const existing = readLocalSavedWords(storage);
+  const existing = readLocalSavedWords(storage, normalizedLanguage);
   if (existing.some((entry) => entry.word === normalized)) return existing;
   return writeLocalSavedWords(storage, [
-    { word: normalized, savedAt: now, source, recalledAt: null },
+    { word: normalized, language: normalizedLanguage, savedAt: now, source, recalledAt: null },
     ...existing,
-  ]);
+  ], normalizedLanguage);
 }
 
-export function removeLocalSavedWord(storage, word) {
+export function removeLocalSavedWord(storage, word, language = 'ko') {
+  const normalizedLanguage = normalizeSavedWordLanguage(language);
   const normalized = word.normalize('NFC');
   return writeLocalSavedWords(
     storage,
-    readLocalSavedWords(storage).filter((entry) => entry.word !== normalized),
+    readLocalSavedWords(storage, normalizedLanguage).filter((entry) => entry.word !== normalized),
+    normalizedLanguage,
   );
 }
 
 export function getSavedWordsForResults(gameState, savedWords, dictionaryEntries) {
-  if (!gameState?.gameOver || gameState.language !== 'ko' || !dictionaryEntries) return [];
-  return savedWords.filter((record) => dictionaryEntries[record.word]);
+  const language = gameState?.language;
+  if (!gameState?.gameOver || !['ko', 'zh'].includes(language) || !dictionaryEntries) return [];
+  return savedWords.filter((record) => (
+    (record.language || 'ko') === language && dictionaryEntries[record.word]
+  ));
 }
 
 export function getSavedDictionarySupplementalWords(gameState, savedWords) {
@@ -175,7 +212,8 @@ export function getSavedDictionarySupplementalWords(gameState, savedWords) {
   return savedWords.map((entry) => entry.word);
 }
 
-export function getOptimisticSavedWordToggle(savedWords, word, source = 'dictionary', now = Date.now()) {
+export function getOptimisticSavedWordToggle(savedWords, word, source = 'dictionary', now = Date.now(), language = 'ko') {
+  const normalizedLanguage = normalizeSavedWordLanguage(language);
   const normalized = word.normalize('NFC');
   const existing = savedWords.find((entry) => entry.word === normalized) ?? null;
   return {
@@ -183,7 +221,7 @@ export function getOptimisticSavedWordToggle(savedWords, word, source = 'diction
     previous: [...savedWords],
     next: existing
       ? savedWords.filter((entry) => entry.word !== normalized)
-      : [{ word: normalized, savedAt: now, source, recalledAt: null }, ...savedWords],
+      : [{ word: normalized, language: normalizedLanguage, savedAt: now, source, recalledAt: null }, ...savedWords],
   };
 }
 

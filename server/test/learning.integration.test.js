@@ -135,6 +135,9 @@ test('learning APIs authenticate, persist Saved Words, ingest practice events, a
       body: JSON.stringify({ source: 'post-game', dateKey: '2026-08-06', mode: 'practice', roundId: 'practice:test' }),
     });
     assert.equal(savedResponse.status, 201);
+    const savedPayload = await savedResponse.json();
+    assert.equal(savedPayload.version, 2);
+    assert.equal(savedPayload.language, 'ko');
 
     const occurredAt = Date.now() + 10;
     const practiceStartId = randomUUID();
@@ -172,6 +175,8 @@ test('learning APIs authenticate, persist Saved Words, ingest practice events, a
     assert.deepEqual((await analyticsResponse.json()).acceptedIds, [practiceStartId, practiceGuessId]);
 
     const savedWords = await (await request('/api/learning/saved-words?language=ko', { headers: authHeaders })).json();
+    assert.equal(savedWords.version, 2);
+    assert.equal(savedWords.language, 'ko');
     assert.equal(savedWords.words[0].word, word);
     assert.ok(savedWords.words[0].recalledAt);
 

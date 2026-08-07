@@ -50,6 +50,7 @@ const FIRST_SEEN_TTL_SECONDS = AGGREGATE_TTL_SECONDS;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const KOREAN_WORD_RE = /^[\uAC00-\uD7A3]{2}$/u;
+const CHINESE_WORD_RE = /^\p{Script=Han}{2}$/u;
 const ENGLISH_WORD_RE = /^[a-z]{5}$/;
 
 function finiteInteger(value, fallback = 0) {
@@ -91,9 +92,15 @@ function shiftDate(dateKey, days) {
 
 function normalizeWord(word, language) {
   if (typeof word !== 'string') return null;
-  const normalized = language === 'ko' ? word.normalize('NFC') : word.toLowerCase();
-  const pattern = language === 'ko' ? KOREAN_WORD_RE : ENGLISH_WORD_RE;
+  const normalized = language === 'en' ? word.toLowerCase() : word.normalize('NFC');
+  const pattern = language === 'ko' ? KOREAN_WORD_RE : language === 'zh' ? CHINESE_WORD_RE : ENGLISH_WORD_RE;
   return pattern.test(normalized) ? normalized : null;
+}
+
+function isAcceptedLearningWord(word, language, options) {
+  if (language === 'ko') return options.isAcceptedKoreanWord?.(word) === true;
+  if (language === 'zh') return options.isAcceptedChineseWord?.(word) === true;
+  return true;
 }
 
 function normalizeMetrics(metrics) {
@@ -111,7 +118,7 @@ function normalizeMetrics(metrics) {
 export function normalizeLearningEvent(value, options = {}) {
   if (!value || typeof value !== 'object') return { ok: false, code: 'INVALID_EVENT' };
   const type = value.type;
-  const language = value.language === 'ko' ? 'ko' : value.language === 'en' ? 'en' : null;
+  const language = ['en', 'ko', 'zh'].includes(value.language) ? value.language : null;
   const mode = value.mode === 'practice' ? 'practice' : value.mode === 'daily' ? 'daily' : null;
   const eventId = typeof value.eventId === 'string' ? value.eventId.trim() : '';
   const roundId = typeof value.roundId === 'string' ? value.roundId.trim() : '';
@@ -147,15 +154,16 @@ export function normalizeLearningEvent(value, options = {}) {
   }
   if (
     ['valid_guess_submitted', 'board_solved', 'board_failed'].includes(type)
-    && (!word || (language === 'ko' && options.isAcceptedKoreanWord?.(word) !== true))
+    && (!word || !isAcceptedLearningWord(word, language, options))
   ) return { ok: false, code: 'INVALID_WORD' };
   if (
     ['definition_viewed', 'nearby_suggestion_selected', 'word_saved', 'word_unsaved', 'saved_word_later_guessed', 'review_word_viewed'].includes(type)
-    && (!word || language !== 'ko' || options.isAcceptedKoreanWord?.(word) !== true)
+    && (!word || !['ko', 'zh'].includes(language) || !isAcceptedLearningWord(word, language, options))
   ) return { ok: false, code: 'INVALID_WORD' };
+  if (type === 'nearby_suggestion_selected' && language !== 'ko') return { ok: false, code: 'INVALID_WORD' };
 
   const hintType = HINT_TYPES.has(value.hintType) ? value.hintType : undefined;
-  if (type === 'hint_used' && !hintType) return { ok: false, code: 'INVALID_HINT' };
+  if (type === 'hint_used' && (!hintType || language !== 'ko')) return { ok: false, code: 'INVALID_HINT' };
   if (type === 'round_completed' && (!value.metrics || typeof value.metrics !== 'object')) {
     return { ok: false, code: 'INVALID_METRICS' };
   }
@@ -294,6 +302,7 @@ export function createLearningDataService(options = {}) {
   const redisProvider = options.redisProvider ?? (() => null);
   const now = options.now ?? (() => Date.now());
   const isAcceptedKoreanWord = options.isAcceptedKoreanWord ?? (() => false);
+  const isAcceptedChineseWord = options.isAcceptedChineseWord ?? (() => false);
   const isRecognizedKoreanWord = options.isRecognizedKoreanWord ?? (() => false);
   const memory = {
     dedupe: new Map(),
@@ -328,14 +337,15 @@ export function createLearningDataService(options = {}) {
   }
 
   async function recordRetention(event, hashedActor) {
-    if (event.type !== 'round_started' || event.language !== 'ko') return;
+    if (event.type !== 'round_started' || !['ko', 'zh'].includes(event.language)) return;
+    const language = event.language;
     const client = redis();
-    const activeKey = `analytics:v1:active:${event.dateKey}:ko:${event.mode}`;
-    const activeAllKey = `analytics:v1:active:${event.dateKey}:ko:all`;
-    const cohortKey = `analytics:v1:cohort:${event.dateKey}:ko:${event.mode}`;
-    const cohortAllKey = `analytics:v1:cohort:${event.dateKey}:ko:all`;
-    const firstKey = `analytics:v1:first-ko:${event.mode}:${hashedActor}`;
-    const firstAllKey = `analytics:v1:first-ko:all:${hashedActor}`;
+    const activeKey = `analytics:v1:active:${event.dateKey}:${language}:${event.mode}`;
+    const activeAllKey = `analytics:v1:active:${event.dateKey}:${language}:all`;
+    const cohortKey = `analytics:v1:cohort:${event.dateKey}:${language}:${event.mode}`;
+    const cohortAllKey = `analytics:v1:cohort:${event.dateKey}:${language}:all`;
+    const firstKey = `analytics:v1:first-${language}:${event.mode}:${hashedActor}`;
+    const firstAllKey = `analytics:v1:first-${language}:all:${hashedActor}`;
     if (client) {
       const first = await client.set(firstKey, event.dateKey, 'EX', FIRST_SEEN_TTL_SECONDS, 'NX');
       const firstAll = await client.set(firstAllKey, event.dateKey, 'EX', FIRST_SEEN_TTL_SECONDS, 'NX');
@@ -372,6 +382,7 @@ export function createLearningDataService(options = {}) {
     const normalized = normalizeLearningEvent(rawEvent, {
       client: optionsForEvent.client === true,
       isAcceptedKoreanWord,
+      isAcceptedChineseWord,
       isRecognizedKoreanWord,
     });
     if (!normalized.ok) return { accepted: false, code: normalized.code };
@@ -382,13 +393,14 @@ export function createLearningDataService(options = {}) {
     const aggregate = aggregateKey(event.dateKey, event.language, event.mode);
     const wordMetric = getWordMetric(event);
     if (client) {
-      const retentionEvent = event.type === 'round_started' && event.language === 'ko';
-      const activeKey = `analytics:v1:active:${event.dateKey}:ko:${event.mode}`;
-      const activeAllKey = `analytics:v1:active:${event.dateKey}:ko:all`;
-      const firstKey = `analytics:v1:first-ko:${event.mode}:${hashedActor}`;
-      const cohortKey = `analytics:v1:cohort:${event.dateKey}:ko:${event.mode}`;
-      const firstAllKey = `analytics:v1:first-ko:all:${hashedActor}`;
-      const cohortAllKey = `analytics:v1:cohort:${event.dateKey}:ko:all`;
+      const retentionEvent = event.type === 'round_started' && ['ko', 'zh'].includes(event.language);
+      const retentionLanguage = retentionEvent ? event.language : 'ko';
+      const activeKey = `analytics:v1:active:${event.dateKey}:${retentionLanguage}:${event.mode}`;
+      const activeAllKey = `analytics:v1:active:${event.dateKey}:${retentionLanguage}:all`;
+      const firstKey = `analytics:v1:first-${retentionLanguage}:${event.mode}:${hashedActor}`;
+      const cohortKey = `analytics:v1:cohort:${event.dateKey}:${retentionLanguage}:${event.mode}`;
+      const firstAllKey = `analytics:v1:first-${retentionLanguage}:all:${hashedActor}`;
+      const cohortAllKey = `analytics:v1:cohort:${event.dateKey}:${retentionLanguage}:all`;
       const recorded = await client.eval(
         RECORD_EVENT_SCRIPT,
         9,
@@ -446,37 +458,60 @@ export function createLearningDataService(options = {}) {
     return count <= limit;
   }
 
-  async function getSavedWords(userId) {
+  const normalizeSavedLanguage = (language) => language === 'zh' ? 'zh' : 'ko';
+  const acceptedSavedWord = (word, language) => language === 'zh'
+    ? isAcceptedChineseWord(word)
+    : isAcceptedKoreanWord(word);
+  const savedField = (language, word) => `${language}:${word}`;
+
+  async function getSavedWords(userId, requestedLanguage = 'ko') {
     if (!available()) throw new Error('LEARNING_DATA_UNAVAILABLE');
+    const language = normalizeSavedLanguage(requestedLanguage);
     const client = redis();
     let values;
     if (client) values = await client.hgetall(savedKey(userId));
     else values = Object.fromEntries(memory.saved.get(savedKey(userId)) ?? []);
-    return Object.values(values)
-      .map((value) => {
-        try { return typeof value === 'string' ? JSON.parse(value) : value; } catch { return null; }
-      })
-      .filter(Boolean)
-      .sort((left, right) => right.savedAt - left.savedAt || left.word.localeCompare(right.word, 'ko'));
+    const records = new Map();
+    for (const [field, value] of Object.entries(values)) {
+      const separator = field.indexOf(':');
+      const fieldLanguage = separator > 0 && ['ko', 'zh'].includes(field.slice(0, separator))
+        ? field.slice(0, separator)
+        : 'ko';
+      if (fieldLanguage !== language) continue;
+      let record;
+      try { record = typeof value === 'string' ? JSON.parse(value) : value; } catch { record = null; }
+      if (!record?.word) continue;
+      const normalized = normalizeWord(record.word, language);
+      if (!normalized) continue;
+      const qualified = separator > 0;
+      if (!records.has(normalized) || qualified) {
+        records.set(normalized, { ...record, word: normalized, language });
+      }
+    }
+    return [...records.values()]
+      .sort((left, right) => right.savedAt - left.savedAt || left.word.localeCompare(right.word, language));
   }
 
   async function saveWord(userId, word, context = {}) {
     if (!available()) throw new Error('LEARNING_DATA_UNAVAILABLE');
-    const normalized = normalizeWord(word, 'ko');
-    if (!normalized || !isAcceptedKoreanWord(normalized)) throw new Error('INVALID_WORD');
+    const language = normalizeSavedLanguage(context.language);
+    const normalized = normalizeWord(word, language);
+    if (!normalized || !acceptedSavedWord(normalized, language)) throw new Error('INVALID_WORD');
     const source = SOURCES.has(context.source) ? context.source : 'dictionary';
-    const record = { word: normalized, savedAt: now(), source, recalledAt: null };
-    const serialized = JSON.stringify(record);
+    const existing = (await getSavedWords(userId, language)).find((entry) => entry.word === normalized) ?? null;
+    const record = existing ?? { word: normalized, language, savedAt: now(), source, recalledAt: null };
+    const serialized = JSON.stringify({ ...record, language });
     const client = redis();
-    let created;
-    if (client) created = (await client.hsetnx(savedKey(userId), normalized, serialized)) === 1;
-    else {
+    const field = savedField(language, normalized);
+    const created = !existing;
+    if (client) {
+      await client.hsetnx(savedKey(userId), field, serialized);
+    } else {
       const saved = memory.saved.get(savedKey(userId)) ?? new Map();
-      created = !saved.has(normalized);
-      if (created) saved.set(normalized, serialized);
+      if (!saved.has(field)) saved.set(field, serialized);
       memory.saved.set(savedKey(userId), saved);
     }
-    const current = created ? record : (await getSavedWords(userId)).find((entry) => entry.word === normalized);
+    const current = (await getSavedWords(userId, language)).find((entry) => entry.word === normalized) ?? record;
     if (current) {
       await recordEvent({
         version: 1,
@@ -484,7 +519,7 @@ export function createLearningDataService(options = {}) {
         type: 'word_saved',
         occurredAt: current.savedAt,
         dateKey: chicagoDateKey(current.savedAt),
-        language: 'ko',
+        language,
         mode: context.mode === 'practice' ? 'practice' : 'daily',
         roundId: typeof context.roundId === 'string' && context.roundId ? context.roundId : 'saved-words',
         word: normalized,
@@ -495,24 +530,27 @@ export function createLearningDataService(options = {}) {
 
   async function unsaveWord(userId, word, context = {}) {
     if (!available()) throw new Error('LEARNING_DATA_UNAVAILABLE');
-    const normalized = normalizeWord(word, 'ko');
+    const language = normalizeSavedLanguage(context.language);
+    const normalized = normalizeWord(word, language);
     if (!normalized) throw new Error('INVALID_WORD');
     const client = redis();
     let removed;
-    if (client) removed = (await client.hdel(savedKey(userId), normalized)) === 1;
+    const fields = [savedField(language, normalized), ...(language === 'ko' ? [normalized] : [])];
+    if (client) removed = (await client.hdel(savedKey(userId), ...fields)) > 0;
     else {
       const saved = memory.saved.get(savedKey(userId)) ?? new Map();
-      removed = saved.delete(normalized);
+      removed = false;
+      fields.forEach((field) => { removed = saved.delete(field) || removed; });
       memory.saved.set(savedKey(userId), saved);
     }
-    if (removed && isAcceptedKoreanWord(normalized)) {
+    if (removed && acceptedSavedWord(normalized, language)) {
       await recordEvent({
         version: 1,
         eventId: `unsave:${crypto.randomUUID()}`,
         type: 'word_unsaved',
         occurredAt: now(),
         dateKey: isValidDateKey(context.dateKey) ? context.dateKey : chicagoDateKey(now()),
-        language: 'ko',
+        language,
         mode: context.mode === 'practice' ? 'practice' : 'daily',
         roundId: typeof context.roundId === 'string' && context.roundId ? context.roundId : 'saved-words',
         word: normalized,
@@ -523,26 +561,35 @@ export function createLearningDataService(options = {}) {
 
   async function markSavedWordLaterGuessed(userId, word, context = {}) {
     if (!available()) return false;
-    const normalized = normalizeWord(word, 'ko');
-    if (!normalized || !isAcceptedKoreanWord(normalized)) return false;
+    const language = normalizeSavedLanguage(context.language);
+    const normalized = normalizeWord(word, language);
+    if (!normalized || !acceptedSavedWord(normalized, language)) return false;
     const client = redis();
     const key = savedKey(userId);
-    const raw = client ? await client.hget(key, normalized) : memory.saved.get(key)?.get(normalized);
+    const qualifiedField = savedField(language, normalized);
+    const legacyField = language === 'ko' ? normalized : null;
+    let field = qualifiedField;
+    let raw = client ? await client.hget(key, qualifiedField) : memory.saved.get(key)?.get(qualifiedField);
+    if (!raw && legacyField) {
+      field = legacyField;
+      raw = client ? await client.hget(key, legacyField) : memory.saved.get(key)?.get(legacyField);
+    }
     if (!raw) return false;
     let record;
     try { record = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { return false; }
     const roundStartedAt = Number(context.roundStartedAt);
     if (record.recalledAt || !Number.isFinite(roundStartedAt) || record.savedAt >= roundStartedAt) return false;
     record.recalledAt = now();
-    if (client) await client.hset(key, normalized, JSON.stringify(record));
-    else memory.saved.get(key)?.set(normalized, JSON.stringify(record));
+    record.language = language;
+    if (client) await client.hset(key, field, JSON.stringify(record));
+    else memory.saved.get(key)?.set(field, JSON.stringify(record));
     await recordEvent({
       version: 1,
       eventId: `recall:${normalized}:${record.savedAt}`,
       type: 'saved_word_later_guessed',
       occurredAt: record.recalledAt,
       dateKey: isValidDateKey(context.dateKey) ? context.dateKey : chicagoDateKey(record.recalledAt),
-      language: 'ko',
+      language,
       mode: context.mode === 'practice' ? 'practice' : 'daily',
       roundId: typeof context.roundId === 'string' && context.roundId ? context.roundId : 'unknown-round',
       word: normalized,
@@ -582,7 +629,7 @@ export function createLearningDataService(options = {}) {
       || (query.to !== undefined && !isValidDateKey(query.to))) {
       throw new Error('INVALID_DATE_RANGE');
     }
-    if (query.language !== undefined && !['en', 'ko', 'all'].includes(query.language)) {
+    if (query.language !== undefined && !['en', 'ko', 'zh', 'all'].includes(query.language)) {
       throw new Error('INVALID_FILTER');
     }
     if (query.mode !== undefined && !['daily', 'practice', 'all'].includes(query.mode)) {
@@ -593,7 +640,7 @@ export function createLearningDataService(options = {}) {
     const from = isValidDateKey(query.from) ? query.from : defaultFrom;
     const dates = enumerateDates(from, to);
     if (dates.length < 1 || dates.length > 90) throw new Error('INVALID_DATE_RANGE');
-    const languages = query.language === 'en' || query.language === 'ko' ? [query.language] : ['en', 'ko'];
+    const languages = ['en', 'ko', 'zh'].includes(query.language) ? [query.language] : ['en', 'ko', 'zh'];
     const modes = query.mode === 'daily' || query.mode === 'practice' ? [query.mode] : ['daily', 'practice'];
     const totals = emptyCounters();
     const lookedUp = new Map();
@@ -622,14 +669,14 @@ export function createLearningDataService(options = {}) {
     for (const offset of [1, 7]) {
       let cohortSize = 0;
       let returned = 0;
-      if (languages.includes('ko')) {
+      for (const language of languages.filter((candidate) => ['ko', 'zh'].includes(candidate))) {
         const retentionModes = modes.length === 1 ? modes : ['all'];
         for (const mode of retentionModes) {
           for (const cohortDate of dates) {
             const activeDate = shiftDate(cohortDate, offset);
             if (activeDate > to) continue;
-            const cohort = await readSet(`analytics:v1:cohort:${cohortDate}:ko:${mode}`, memory.cohorts);
-            const active = await readSet(`analytics:v1:active:${activeDate}:ko:${mode}`, memory.active);
+            const cohort = await readSet(`analytics:v1:cohort:${cohortDate}:${language}:${mode}`, memory.cohorts);
+            const active = await readSet(`analytics:v1:active:${activeDate}:${language}:${mode}`, memory.active);
             cohortSize += cohort.size;
             for (const actor of cohort) if (active.has(actor)) returned += 1;
           }
@@ -697,6 +744,7 @@ export function createLearningDataService(options = {}) {
     normalizeClientEvent: (value) => normalizeLearningEvent(value, {
       client: true,
       isAcceptedKoreanWord,
+      isAcceptedChineseWord,
       isRecognizedKoreanWord,
     }),
     recordEvent,

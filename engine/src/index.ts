@@ -1,6 +1,7 @@
 // Types
 export type {
     Language,
+    LanguageWord,
     HintType,
     HintUse,
     AssistanceState,
@@ -24,6 +25,24 @@ export type {
     KoreanDictionarySnapshot,
     KoreanRecognitionSnapshot,
 } from './koreanDictionary.js';
+
+export type {
+    ChineseDictionarySense,
+    ChinesePronunciation,
+    ChineseDictionaryEntry,
+    ChineseDictionarySnapshot,
+    ChineseDictionaryManifest,
+} from './chineseDictionary.js';
+
+export type {
+    DictionaryViewSense,
+    DictionaryViewModel,
+} from './dictionaryViewModel.js';
+
+export type {
+    ChinesePinyinCandidate,
+    ChinesePinyinIndex,
+} from './pinyin.js';
 
 export type {
     KoreanWordLevel,
@@ -59,6 +78,18 @@ export { evaluateGuess, isSolved } from './evaluator.js';
 
 // Evaluator (Korean)
 export { evaluateGuessKo, evaluateGuessSyllable } from './evaluatorKo.js';
+
+// Simplified Chinese dictionary and pinyin utilities
+export { getChineseDictionaryShardId } from './chineseDictionary.js';
+export { toKoreanDictionaryViewModel, toChineseDictionaryViewModel } from './dictionaryViewModel.js';
+export {
+    normalizePinyin,
+    normalizePinyinToneSignature,
+    numericPinyinSyllableToMarked,
+    numericPinyinToMarked,
+    numericPinyinToPlain,
+    findChinesePinyinCandidates,
+} from './pinyin.js';
 
 // Korean vocabulary discovery
 export { classifyKoreanGuess, rankNearbyKoreanWords } from './nearbyWords.js';
@@ -130,6 +161,14 @@ export {
     isValidKoreanGuess,
     isKoreanAnswerWord,
 } from './koreanLexicon.js';
+
+export {
+    CHINESE_LEXICON_SOURCE,
+    ZH_ANSWER_WORDS,
+    ZH_GUESS_WORDS_LIST,
+    isValidChineseGuess,
+    isChineseAnswerWord,
+} from './chineseLexicon.js';
 
 // Daily
 export { getDailyTargets } from './daily.js';
