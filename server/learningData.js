@@ -36,12 +36,19 @@ const CLIENT_PRACTICE_EVENTS = new Set([
   'board_failed',
   'hint_used',
 ]);
-const HINT_TYPES = new Set([
+const KOREAN_HINT_TYPES = new Set([
   'part-of-speech',
   'semantic-category',
   'batchim-count',
   'reveal-first-syllable',
 ]);
+const CHINESE_HINT_TYPES = new Set([
+  'tone-pattern',
+  'pinyin',
+  'broad-meaning',
+  'reveal-first-character',
+]);
+const HINT_TYPES = new Set([...KOREAN_HINT_TYPES, ...CHINESE_HINT_TYPES]);
 const CLASSIFICATIONS = new Set(['recognized-unaccepted', 'unrecognized', 'not-in-list']);
 const SOURCES = new Set(['dictionary', 'nearby', 'post-game']);
 const AGGREGATE_TTL_SECONDS = 60 * 60 * 24 * 180;
@@ -163,7 +170,10 @@ export function normalizeLearningEvent(value, options = {}) {
   if (type === 'nearby_suggestion_selected' && language !== 'ko') return { ok: false, code: 'INVALID_WORD' };
 
   const hintType = HINT_TYPES.has(value.hintType) ? value.hintType : undefined;
-  if (type === 'hint_used' && (!hintType || language !== 'ko')) return { ok: false, code: 'INVALID_HINT' };
+  const hintMatchesLanguage = language === 'ko'
+    ? KOREAN_HINT_TYPES.has(hintType)
+    : language === 'zh' && CHINESE_HINT_TYPES.has(hintType);
+  if (type === 'hint_used' && (!hintType || !hintMatchesLanguage)) return { ok: false, code: 'INVALID_HINT' };
   if (type === 'round_completed' && (!value.metrics || typeof value.metrics !== 'object')) {
     return { ok: false, code: 'INVALID_METRICS' };
   }

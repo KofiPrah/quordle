@@ -21,7 +21,13 @@ export interface LanguageWord {
 }
 
 /** Korean learning hints available during an active round. */
-export type HintType = 'part-of-speech' | 'semantic-category' | 'batchim-count' | 'reveal-first-syllable';
+export type KoreanHintType = 'part-of-speech' | 'semantic-category' | 'batchim-count' | 'reveal-first-syllable';
+
+/** Simplified Chinese learning hints available during an active round. */
+export type ChineseHintType = 'tone-pattern' | 'pinyin' | 'broad-meaning' | 'reveal-first-character';
+
+/** Every persisted scored hint type. */
+export type HintType = KoreanHintType | ChineseHintType;
 
 /** Persisted result of one charged hint request. */
 export interface HintUse {

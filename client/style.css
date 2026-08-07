@@ -1379,8 +1379,13 @@ button:focus-visible {
   font-weight: 700;
 }
 
-.hint-option-result[lang="ko"] {
+.hint-option-result[lang="ko"],
+.hint-option-result[lang="zh-Hans"] {
   font-size: 1.35rem;
+}
+
+.hint-option-result[lang="zh-Latn-pinyin"] {
+  font-size: 1rem;
 }
 
 .hint-error,

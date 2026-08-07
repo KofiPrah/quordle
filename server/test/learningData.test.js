@@ -158,6 +158,21 @@ test('Chinese learning events and Saved Words are accepted and isolated from leg
     suffix: 'zh-definition', language: 'zh', word: '学生',
   }), { client: true, ...validators });
   assert.equal(chineseEvent.ok, true);
+  const chineseHint = normalizeLearningEvent(event('hint_used', {
+    suffix: 'zh-hint', language: 'zh', hintType: 'tone-pattern', boardIndex: 1,
+  }), { client: true, ...validators });
+  assert.equal(chineseHint.ok, true);
+  assert.deepEqual(normalizeLearningEvent(event('hint_used', {
+    suffix: 'zh-wrong-hint', language: 'zh', hintType: 'part-of-speech', boardIndex: 1,
+  }), { client: true, ...validators }), { ok: false, code: 'INVALID_HINT' });
+
+  await service.recordEvent(event('hint_used', {
+    suffix: 'zh-hint-aggregate', language: 'zh', hintType: 'tone-pattern', boardIndex: 1,
+  }), 'multilingual-user');
+  const chineseSummary = await service.getSummary({
+    from: '2026-08-06', to: '2026-08-06', language: 'zh', mode: 'practice',
+  });
+  assert.equal(chineseSummary.hintsByType['tone-pattern'], 1);
 
   const savedKey = `learning:v1:saved:${service.actorHash('multilingual-user')}`;
   service._memory.saved.set(savedKey, new Map([

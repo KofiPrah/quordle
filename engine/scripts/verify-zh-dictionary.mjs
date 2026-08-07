@@ -5,8 +5,17 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const engineRoot = path.resolve(__dirname, '..');
+const pinyinKey = (value) => String(value ?? '')
+  .toLowerCase()
+  .replace(/u:/gu, 'v')
+  .replace(/ü/gu, 'v')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/gu, '')
+  .replace(/[^a-zv]/gu, '');
 const dictionaryManifest = JSON.parse(fs.readFileSync(path.join(engineRoot, 'src', 'zhDictionary.generated.json'), 'utf8'));
 const pinyinManifest = JSON.parse(fs.readFileSync(path.join(engineRoot, 'src', 'zhPinyinIndex.generated.json'), 'utf8'));
+const hintClues = JSON.parse(fs.readFileSync(path.join(engineRoot, 'src', 'zhHintClues.seed.json'), 'utf8'));
+const { ZH_HINT_METADATA } = await import(new URL('../dist/zhHintMetadata.generated.js', import.meta.url));
 const seed = fs.readFileSync(path.join(engineRoot, 'src', 'zhAnswerWords.seed.txt'), 'utf8')
   .split(/\r?\n/u).map((word) => word.trim()).filter(Boolean);
 
@@ -15,6 +24,8 @@ assert.equal(new Set(seed).size, seed.length, 'Chinese answer seed contains dupl
 assert.equal(dictionaryManifest.metadata?.license, 'Creative Commons Attribution-ShareAlike 4.0 International');
 assert.match(dictionaryManifest.metadata?.sourceSha256 ?? '', /^[0-9a-f]{64}$/u);
 assert.equal(pinyinManifest.metadata?.sourceSha256, dictionaryManifest.metadata.sourceSha256);
+assert.deepEqual(Object.keys(hintClues).sort(), [...seed].sort(), 'Chinese hint clues diverged from the answer seed');
+assert.deepEqual(Object.keys(ZH_HINT_METADATA).sort(), [...seed].sort(), 'Generated Chinese hint metadata diverged from the answer seed');
 
 const entries = Object.assign({}, ...dictionaryManifest.shards.map((id) => (
   JSON.parse(fs.readFileSync(path.join(engineRoot, 'src', 'zhDictionaryShards', `${id}.json`), 'utf8')).entries ?? {}
@@ -27,6 +38,16 @@ assert.equal(Object.keys(candidatesByKey).length, pinyinManifest.keyCount, 'Chin
 for (const word of seed) {
   assert(entries[word], `Chinese answer missing dictionary entry: ${word}`);
   assert.equal(entries[word].answerEligible, true, `Chinese answer not marked eligible: ${word}`);
+  const hint = ZH_HINT_METADATA[word];
+  const pronunciation = entries[word].pronunciations[0];
+  assert(hint, `Chinese answer missing hint metadata: ${word}`);
+  assert.equal(hint.pinyinMarked, pronunciation.pinyinMarked, `Chinese hint pinyin is not canonical: ${word}`);
+  assert.deepEqual([...hint.tones], pronunciation.tones, `Chinese hint tones are not canonical: ${word}`);
+  assert.equal(hint.meaning, hintClues[word].trim(), `Chinese broad-meaning clue diverged: ${word}`);
+  assert.equal(hint.firstCharacter, Array.from(word)[0], `Chinese first-character hint diverged: ${word}`);
+  assert(!/\p{Script=Han}/u.test(hint.meaning), `Chinese broad-meaning clue exposes Hanzi: ${word}`);
+  assert(!pinyinKey(hint.meaning).includes(pinyinKey(hint.pinyinMarked)), `Chinese broad-meaning clue exposes pinyin: ${word}`);
+  assert(hint.tones.every((tone) => Number.isInteger(tone) && tone >= 1 && tone <= 5), `Chinese hint has malformed tones: ${word}`);
 }
 
 for (const [word, entry] of Object.entries(entries)) {

@@ -32,6 +32,10 @@
         "./pinyin": {
             "import": "./dist/pinyin.js",
             "types": "./dist/pinyin.d.ts"
+        },
+        "./hints": {
+            "import": "./dist/hints.js",
+            "types": "./dist/hints.d.ts"
         }
     },
     "scripts": {
@@ -40,6 +44,7 @@
         "dictionary:verify": "npm run build && node scripts/verify-ko-dictionary.mjs",
         "dictionary:refresh:zh": "node --max-old-space-size=2048 scripts/generate-zh-dictionary.mjs",
         "dictionary:verify:zh": "npm run build && node scripts/verify-zh-dictionary.mjs",
+        "hints:refresh:zh": "node scripts/generate-zh-hints.mjs",
         "test": "vitest run",
         "test:watch": "vitest"
     },

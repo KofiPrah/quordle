@@ -13,7 +13,7 @@ import { evaluateGuessKo } from "@quordle/engine/evaluatorKo";
 import { KO_ANSWER_WORDS, isValidKoreanGuess } from "@quordle/engine/koreanLexicon";
 import { ZH_ANSWER_WORDS, isValidChineseGuess } from "@quordle/engine/chineseLexicon";
 import { calculatePerformanceMetrics, normalizeAssistanceState } from "@quordle/engine/assistance";
-import { requestKoreanHint } from "@quordle/engine/koreanHints";
+import { requestHint } from "@quordle/engine/hints";
 import { createLearningDataService } from "./learningData.js";
 import {
   createAppSessionToken,
@@ -261,7 +261,7 @@ async function recordDailyGuessTransition(player, previousGameState, nextGameSta
 async function recordDailyHint(player, hint) {
   if (!player || !hint) return;
   await safelyRecordLearningEvent(learningEventBase(player, {
-    eventId: `hint:daily:${player.dateKey}:ko:${hint.boardIndex}:${hint.type}`,
+    eventId: `hint:daily:${player.dateKey}:${player.language || 'en'}:${hint.boardIndex}:${hint.type}`,
     type: 'hint_used',
     boardIndex: hint.boardIndex,
     hintType: hint.type,
@@ -968,11 +968,11 @@ wss.on("connection", (ws, req) => {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing or invalid hint request fields' }));
             return;
           }
-          if (hintLanguage !== 'ko') {
-            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_LANGUAGE', message: 'Hints are currently available only for Korean games.' }));
+          if (!['ko', 'zh'].includes(hintLanguage)) {
+            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_LANGUAGE', message: 'Hints are available only for Korean and Chinese games.' }));
             return;
           }
-          const language = 'ko';
+          const language = hintLanguage;
 
           const playerState = getPlayer(roomId, dateKey, visibleUserId, language);
           if (!playerState) {
@@ -980,7 +980,7 @@ wss.on("connection", (ws, req) => {
             return;
           }
 
-          const result = requestKoreanHint(playerState.gameState, boardIndex, hintType, Date.now());
+          const result = requestHint(playerState.gameState, boardIndex, hintType, Date.now());
           if (!result.ok) {
             ws.send(JSON.stringify({ type: 'ERROR', code: result.code, message: result.message }));
             return;
@@ -1952,17 +1952,17 @@ app.post("/api/game/guess", async (req, res) => {
   }
 });
 
-// HINT: Apply one server-authoritative Korean hint to an unsolved board
+// HINT: Apply one server-authoritative language-specific hint to an unsolved board
 app.post("/api/game/hint", async (req, res) => {
   try {
     const { roomId, userId, boardIndex, hintType, dateKey: clientDateKey, language: reqLanguage } = req.body;
     if (!roomId || !userId || !Number.isInteger(boardIndex) || typeof hintType !== 'string') {
       return res.status(400).json({ error: 'roomId, userId, boardIndex, and hintType required', code: 'INVALID_MESSAGE' });
     }
-    if (reqLanguage !== 'ko') {
-      return res.status(400).json({ error: 'Hints are currently available only for Korean games.', code: 'INVALID_LANGUAGE' });
+    if (!['ko', 'zh'].includes(reqLanguage)) {
+      return res.status(400).json({ error: 'Hints are available only for Korean and Chinese games.', code: 'INVALID_LANGUAGE' });
     }
-    const language = 'ko';
+    const language = reqLanguage;
 
     const dateKey = (clientDateKey && /^\d{4}-\d{2}-\d{2}$/.test(clientDateKey))
       ? clientDateKey
@@ -1974,7 +1974,7 @@ app.post("/api/game/hint", async (req, res) => {
       return res.status(404).json({ error: 'No game found. Call /api/game/join first.', code: 'PLAYER_NOT_FOUND' });
     }
 
-    const result = requestKoreanHint(gameState, boardIndex, hintType, Date.now());
+    const result = requestHint(gameState, boardIndex, hintType, Date.now());
     if (!result.ok) {
       const status = result.code === 'HINT_UNAVAILABLE'
         ? 422

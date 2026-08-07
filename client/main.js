@@ -21,7 +21,7 @@ import { canBeCoda, canBeOnset, combineCodas, combineVowels, expandHangulToJamoU
 import { backspaceKoIme, createKoImeState, finalizeKoIme, getKoImeDisplayChar, processKoImeJamo } from "../engine/src/koIme.ts";
 import { classifyKoreanGuess, rankNearbyKoreanWords } from "../engine/src/nearbyWords.ts";
 import { calculatePerformanceMetrics, HINT_COSTS, normalizeAssistanceState } from "../engine/src/assistance.ts";
-import { isKoreanHintAvailable, requestKoreanHint } from "../engine/src/koreanHints.ts";
+import { isHintAvailable, requestHint } from "../engine/src/hints.ts";
 import {
   getRemainingGuessCount,
   partitionBoards,
@@ -38,7 +38,7 @@ import {
   loadKoreanRecognitionSnapshot,
 } from "./src/dictionary.js";
 import { getSheetDragAction, renderOverlaySheet, trapOverlayFocus } from "./src/overlaySheet.js";
-import { formatHintPayload, getBoardHintUse, HINT_UI_OPTIONS } from "./src/hintUi.js";
+import { formatHintPayload, getBoardHintUse, getHintUiOptions } from "./src/hintUi.js";
 import {
   createKoreanFeedback,
   createMessageFeedback,
@@ -1877,7 +1877,7 @@ function renderLearningControls() {
         ${dictionaryDisabled ? 'disabled' : ''}
         aria-label="${dictionaryDisabled ? `Submit a valid ${currentLanguage === 'zh' ? 'Chinese' : 'Korean'} word to use the dictionary` : `Open dictionary for submitted ${currentLanguage === 'zh' ? 'Chinese' : 'Korean'} words`}"
       >${currentLanguage === 'zh' ? 'Dictionary' : '사전'} <span aria-hidden="true">⌕</span></button>
-      ${currentLanguage === 'ko' ? `<button
+      <button
         class="hint-trigger"
         type="button"
         aria-haspopup="dialog"
@@ -1885,13 +1885,13 @@ function renderLearningControls() {
         aria-expanded="${activeOverlay === OVERLAY_HINT}"
         ${hintDisabled ? 'disabled' : ''}
         aria-label="${hintDisabled ? 'Hints are unavailable' : `Open hints for selected board ${selectedBoardIndex + 1}`}"
-      >힌트 <span aria-hidden="true">?</span></button>` : ''}
+      >${currentLanguage === 'ko' ? '힌트' : 'Hints'} <span aria-hidden="true">?</span></button>
     </div>
   `;
 }
 
 function openHintOverlay() {
-  if (activeOverlay || currentLanguage !== 'ko' || gameState.gameOver || !Number.isInteger(selectedBoardIndex)) return;
+  if (activeOverlay || !['ko', 'zh'].includes(currentLanguage) || gameState.gameOver || !Number.isInteger(selectedBoardIndex)) return;
   hintRequestError = null;
   activeOverlay = OVERLAY_HINT;
   overlaySize = 'half';
@@ -1902,9 +1902,15 @@ function openHintOverlay() {
 }
 
 function renderHintResult(type, payload) {
-  const formatted = formatHintPayload(type, payload);
+  const formatted = formatHintPayload(currentLanguage, type, payload);
   if (!formatted) return '';
-  const lang = type === 'reveal-first-syllable' ? ' lang="ko"' : '';
+  const lang = type === 'reveal-first-syllable'
+    ? ' lang="ko"'
+    : type === 'reveal-first-character'
+      ? ' lang="zh-Hans"'
+      : type === 'pinyin'
+        ? ' lang="zh-Latn-pinyin"'
+        : '';
   return `<div class="hint-option-result" role="status" aria-live="polite"${lang}>${escapeHtml(formatted)}</div>`;
 }
 
@@ -1915,16 +1921,16 @@ function renderHintOverlay() {
   if (!board || board.solved || gameState.gameOver) {
     return renderOverlaySheet({
       id: OVERLAY_HINT,
-      title: 'Hints · 힌트',
+      title: currentLanguage === 'ko' ? 'Hints · 힌트' : 'Hints',
       body: '<div class="hint-status">Select an unsolved board to use hints.</div>',
       size: overlaySize,
       className: 'hint-sheet',
     });
   }
 
-  const options = HINT_UI_OPTIONS.map((option) => {
+  const options = getHintUiOptions(currentLanguage).map((option) => {
     const used = getBoardHintUse(gameState.assistance, boardIndex, option.type);
-    const available = used || isKoreanHintAvailable(board.targetWord, option.type);
+    const available = used || isHintAvailable(gameState, boardIndex, option.type);
     const pending = pendingHintRequest === `${boardIndex}:${option.type}`;
     const disabled = Boolean(used) || !available || pendingHintRequest !== null;
     const status = used ? 'Used' : pending ? 'Requesting…' : available ? `−${HINT_COSTS[option.type]} points` : 'Unavailable';
@@ -1961,7 +1967,7 @@ function renderHintOverlay() {
   `;
   return renderOverlaySheet({
     id: OVERLAY_HINT,
-    title: 'Hints · 힌트',
+    title: currentLanguage === 'ko' ? 'Hints · 힌트' : 'Hints',
     body,
     size: overlaySize,
     className: 'hint-sheet',
@@ -1969,7 +1975,7 @@ function renderHintOverlay() {
 }
 
 async function requestBoardHint(boardIndex, hintType) {
-  if (pendingHintRequest || currentLanguage !== 'ko') return;
+  if (pendingHintRequest || !['ko', 'zh'].includes(currentLanguage)) return;
   const requestKey = `${boardIndex}:${hintType}`;
   pendingHintRequest = requestKey;
   hintRequestError = null;
@@ -2016,7 +2022,7 @@ async function requestBoardHint(boardIndex, hintType) {
     return;
   }
 
-  const result = requestKoreanHint(gameState, boardIndex, hintType, Date.now());
+  const result = requestHint(gameState, boardIndex, hintType, Date.now());
   clearPendingHintRequest();
   if (!result.ok) {
     hintRequestError = result.message;
@@ -2905,7 +2911,7 @@ function renderActiveBoard(board, index) {
         <span>${remainingGuesses} ${remainingGuesses === 1 ? 'guess' : 'guesses'} remaining</span>
       </div>`
     : '';
-  const hintsEnabled = currentLanguage === 'ko';
+  const hintsEnabled = ['ko', 'zh'].includes(currentLanguage);
   const selected = hintsEnabled && selectedBoardIndex === index;
   const headerId = `board-header-${index}`;
   const headerHtml = hintsEnabled

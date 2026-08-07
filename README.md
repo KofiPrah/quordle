@@ -56,16 +56,27 @@ npm run dictionary:refresh:zh -- C:\path\to\cedict_ts.u8.gz
 npm run dictionary:verify:zh
 ```
 
+Chinese broad-meaning hints are curated separately in
+`engine/src/zhHintClues.seed.json`. Run `npm run hints:refresh:zh` after editing
+that file; the full dictionary refresh also regenerates the compact hint
+metadata.
+
 The generated metadata records the source release timestamp and archive
 SHA-256. See `THIRD_PARTY_NOTICES.md` for attribution and CC BY-SA 4.0 terms.
 
-## Korean hints and scoring
+## Korean and Chinese hints and scoring
 
 Korean games provide four one-time hints per unsolved board: part of speech
 (2 points), semantic category (3), batchim count (5), and first-syllable reveal
 (10). Practice games apply hints locally; daily games use the server-authoritative
 WebSocket or REST hint endpoint. Repeated requests return the original persisted
 hint without another charge.
+
+Chinese games use the same selected-board and persistence flow with tone pattern
+(2 points), tone-marked pinyin (5), curated broad meaning (7), and first-character
+reveal (10). A first-character reveal is unavailable when prior feedback already
+confirmed that character. Chinese pinyin candidates remain normal, unscored
+input, and nearby-word suggestions remain Korean-only.
 
 Leaderboard and result scores use:
 

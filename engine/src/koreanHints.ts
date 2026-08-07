@@ -1,7 +1,7 @@
-import { appendHintUse, findHintUse, HINT_COSTS, normalizeAssistanceState } from './assistance.js';
+import { appendHintUse, findHintUse, HINT_COSTS, KOREAN_HINT_TYPES, normalizeAssistanceState } from './assistance.js';
 import { decomposeHangul } from './jamo.js';
 import { KO_HINT_METADATA } from './koHintMetadata.generated.js';
-import type { GameState, HintType, HintUse } from './types.js';
+import type { GameState, HintUse, KoreanHintType } from './types.js';
 
 export type KoreanHintErrorCode = 'INVALID_LANGUAGE' | 'INVALID_BOARD' | 'GAME_OVER' | 'BOARD_SOLVED' | 'INVALID_HINT' | 'HINT_UNAVAILABLE';
 
@@ -9,9 +9,9 @@ export type KoreanHintResult =
     | { ok: true; state: GameState; hint: HintUse; duplicate: boolean }
     | { ok: false; code: KoreanHintErrorCode; message: string };
 
-const HINT_TYPES = new Set<HintType>(Object.keys(HINT_COSTS) as HintType[]);
+const HINT_TYPES = new Set<KoreanHintType>(KOREAN_HINT_TYPES);
 
-function getHintPayload(targetWord: string, type: HintType): HintUse['payload'] | null {
+function getHintPayload(targetWord: string, type: KoreanHintType): HintUse['payload'] | null {
     const metadata = KO_HINT_METADATA[targetWord as keyof typeof KO_HINT_METADATA];
     switch (type) {
         case 'part-of-speech':
@@ -30,14 +30,14 @@ function getHintPayload(targetWord: string, type: HintType): HintUse['payload'] 
     }
 }
 
-export function isKoreanHintAvailable(targetWord: string, type: HintType): boolean {
+export function isKoreanHintAvailable(targetWord: string, type: KoreanHintType): boolean {
     return HINT_TYPES.has(type) && getHintPayload(targetWord, type) !== null;
 }
 
 export function requestKoreanHint(
     gameState: GameState,
     boardIndex: number,
-    type: HintType,
+    type: KoreanHintType,
     usedAt = Date.now(),
 ): KoreanHintResult {
     if (gameState.language !== 'ko') {

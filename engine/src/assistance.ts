@@ -1,4 +1,4 @@
-import type { AssistanceState, GameState, HintType, HintUse } from './types.js';
+import type { AssistanceState, ChineseHintType, GameState, HintType, HintUse, KoreanHintType, Language } from './types.js';
 
 export const ASSISTANCE_SCORING_VERSION = 1 as const;
 
@@ -7,7 +7,25 @@ export const HINT_COSTS: Readonly<Record<HintType, number>> = Object.freeze({
     'semantic-category': 3,
     'batchim-count': 5,
     'reveal-first-syllable': 10,
+    'tone-pattern': 2,
+    'pinyin': 5,
+    'broad-meaning': 7,
+    'reveal-first-character': 10,
 });
+
+export const KOREAN_HINT_TYPES: readonly KoreanHintType[] = Object.freeze([
+    'part-of-speech',
+    'semantic-category',
+    'batchim-count',
+    'reveal-first-syllable',
+]);
+
+export const CHINESE_HINT_TYPES: readonly ChineseHintType[] = Object.freeze([
+    'tone-pattern',
+    'pinyin',
+    'broad-meaning',
+    'reveal-first-character',
+]);
 
 export interface PerformanceMetrics {
     solvedCount: number;
@@ -27,6 +45,12 @@ export function createEmptyAssistanceState(): AssistanceState {
 
 function isHintType(value: unknown): value is HintType {
     return typeof value === 'string' && Object.prototype.hasOwnProperty.call(HINT_COSTS, value);
+}
+
+export function isHintTypeForLanguage(value: unknown, language: Language): value is HintType {
+    if (language === 'ko') return KOREAN_HINT_TYPES.includes(value as KoreanHintType);
+    if (language === 'zh') return CHINESE_HINT_TYPES.includes(value as ChineseHintType);
+    return false;
 }
 
 function normalizeHintUse(value: unknown): HintUse | null {

@@ -2,6 +2,8 @@
 export type {
     Language,
     LanguageWord,
+    KoreanHintType,
+    ChineseHintType,
     HintType,
     HintUse,
     AssistanceState,
@@ -61,6 +63,11 @@ export type {
     KoreanHintResult,
 } from './koreanHints.js';
 
+export type {
+    ChineseHintErrorCode,
+    ChineseHintResult,
+} from './chineseHints.js';
+
 // Game logic
 export {
     createGame,
@@ -94,10 +101,13 @@ export {
 // Korean vocabulary discovery
 export { classifyKoreanGuess, rankNearbyKoreanWords } from './nearbyWords.js';
 
-// Assistance and Korean learning hints
+// Assistance and language-specific learning hints
 export {
     ASSISTANCE_SCORING_VERSION,
     HINT_COSTS,
+    KOREAN_HINT_TYPES,
+    CHINESE_HINT_TYPES,
+    isHintTypeForLanguage,
     createEmptyAssistanceState,
     normalizeAssistanceState,
     findHintUse,
@@ -105,6 +115,8 @@ export {
     calculatePerformanceMetrics,
 } from './assistance.js';
 export { isKoreanHintAvailable, requestKoreanHint } from './koreanHints.js';
+export { isChineseHintAvailable, requestChineseHint } from './chineseHints.js';
+export { isHintAvailable, requestHint } from './hints.js';
 
 // Jamo utilities
 export {
