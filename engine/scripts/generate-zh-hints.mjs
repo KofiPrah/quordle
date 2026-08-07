@@ -16,6 +16,13 @@ function pinyinKey(value) {
     .replace(/[^a-zv]/gu, '');
 }
 
+function pinyinInitial(value) {
+  const syllable = pinyinKey(value);
+  const digraph = ['zh', 'ch', 'sh'].find((initial) => syllable.startsWith(initial));
+  if (digraph) return digraph;
+  return /^[bpmfdtnlgkhjqxrzcsyw]/u.test(syllable) ? syllable[0] : '∅';
+}
+
 export function generateChineseHintMetadata({ engineRoot = defaultEngineRoot, quiet = false } = {}) {
   const sourceDir = path.join(engineRoot, 'src');
   const seedWords = fs.readFileSync(path.join(sourceDir, 'zhAnswerWords.seed.txt'), 'utf8')
@@ -41,7 +48,8 @@ export function generateChineseHintMetadata({ engineRoot = defaultEngineRoot, qu
     const entry = entries[word];
     if (!entry) throw new Error(`Chinese answer is missing dictionary metadata: ${word}`);
     const pronunciation = entry.pronunciations?.[0];
-    if (!pronunciation?.pinyinMarked || !Array.isArray(pronunciation.tones) || pronunciation.tones.length !== 2) {
+    const pinyinSyllables = pronunciation?.pinyinPlain?.trim().split(/\s+/u) ?? [];
+    if (!pronunciation?.pinyinMarked || pinyinSyllables.length !== 2 || !Array.isArray(pronunciation.tones) || pronunciation.tones.length !== 2) {
       throw new Error(`Chinese answer is missing a canonical two-syllable pronunciation: ${word}`);
     }
     if (!pronunciation.tones.every((tone) => Number.isInteger(tone) && tone >= 1 && tone <= 5)) {
@@ -56,7 +64,7 @@ export function generateChineseHintMetadata({ engineRoot = defaultEngineRoot, qu
       throw new Error(`Chinese broad-meaning clue exposes canonical pinyin: ${word}`);
     }
     metadata[word] = {
-      pinyinMarked: pronunciation.pinyinMarked,
+      pinyinInitials: pinyinSyllables.map(pinyinInitial),
       tones: pronunciation.tones,
       meaning,
       firstCharacter: Array.from(word)[0],

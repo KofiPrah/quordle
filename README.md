@@ -73,7 +73,7 @@ WebSocket or REST hint endpoint. Repeated requests return the original persisted
 hint without another charge.
 
 Chinese games use the same selected-board and persistence flow with tone pattern
-(2 points), tone-marked pinyin (5), curated broad meaning (7), and first-character
+(2 points), pinyin initials (5), curated broad meaning (7), and first-character
 reveal (10). A first-character reveal is unavailable when prior feedback already
 confirmed that character. Chinese pinyin candidates remain normal, unscored
 input, and nearby-word suggestions remain Korean-only.

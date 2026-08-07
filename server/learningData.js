@@ -44,7 +44,7 @@ const KOREAN_HINT_TYPES = new Set([
 ]);
 const CHINESE_HINT_TYPES = new Set([
   'tone-pattern',
-  'pinyin',
+  'pinyin-initials',
   'broad-meaning',
   'reveal-first-character',
 ]);
@@ -528,7 +528,7 @@ export function createLearningDataService(options = {}) {
         eventId: `save:${normalized}:${current.savedAt}`,
         type: 'word_saved',
         occurredAt: current.savedAt,
-        dateKey: chicagoDateKey(current.savedAt),
+        dateKey: isValidDateKey(context.dateKey) ? context.dateKey : chicagoDateKey(current.savedAt),
         language,
         mode: context.mode === 'practice' ? 'practice' : 'daily',
         roundId: typeof context.roundId === 'string' && context.roundId ? context.roundId : 'saved-words',

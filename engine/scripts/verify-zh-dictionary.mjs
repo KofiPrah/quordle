@@ -12,6 +12,12 @@ const pinyinKey = (value) => String(value ?? '')
   .normalize('NFD')
   .replace(/[\u0300-\u036f]/gu, '')
   .replace(/[^a-zv]/gu, '');
+const pinyinInitial = (value) => {
+  const syllable = pinyinKey(value);
+  const digraph = ['zh', 'ch', 'sh'].find((initial) => syllable.startsWith(initial));
+  if (digraph) return digraph;
+  return /^[bpmfdtnlgkhjqxrzcsyw]/u.test(syllable) ? syllable[0] : '∅';
+};
 const dictionaryManifest = JSON.parse(fs.readFileSync(path.join(engineRoot, 'src', 'zhDictionary.generated.json'), 'utf8'));
 const pinyinManifest = JSON.parse(fs.readFileSync(path.join(engineRoot, 'src', 'zhPinyinIndex.generated.json'), 'utf8'));
 const hintClues = JSON.parse(fs.readFileSync(path.join(engineRoot, 'src', 'zhHintClues.seed.json'), 'utf8'));
@@ -41,12 +47,17 @@ for (const word of seed) {
   const hint = ZH_HINT_METADATA[word];
   const pronunciation = entries[word].pronunciations[0];
   assert(hint, `Chinese answer missing hint metadata: ${word}`);
-  assert.equal(hint.pinyinMarked, pronunciation.pinyinMarked, `Chinese hint pinyin is not canonical: ${word}`);
+  assert.deepEqual(
+    [...hint.pinyinInitials],
+    pronunciation.pinyinPlain.trim().split(/\s+/u).map(pinyinInitial),
+    `Chinese hint pinyin initials are not canonical: ${word}`,
+  );
+  assert(!candidatesByKey[pinyinKey(hint.pinyinInitials.join(' '))], `Chinese pinyin initials form an enterable candidate key: ${word}`);
   assert.deepEqual([...hint.tones], pronunciation.tones, `Chinese hint tones are not canonical: ${word}`);
   assert.equal(hint.meaning, hintClues[word].trim(), `Chinese broad-meaning clue diverged: ${word}`);
   assert.equal(hint.firstCharacter, Array.from(word)[0], `Chinese first-character hint diverged: ${word}`);
   assert(!/\p{Script=Han}/u.test(hint.meaning), `Chinese broad-meaning clue exposes Hanzi: ${word}`);
-  assert(!pinyinKey(hint.meaning).includes(pinyinKey(hint.pinyinMarked)), `Chinese broad-meaning clue exposes pinyin: ${word}`);
+  assert(!pinyinKey(hint.meaning).includes(pinyinKey(pronunciation.pinyinMarked)), `Chinese broad-meaning clue exposes pinyin: ${word}`);
   assert(hint.tones.every((tone) => Number.isInteger(tone) && tone >= 1 && tone <= 5), `Chinese hint has malformed tones: ${word}`);
 }
 

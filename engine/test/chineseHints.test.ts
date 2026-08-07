@@ -15,7 +15,7 @@ describe('Chinese hints', () => {
         let game = chineseGame();
         const expected = [
             ['tone-pattern', ['2', '5'], 2],
-            ['pinyin', 'xué sheng', 5],
+            ['pinyin-initials', ['x', 'sh'], 5],
             ['broad-meaning', 'a person enrolled in a course of learning', 7],
             ['reveal-first-character', '学', 10],
         ] as const;
@@ -32,9 +32,9 @@ describe('Chinese hints', () => {
 
     it('uses the canonical first pronunciation and preserves neutral tone 5', () => {
         const game = createGame({ targetWords: ['女人', '学生', '学校', '老师'], language: 'zh' });
-        expect(requestChineseHint(game, 0, 'pinyin')).toMatchObject({
+        expect(requestChineseHint(game, 0, 'pinyin-initials')).toMatchObject({
             ok: true,
-            hint: { payload: 'nǚ rén' },
+            hint: { payload: ['n', 'r'] },
         });
         expect(requestChineseHint(game, 1, 'tone-pattern')).toMatchObject({
             ok: true,
@@ -83,15 +83,15 @@ describe('Chinese hints', () => {
 
         const solved = chineseGame();
         solved.boards[0].solved = true;
-        expect(requestChineseHint(solved, 0, 'pinyin')).toMatchObject({ ok: false, code: 'BOARD_SOLVED' });
+        expect(requestChineseHint(solved, 0, 'pinyin-initials')).toMatchObject({ ok: false, code: 'BOARD_SOLVED' });
         solved.boards[0].solved = false;
         solved.gameOver = true;
-        expect(requestChineseHint(solved, 0, 'pinyin')).toMatchObject({ ok: false, code: 'GAME_OVER' });
+        expect(requestChineseHint(solved, 0, 'pinyin-initials')).toMatchObject({ ok: false, code: 'GAME_OVER' });
     });
 
     it('uses persisted hint costs in the unchanged score formula', () => {
         let game = chineseGame();
-        for (const type of ['tone-pattern', 'pinyin', 'broad-meaning', 'reveal-first-character'] as const) {
+        for (const type of ['tone-pattern', 'pinyin-initials', 'broad-meaning', 'reveal-first-character'] as const) {
             const result = requestChineseHint(game, 0, type);
             expect(result.ok).toBe(true);
             if (result.ok) game = result.state;
@@ -111,8 +111,17 @@ describe('Chinese hints', () => {
         expect(Object.keys(ZH_HINT_METADATA).sort()).toEqual([...ZH_ANSWER_WORDS].sort());
         Object.entries(ZH_HINT_METADATA).forEach(([word, hint]) => {
             expect(hint.firstCharacter).toBe(Array.from(word)[0]);
+            expect(hint.pinyinInitials).toHaveLength(2);
             expect(hint.tones).toHaveLength(2);
             expect(hint.meaning).not.toMatch(/\p{Script=Han}/u);
+        });
+    });
+
+    it('represents a vowel-initial syllable without exposing its pinyin', () => {
+        const game = createGame({ targetWords: ['儿子', '学生', '学校', '老师'], language: 'zh' });
+        expect(requestChineseHint(game, 0, 'pinyin-initials')).toMatchObject({
+            ok: true,
+            hint: { payload: ['∅', 'z'] },
         });
     });
 });

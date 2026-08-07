@@ -1908,9 +1908,7 @@ function renderHintResult(type, payload) {
     ? ' lang="ko"'
     : type === 'reveal-first-character'
       ? ' lang="zh-Hans"'
-      : type === 'pinyin'
-        ? ' lang="zh-Latn-pinyin"'
-        : '';
+      : '';
   return `<div class="hint-option-result" role="status" aria-live="polite"${lang}>${escapeHtml(formatted)}</div>`;
 }
 

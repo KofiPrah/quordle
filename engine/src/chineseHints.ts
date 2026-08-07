@@ -26,8 +26,8 @@ function getHintPayload(board: BoardState, type: ChineseHintType): HintUse['payl
     switch (type) {
         case 'tone-pattern':
             return [...metadata.tones].map(String);
-        case 'pinyin':
-            return metadata.pinyinMarked;
+        case 'pinyin-initials':
+            return [...metadata.pinyinInitials];
         case 'broad-meaning':
             return metadata.meaning;
         case 'reveal-first-character':

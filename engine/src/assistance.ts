@@ -8,7 +8,7 @@ export const HINT_COSTS: Readonly<Record<HintType, number>> = Object.freeze({
     'batchim-count': 5,
     'reveal-first-syllable': 10,
     'tone-pattern': 2,
-    'pinyin': 5,
+    'pinyin-initials': 5,
     'broad-meaning': 7,
     'reveal-first-character': 10,
 });
@@ -22,7 +22,7 @@ export const KOREAN_HINT_TYPES: readonly KoreanHintType[] = Object.freeze([
 
 export const CHINESE_HINT_TYPES: readonly ChineseHintType[] = Object.freeze([
     'tone-pattern',
-    'pinyin',
+    'pinyin-initials',
     'broad-meaning',
     'reveal-first-character',
 ]);

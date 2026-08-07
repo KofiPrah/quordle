@@ -28,9 +28,9 @@ const CHINESE_HINT_UI_OPTIONS = Object.freeze([
     description: 'Shows the tones of both syllables without revealing their sounds.',
   },
   {
-    type: 'pinyin',
-    label: 'Pinyin',
-    description: 'Shows the answer’s full tone-marked pinyin.',
+    type: 'pinyin-initials',
+    label: 'Pinyin initials',
+    description: 'Shows only the opening sound of each pinyin syllable.',
   },
   {
     type: 'broad-meaning',
@@ -67,7 +67,11 @@ export function formatHintPayload(language, type, payload) {
       const labels = tones.map((tone) => String(tone) === '5' ? 'neutral tone' : `tone ${tone}`);
       return `Tone pattern: ${labels.join(' + ')}`;
     }
-    if (type === 'pinyin') return payload ? `Pinyin: ${String(payload)}` : '';
+    if (type === 'pinyin-initials') {
+      const initials = Array.isArray(payload) ? payload : [];
+      if (initials.length !== 2 || initials.some((initial) => typeof initial !== 'string' || !initial)) return '';
+      return `Pinyin initials: ${initials.map((initial) => initial === '∅' ? 'no initial' : `${initial}…`).join(' · ')}`;
+    }
     if (type === 'broad-meaning') return payload ? `Meaning: ${String(payload)}` : '';
     if (type === 'reveal-first-character') return payload ? `First character: ${String(payload)}` : '';
     return '';

@@ -24,7 +24,7 @@ export interface LanguageWord {
 export type KoreanHintType = 'part-of-speech' | 'semantic-category' | 'batchim-count' | 'reveal-first-syllable';
 
 /** Simplified Chinese learning hints available during an active round. */
-export type ChineseHintType = 'tone-pattern' | 'pinyin' | 'broad-meaning' | 'reveal-first-character';
+export type ChineseHintType = 'tone-pattern' | 'pinyin-initials' | 'broad-meaning' | 'reveal-first-character';
 
 /** Every persisted scored hint type. */
 export type HintType = KoreanHintType | ChineseHintType;

@@ -132,7 +132,7 @@ test('daily Korean and Chinese REST and WebSocket hints are authoritative, idemp
     assert.ok(todayBoard >= 0);
     const zhHintRequests = [
       { boardIndex: todayBoard, hintType: 'tone-pattern', payload: ['1', '1'], cost: 2 },
-      { boardIndex: todayBoard, hintType: 'pinyin', payload: 'jīn tiān', cost: 5 },
+      { boardIndex: todayBoard, hintType: 'pinyin-initials', payload: ['j', 't'], cost: 5 },
       { boardIndex: todayBoard, hintType: 'broad-meaning', payload: 'the current calendar day', cost: 7 },
       { boardIndex: 0, hintType: 'reveal-first-character', payload: '大', cost: 10 },
     ];
@@ -309,13 +309,13 @@ test('daily Korean and Chinese REST and WebSocket hints are authoritative, idemp
       type: 'HINT',
       ...zhIdentity,
       boardIndex: todayBoard,
-      hintType: 'pinyin',
+      hintType: 'pinyin-initials',
     }));
     const zhWsHinted = await connection.inbox.wait(
       (message) => message.type === 'STATE' && message.playerState.gameState.assistance.hints.length === 1,
       'Chinese hinted state',
     );
-    assert.deepEqual(zhWsHinted.playerState.gameState.assistance.hints[0].payload, 'jīn tiān');
+    assert.deepEqual(zhWsHinted.playerState.gameState.assistance.hints[0].payload, ['j', 't']);
     await connection.inbox.wait(
       (message) => message.type === 'LEADERBOARD' && message.language === 'zh' && message.leaderboard.some((entry) => entry.hintPenalty === 5),
       'Chinese assisted leaderboard',

@@ -24,7 +24,7 @@ test('hint UI exposes language-specific graduated options', () => {
   ]);
   assert.deepEqual(getHintUiOptions('zh').map((option) => option.type), [
     'tone-pattern',
-    'pinyin',
+    'pinyin-initials',
     'broad-meaning',
     'reveal-first-character',
   ]);
@@ -43,7 +43,8 @@ test('hint payloads receive concise accessible labels', () => {
   assert.equal(formatHintPayload('ko', 'batchim-count', 2), '2 of 2 syllables have batchim');
   assert.equal(formatHintPayload('ko', 'reveal-first-syllable', '가'), '가');
   assert.equal(formatHintPayload('zh', 'tone-pattern', ['2', '5']), 'Tone pattern: tone 2 + neutral tone');
-  assert.equal(formatHintPayload('zh', 'pinyin', 'xué sheng'), 'Pinyin: xué sheng');
+  assert.equal(formatHintPayload('zh', 'pinyin-initials', ['x', 'sh']), 'Pinyin initials: x… · sh…');
+  assert.equal(formatHintPayload('zh', 'pinyin-initials', ['∅', 'z']), 'Pinyin initials: no initial · z…');
   assert.equal(formatHintPayload('zh', 'broad-meaning', 'a person enrolled in learning'), 'Meaning: a person enrolled in learning');
   assert.equal(formatHintPayload('zh', 'reveal-first-character', '学'), 'First character: 学');
 });
