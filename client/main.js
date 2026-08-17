@@ -45,6 +45,7 @@ import {
   loadKoreanRecognitionSnapshot,
 } from "./src/dictionary.js";
 import { getSheetDragAction, renderOverlaySheet, trapOverlayFocus } from "./src/overlaySheet.js";
+import { handlePhysicalKeyboardEvent } from "./src/physicalKeyboard.js";
 import {
   formatHintPayload,
   getBoardGridHintVisuals,
@@ -4299,48 +4300,18 @@ const QWERTY_TO_JAMO = {
 
 // Physical keyboard listener
 document.addEventListener('keydown', (e) => {
-  if (e.ctrlKey || e.metaKey || e.altKey) return;
-
-  if (activeOverlay) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      closeActiveOverlay();
-    }
-    return;
-  }
-
-  if (currentLanguage === 'zh' && e.target?.matches?.('.chinese-guess-input')) {
-    if (e.isComposing || chineseCompositionActive) return;
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      handleKeyPress(KEY_ENTER);
-    }
-    return;
-  }
-
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    handleKeyPress(KEY_ENTER);
-  } else if (e.key === 'Backspace') {
-    e.preventDefault();
-    handleKeyPress(KEY_BACKSPACE);
-  } else if (currentLanguage === 'ko') {
-    const ch = e.key;
-    // First, try QWERTY → jamo mapping (for users typing on English keyboard)
-    const mapped = QWERTY_TO_JAMO[ch];
-    if (mapped) {
-      e.preventDefault();
-      handleKeyPress(mapped);
-    }
-    // Also accept raw jamo from a physical Korean keyboard / OS IME
-    else if (ch.length === 1 && (isConsonant(ch) || isVowel(ch))) {
-      e.preventDefault();
-      handleKeyPress(ch);
-    }
-  } else if (/^[a-zA-Z]$/.test(e.key)) {
-    e.preventDefault();
-    handleKeyPress(e.key.toUpperCase());
-  }
+  handlePhysicalKeyboardEvent(e, {
+    activeOverlay,
+    closeActiveOverlay,
+    currentLanguage,
+    chineseCompositionActive,
+    handleKeyPress,
+    keyEnter: KEY_ENTER,
+    keyBackspace: KEY_BACKSPACE,
+    qwertyToJamo: QWERTY_TO_JAMO,
+    isConsonant,
+    isVowel,
+  });
 });
 
 // Start a new practice round (random targets)
