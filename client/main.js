@@ -26,11 +26,13 @@ import {
   activateBoardStatus,
   estimateOverviewTileWidth,
   getRemainingGuessCount,
+  getSolvedHistoryFocusSelector,
   getVisibleActiveBoardEntries,
   partitionBoards,
   reconcileExpandedSolvedBoardIndex,
   reconcileSelectedBoardIndex,
   resolveRoundBoardLayoutMode,
+  rerenderAdaptiveBoardLayout,
   setRoundBoardLayoutMode,
   toggleExpandedSolvedBoardIndex,
 } from "./src/boardLayout.js";
@@ -707,9 +709,13 @@ function estimateCurrentOverviewTileWidth() {
     contentPaddingRight: hasMeasuredStageWidth ? 0 : Math.max(0, totalPaddingRight - safeAreaRight),
     stagePaddingLeft: cssPixelValue(stageStyle?.paddingLeft, fallbackStagePadding),
     stagePaddingRight: cssPixelValue(stageStyle?.paddingRight, fallbackStagePadding),
+    stageBorderLeft: cssPixelValue(stageStyle?.borderLeftWidth),
+    stageBorderRight: cssPixelValue(stageStyle?.borderRightWidth),
     boardGap: cssPixelValue(boardGridStyle?.columnGap, fallbackBoardGap),
     boardPaddingLeft: cssPixelValue(boardStyle?.paddingLeft, fallbackBoardPadding),
     boardPaddingRight: cssPixelValue(boardStyle?.paddingRight, fallbackBoardPadding),
+    boardBorderLeft: cssPixelValue(boardStyle?.borderLeftWidth),
+    boardBorderRight: cssPixelValue(boardStyle?.borderRightWidth),
     tileGap: cssPixelValue(rowStyle?.columnGap, fallbackTileGap),
     wordLength: gameState.wordLength,
   });
@@ -778,11 +784,13 @@ function syncActivityViewportHeight() {
   if (measurement.height <= 0) return;
 
   document.documentElement.style.setProperty('--app-height', `${measurement.height}px`);
-  if (syncAdaptiveBoardLayoutMeasurement()) {
-    renderApp();
-    setupKeyboardListeners();
-    return;
-  }
+  if (rerenderAdaptiveBoardLayout({
+    layoutModeChanged: syncAdaptiveBoardLayoutMeasurement(),
+    overlayActive: Boolean(activeOverlay),
+    render: renderApp,
+    bindListeners: setupKeyboardListeners,
+    restoreOverlayFocus: focusActiveOverlay,
+  })) return;
   requestAnimationFrame(() => logViewportMetrics(measurement));
 }
 
@@ -4082,6 +4090,10 @@ function setupKeyboardListeners() {
   document.querySelectorAll('[data-toggle-solved-board]').forEach((button) => {
     button.addEventListener('click', () => {
       const boardIndex = Number(button.dataset.toggleSolvedBoard);
+      const postRenderFocusSelector = getSolvedHistoryFocusSelector(
+        getCurrentBoardLayoutMode(),
+        boardIndex,
+      );
       expandedSolvedBoardIndex = toggleExpandedSolvedBoardIndex(
         gameState.boards,
         expandedSolvedBoardIndex,
@@ -4089,7 +4101,7 @@ function setupKeyboardListeners() {
       );
       renderApp();
       setupKeyboardListeners();
-      requestAnimationFrame(() => document.querySelector(`[data-toggle-solved-board="${boardIndex}"]`)?.focus());
+      requestAnimationFrame(() => document.querySelector(postRenderFocusSelector)?.focus());
     });
   });
 

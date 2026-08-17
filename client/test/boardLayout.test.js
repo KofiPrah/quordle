@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as boardLayout from '../src/boardLayout.js';
 import {
   activateBoardStatus,
   estimateOverviewTileWidth,
@@ -85,21 +86,25 @@ const narrowMobileGeometry = {
   contentPaddingRight: 4,
   stagePaddingLeft: 5,
   stagePaddingRight: 5,
+  stageBorderLeft: 1,
+  stageBorderRight: 1,
   boardGap: 4,
   boardPaddingLeft: 3,
   boardPaddingRight: 3,
+  boardBorderLeft: 1,
+  boardBorderRight: 1,
   tileGap: 2,
 };
 
 test('overview defaults at the inclusive 24px tile-width boundary', () => {
   const atThreshold = estimateOverviewTileWidth({
     ...narrowMobileGeometry,
-    viewportWidth: 342,
+    viewportWidth: 348,
     wordLength: 6,
   });
   const belowThreshold = estimateOverviewTileWidth({
     ...narrowMobileGeometry,
-    viewportWidth: 341,
+    viewportWidth: 347,
     wordLength: 6,
   });
 
@@ -123,14 +128,37 @@ test('narrow mobile defaults account for safe area and 5, 6, and 7-letter geomet
     wordLength: 7,
   })), 'focus');
 
-  const withDiscordSafeArea = estimateOverviewTileWidth({
+  const atThresholdWithSafeArea = estimateOverviewTileWidth({
     ...narrowMobileGeometry,
-    viewportWidth: 342,
+    viewportWidth: 370,
     safeAreaLeft: 12,
     safeAreaRight: 10,
     wordLength: 6,
   });
-  assert.ok(withDiscordSafeArea < 24);
+  const belowThresholdWithSafeArea = estimateOverviewTileWidth({
+    ...narrowMobileGeometry,
+    viewportWidth: 369,
+    safeAreaLeft: 12,
+    safeAreaRight: 10,
+    wordLength: 6,
+  });
+  assert.equal(atThresholdWithSafeArea, 24);
+  assert.ok(belowThresholdWithSafeArea < 24);
+});
+
+test('automatic layout rerender restores an open overlay after replacing its dialog', () => {
+  const events = [];
+  const rerender = boardLayout.rerenderAdaptiveBoardLayout ?? (() => false);
+  const handled = rerender({
+    layoutModeChanged: true,
+    overlayActive: true,
+    render: () => events.push('render'),
+    bindListeners: () => events.push('bind-listeners'),
+    restoreOverlayFocus: () => events.push('restore-overlay-focus'),
+  });
+
+  assert.equal(handled, true);
+  assert.deepEqual(events, ['render', 'bind-listeners', 'restore-overlay-focus']);
 });
 
 test('manual layout choice survives rerenders only for its versioned round', () => {
@@ -160,6 +188,14 @@ test('focus navigation selects an unsolved hint target and opens solved history'
     expandedSolvedBoardIndex: 1,
     action: 'history',
   });
+});
+
+test('collapsing solved history returns focus to a visible Focus-mode status button', () => {
+  const getFocusSelector = boardLayout.getSolvedHistoryFocusSelector
+    ?? ((layoutMode, boardIndex) => `[data-toggle-solved-board="${boardIndex}"]`);
+
+  assert.equal(getFocusSelector('focus', 1), '[data-board-status="1"]');
+  assert.equal(getFocusSelector('overview', 1), '[data-toggle-solved-board="1"]');
 });
 
 test('overview and focus reuse the same draft and confirmed board histories', () => {

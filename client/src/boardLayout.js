@@ -51,9 +51,13 @@ export function estimateOverviewTileWidth({
   contentPaddingRight = 0,
   stagePaddingLeft = 0,
   stagePaddingRight = 0,
+  stageBorderLeft = 0,
+  stageBorderRight = 0,
   boardGap = 0,
   boardPaddingLeft = 0,
   boardPaddingRight = 0,
+  boardBorderLeft = 0,
+  boardBorderRight = 0,
   tileGap = 0,
   wordLength,
 } = {}) {
@@ -67,12 +71,16 @@ export function estimateOverviewTileWidth({
       - finiteNonNegative(contentPaddingLeft)
       - finiteNonNegative(contentPaddingRight)
       - finiteNonNegative(stagePaddingLeft)
-      - finiteNonNegative(stagePaddingRight));
+      - finiteNonNegative(stagePaddingRight)
+      - finiteNonNegative(stageBorderLeft)
+      - finiteNonNegative(stageBorderRight));
   const boardWidth = Math.max(0, (stageWidth - finiteNonNegative(boardGap)) / 2);
   const tileSpace = Math.max(0,
     boardWidth
       - finiteNonNegative(boardPaddingLeft)
       - finiteNonNegative(boardPaddingRight)
+      - finiteNonNegative(boardBorderLeft)
+      - finiteNonNegative(boardBorderRight)
       - ((length - 1) * finiteNonNegative(tileGap)));
   return tileSpace / length;
 }
@@ -98,6 +106,27 @@ export function getVisibleActiveBoardEntries(boards = [], mode = 'overview', sel
   if (mode !== 'focus') return active;
   const selected = reconcileSelectedBoardIndex(boards, selectedBoardIndex);
   return active.filter(({ index }) => index === selected);
+}
+
+export function rerenderAdaptiveBoardLayout({
+  layoutModeChanged = false,
+  overlayActive = false,
+  render,
+  bindListeners,
+  restoreOverlayFocus,
+} = {}) {
+  if (!layoutModeChanged) return false;
+  render?.();
+  bindListeners?.();
+  if (overlayActive) restoreOverlayFocus?.();
+  return true;
+}
+
+export function getSolvedHistoryFocusSelector(layoutMode, boardIndex) {
+  if (!Number.isInteger(boardIndex) || boardIndex < 0) return null;
+  return layoutMode === 'focus'
+    ? `[data-board-status="${boardIndex}"]`
+    : `[data-toggle-solved-board="${boardIndex}"]`;
 }
 
 export function activateBoardStatus(
