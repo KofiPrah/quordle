@@ -174,7 +174,9 @@ test('transport failure retains a correlated receipt through stale state until l
     },
     gameState: {
       guessCount: 3,
-      boards: [{ guesses: ['laoshi', 'gongsi', 'jiejie'] }],
+      boards: Array.from({ length: 4 }, () => ({
+        guesses: ['laoshi', 'gongsi', 'jiejie'],
+      })),
     },
   };
   const confirmed = chineseInput.reconcileChineseSubmissionAgainstState?.(unresolved.state, acceptedLate);
@@ -263,6 +265,104 @@ test('advanced authoritative history with a different key releases only old retr
   });
   assert.equal(fresh.submission.submissionId, 'submission-3');
   assert.equal(fresh.state.submissionFingerprint.guessCount, 3);
+});
+
+test('mixed authoritative board history remains unresolved and cannot unlock a new-ID submission', () => {
+  const createSubmissionId = submissionIdFactory('submission-1', 'submission-2');
+  const started = chineseInput.beginChineseSubmission(
+    update('jie3 jie3', 6),
+    1,
+    { createSubmissionId },
+  );
+  const unresolved = chineseInput.rejectChineseSubmission(
+    started.state,
+    'Network unavailable.',
+    { retainSubmissionFingerprint: true },
+  );
+
+  const reconciliation = chineseInput.reconcileChineseSubmissionAgainstState(unresolved, {
+    gameState: {
+      guessCount: 3,
+      boards: [
+        { guesses: ['laoshi', 'xuesheng', 'gongsi'] },
+        { guesses: ['laoshi', 'gongsi', 'gongsi'] },
+        { guesses: ['laoshi', 'xuesheng', 'gongsi'] },
+        { guesses: ['laoshi', 'gongsi', 'gongsi'] },
+      ],
+    },
+  });
+  const differentDraft = chineseInput.updateChineseInput(reconciliation.state, 'mi miao', {
+    wordLength: 6,
+    guessKeys: new Set([...guessKeys, 'mimiao']),
+    parseInput,
+    normalizeInput,
+  });
+  const retry = chineseInput.beginChineseSubmission(differentDraft, 3, { createSubmissionId });
+
+  assert.deepEqual({
+    reconciliationStatus: reconciliation.status,
+    reconciliationFingerprint: reconciliation.state.submissionFingerprint,
+    retrySubmission: retry.submission,
+    retryFingerprint: retry.state.submissionFingerprint,
+  }, {
+    reconciliationStatus: 'unconfirmed',
+    reconciliationFingerprint: unresolved.submissionFingerprint,
+    retrySubmission: null,
+    retryFingerprint: unresolved.submissionFingerprint,
+  });
+});
+
+test('missing, non-string, empty, or partial authoritative board history remains unresolved', async (t) => {
+  const started = chineseInput.beginChineseSubmission(
+    update('jie3 jie3', 6),
+    1,
+    { createSubmissionId: submissionIdFactory('submission-1') },
+  );
+  const unresolved = chineseInput.rejectChineseSubmission(
+    started.state,
+    'Network unavailable.',
+    { retainSubmissionFingerprint: true },
+  );
+  const completeDifferentBoards = Array.from({ length: 4 }, () => ({
+    guesses: ['laoshi', 'xuesheng', 'gongsi'],
+  }));
+  const sparseMatchingBoards = Array.from({ length: 4 }, () => ({
+    guesses: ['laoshi', 'jiejie', 'gongsi'],
+  }));
+  delete sparseMatchingBoards[2];
+  const cases = [
+    [
+      'missing',
+      completeDifferentBoards.map((board, index) => (
+        index === 2 ? { guesses: ['laoshi'] } : board
+      )),
+    ],
+    [
+      'non-string',
+      completeDifferentBoards.map((board, index) => (
+        index === 2 ? { guesses: ['laoshi', null, 'gongsi'] } : board
+      )),
+    ],
+    ['empty', completeDifferentBoards.map(() => ({ guesses: ['laoshi', '', 'gongsi'] }))],
+    ['sparse', sparseMatchingBoards],
+    [
+      'partial',
+      completeDifferentBoards.slice(0, 3).map(() => ({
+        guesses: ['laoshi', 'jiejie', 'gongsi'],
+      })),
+    ],
+  ];
+
+  for (const [label, boards] of cases) {
+    await t.test(label, () => {
+      const reconciliation = chineseInput.reconcileChineseSubmissionAgainstState(unresolved, {
+        gameState: { guessCount: 3, boards },
+      });
+
+      assert.equal(reconciliation.status, 'unconfirmed');
+      assert.deepEqual(reconciliation.state.submissionFingerprint, unresolved.submissionFingerprint);
+    });
+  }
 });
 
 test('authoritative counts behind or equal to the fingerprint stay unresolved and cannot relocate it', () => {
@@ -464,7 +564,9 @@ test('versioned unresolved draft survives reload, reuses its ID, and clears afte
     },
     gameState: {
       guessCount: 3,
-      boards: [{ guesses: ['laoshi', 'gongsi', 'jiejie'] }],
+      boards: Array.from({ length: 4 }, () => ({
+        guesses: ['laoshi', 'gongsi', 'jiejie'],
+      })),
     },
   });
   assert.equal(confirmed.status, 'confirmed');

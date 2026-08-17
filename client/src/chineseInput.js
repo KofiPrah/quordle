@@ -228,8 +228,9 @@ export function isChineseSubmissionConfirmed(state, playerState) {
   const gameState = playerState?.gameState;
   if (!Number.isInteger(gameState?.guessCount) || gameState.guessCount <= guessCount) return false;
   return Array.isArray(gameState.boards)
-    && gameState.boards.length > 0
-    && gameState.boards.every((board) => board?.guesses?.[guessCount] === normalizedText);
+    && gameState.boards.length === 4
+    && Array.from(gameState.boards, (board) => board?.guesses?.[guessCount])
+      .every((guess) => guess === normalizedText);
 }
 
 export function reconcileChineseSubmissionAgainstState(state, playerState) {
@@ -240,13 +241,16 @@ export function reconcileChineseSubmissionAgainstState(state, playerState) {
   const { normalizedText, guessCount } = state.submissionFingerprint;
   const gameState = playerState?.gameState;
   const guessesAtIndex = Array.isArray(gameState?.boards) && gameState.boards.length > 0
-    ? gameState.boards.map((board) => board?.guesses?.[guessCount])
+    ? Array.from(gameState.boards, (board) => board?.guesses?.[guessCount])
     : [];
   const indexIsAuthoritativelyOccupied = Number.isInteger(gameState?.guessCount)
     && gameState.guessCount > guessCount
-    && guessesAtIndex.length > 0
-    && guessesAtIndex.every((guess) => typeof guess === 'string');
-  if (indexIsAuthoritativelyOccupied && guessesAtIndex.some((guess) => guess !== normalizedText)) {
+    && guessesAtIndex.length === 4
+    && guessesAtIndex.every((guess) => typeof guess === 'string' && guess.length > 0);
+  const indexHasUniformDifferentGuess = indexIsAuthoritativelyOccupied
+    && guessesAtIndex[0] !== normalizedText
+    && guessesAtIndex.every((guess) => guess === guessesAtIndex[0]);
+  if (indexHasUniformDifferentGuess) {
     return {
       state: {
         ...state,
