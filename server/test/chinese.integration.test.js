@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 
 const serverDirectory = fileURLToPath(new URL('..', import.meta.url));
+const puzzleVariant = 'pinyin-latin-v2';
 
 async function reservePort() {
   const probe = net.createServer();
@@ -93,28 +94,29 @@ test('Chinese REST and WebSocket games validate, persist, and isolate language s
     assert.equal(legacyEnglish.payload.language, 'en');
 
     const joined = await post('/api/game/join', {
-      roomId: 'phase7', userId: 'rest-zh', dateKey, language: 'zh',
+      roomId: 'phase7', userId: 'rest-zh', dateKey, language: 'zh', puzzleVariant,
     });
     assert.equal(joined.response.status, 200);
     assert.equal(joined.payload.language, 'zh');
     assert.equal(joined.payload.gameState.maxGuesses, 9);
-    assert.ok(joined.payload.gameState.boards.every((board) => /^\p{Script=Han}{2}$/u.test(board.targetWord)));
+    assert.ok(joined.payload.gameState.boards.every((board) => /^[a-z]+$/u.test(board.targetWord)));
+    assert.ok(joined.payload.gameState.boards.every((board) => /^\p{Script=Han}{2}$/u.test(board.targetId)));
 
     const invalidGuess = await post('/api/game/guess', {
-      roomId: 'phase7', userId: 'rest-zh', dateKey, language: 'zh', guess: 'hello',
+      roomId: 'phase7', userId: 'rest-zh', dateKey, language: 'zh', puzzleVariant, guess: 'hello',
     });
     assert.equal(invalidGuess.response.status, 400);
 
     const target = joined.payload.gameState.boards[0].targetWord;
     const guessed = await post('/api/game/guess', {
-      roomId: 'phase7', userId: 'rest-zh', dateKey, language: 'zh', guess: target,
+      roomId: 'phase7', userId: 'rest-zh', dateKey, language: 'zh', puzzleVariant, guess: target,
     });
     assert.equal(guessed.response.status, 200);
     assert.equal(guessed.payload.gameState.guessCount, 1);
     assert.equal(guessed.payload.gameState.boards[0].solved, true);
 
     const rejoined = await post('/api/game/join', {
-      roomId: 'phase7', userId: 'rest-zh', dateKey, language: 'zh',
+      roomId: 'phase7', userId: 'rest-zh', dateKey, language: 'zh', puzzleVariant,
     });
     assert.equal(rejoined.payload.gameState.guessCount, 1);
 
@@ -131,11 +133,11 @@ test('Chinese REST and WebSocket games validate, persist, and isolate language s
     const inbox = createInbox(socket);
     socket.send(JSON.stringify({ type: 'JOIN', roomId: 'phase7-ws', dateKey, visibleUserId: 'bad', language: 'xx' }));
     assert.equal((await inbox.wait((message) => message.code === 'INVALID_LANGUAGE')).code, 'INVALID_LANGUAGE');
-    socket.send(JSON.stringify({ type: 'JOIN', roomId: 'phase7-ws', dateKey, visibleUserId: 'ws-zh', language: 'zh' }));
+    socket.send(JSON.stringify({ type: 'JOIN', roomId: 'phase7-ws', dateKey, visibleUserId: 'ws-zh', language: 'zh', puzzleVariant }));
     const state = await inbox.wait((message) => message.type === 'STATE');
     assert.equal(state.playerState.language, 'zh');
     const wsTarget = state.playerState.gameState.boards[0].targetWord;
-    socket.send(JSON.stringify({ type: 'GUESS', roomId: 'phase7-ws', dateKey, visibleUserId: 'ws-zh', language: 'zh', guess: wsTarget }));
+    socket.send(JSON.stringify({ type: 'GUESS', roomId: 'phase7-ws', dateKey, visibleUserId: 'ws-zh', language: 'zh', puzzleVariant, guess: wsTarget }));
     const updated = await inbox.wait((message) => message.type === 'STATE' && message.playerState.gameState.guessCount === 1);
     assert.equal(updated.playerState.gameState.boards[0].solved, true);
     socket.close();

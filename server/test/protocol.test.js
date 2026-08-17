@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ErrorCodes,
+  isGuessMessage,
   isHintMessage,
+  isInvalidGuessAttemptMessage,
+  isJoinMessage,
+  makePlayerKey,
+  makeRoomKey,
   sortLeaderboard,
   toLeaderboardEntry,
 } from '../dist/protocol.js';
@@ -38,6 +43,39 @@ test('hint protocol validates the complete request contract', () => {
   assert.equal(isHintMessage({ ...valid, boardIndex: 0.5 }), false);
   assert.equal(isHintMessage({ ...valid, hintType: 7 }), false);
   assert.equal(ErrorCodes.INVALID_LANGUAGE, 'INVALID_LANGUAGE');
+});
+
+test('Chinese protocol guards require the exact Pinyin puzzle version', () => {
+  const join = {
+    type: 'JOIN',
+    roomId: 'room',
+    dateKey: '2026-08-17',
+    visibleUserId: 'player',
+    language: 'zh',
+    puzzleVariant: 'pinyin-latin-v2',
+  };
+  const guess = { ...join, type: 'GUESS', guess: 'qu nian' };
+  const hint = { ...join, type: 'HINT', boardIndex: 0, hintType: 'syllable-boundary' };
+  const invalidAttempt = { ...join, type: 'INVALID_GUESS_ATTEMPT', guess: 'qu/nian', attemptId: 'attempt' };
+
+  assert.equal(isJoinMessage(join), true);
+  assert.equal(isGuessMessage(guess), true);
+  assert.equal(isHintMessage(hint), true);
+  assert.equal(isInvalidGuessAttemptMessage(invalidAttempt), true);
+  assert.equal(isJoinMessage({ ...join, puzzleVariant: undefined }), false);
+  assert.equal(isGuessMessage({ ...guess, puzzleVariant: 'hanzi-v1' }), false);
+  assert.equal(isHintMessage({ ...hint, puzzleVariant: undefined }), false);
+  assert.equal(isInvalidGuessAttemptMessage({ ...invalidAttempt, puzzleVariant: undefined }), false);
+  assert.equal(isJoinMessage({ ...join, language: 'ko', puzzleVariant: undefined }), true);
+  assert.equal(ErrorCodes.UNSUPPORTED_PUZZLE_VERSION, 'UNSUPPORTED_PUZZLE_VERSION');
+  assert.equal(ErrorCodes.INVALID_FORMAT, 'INVALID_FORMAT');
+  assert.equal(ErrorCodes.INVALID_LENGTH, 'INVALID_LENGTH');
+  assert.equal(ErrorCodes.NOT_IN_LIST, 'NOT_IN_LIST');
+  assert.equal(makeRoomKey('room', '2026-08-17', 'zh', 'pinyin-latin-v2'), 'room:2026-08-17:zh:pinyin-latin-v2');
+  assert.equal(
+    makePlayerKey('room', '2026-08-17', 'player', 'zh', 'pinyin-latin-v2'),
+    'room:2026-08-17:zh:pinyin-latin-v2:player',
+  );
 });
 
 test('legacy players normalize to unassisted leaderboard scoring', () => {

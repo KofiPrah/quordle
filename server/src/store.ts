@@ -14,7 +14,7 @@ import {
     toLeaderboardEntry,
     sortLeaderboard,
 } from './protocol.js';
-import type { GameState } from '@quordle/engine';
+import type { GameState, PuzzleVariant } from '@quordle/engine';
 
 // ============================================================================
 // In-Memory Storage
@@ -29,6 +29,8 @@ export interface WsClient {
     visibleUserId: VisibleUserId;
     roomId: RoomId;
     dateKey: DateKey;
+    language?: Language;
+    puzzleVariant?: PuzzleVariant;
 }
 
 const wsConnections = new Map<string, Set<WsClient>>();
@@ -38,13 +40,20 @@ const wsConnections = new Map<string, Set<WsClient>>();
 // ============================================================================
 
 /** Get or create a room state */
-export function getOrCreateRoom(roomId: RoomId, dateKey: DateKey): RoomState {
-    const key = makeRoomKey(roomId, dateKey);
+export function getOrCreateRoom(
+    roomId: RoomId,
+    dateKey: DateKey,
+    language: Language = 'en',
+    puzzleVariant?: PuzzleVariant,
+): RoomState {
+    const key = makeRoomKey(roomId, dateKey, language, puzzleVariant);
     let room = roomStore.get(key);
     if (!room) {
         room = {
             roomId,
             dateKey,
+            language,
+            puzzleVariant,
             players: new Map(),
             leaderboard: [],
             lastBroadcastAt: Date.now(),
@@ -55,23 +64,35 @@ export function getOrCreateRoom(roomId: RoomId, dateKey: DateKey): RoomState {
 }
 
 /** Get a room state (returns undefined if not exists) */
-export function getRoom(roomId: RoomId, dateKey: DateKey): RoomState | undefined {
-    return roomStore.get(makeRoomKey(roomId, dateKey));
+export function getRoom(
+    roomId: RoomId,
+    dateKey: DateKey,
+    language: Language = 'en',
+    puzzleVariant?: PuzzleVariant,
+): RoomState | undefined {
+    return roomStore.get(makeRoomKey(roomId, dateKey, language, puzzleVariant));
 }
 
 /** Get a player state from a room */
 export function getPlayer(
     roomId: RoomId,
     dateKey: DateKey,
-    visibleUserId: VisibleUserId
+    visibleUserId: VisibleUserId,
+    language: Language = 'en',
+    puzzleVariant?: PuzzleVariant,
 ): PlayerState | undefined {
-    const room = getRoom(roomId, dateKey);
+    const room = getRoom(roomId, dateKey, language, puzzleVariant);
     return room?.players.get(visibleUserId);
 }
 
 /** Set a player state in a room (creates room if needed) */
 export function setPlayer(playerState: PlayerState): void {
-    const room = getOrCreateRoom(playerState.roomId, playerState.dateKey);
+    const room = getOrCreateRoom(
+        playerState.roomId,
+        playerState.dateKey,
+        playerState.language,
+        playerState.puzzleVariant,
+    );
     room.players.set(playerState.visibleUserId, playerState);
     updateLeaderboard(room);
 }
@@ -80,9 +101,11 @@ export function setPlayer(playerState: PlayerState): void {
 export function removePlayer(
     roomId: RoomId,
     dateKey: DateKey,
-    visibleUserId: VisibleUserId
+    visibleUserId: VisibleUserId,
+    language: Language = 'en',
+    puzzleVariant?: PuzzleVariant,
 ): boolean {
-    const room = getRoom(roomId, dateKey);
+    const room = getRoom(roomId, dateKey, language, puzzleVariant);
     if (!room) return false;
     const deleted = room.players.delete(visibleUserId);
     if (deleted) {
@@ -102,8 +125,13 @@ function updateLeaderboard(room: RoomState): void {
 }
 
 /** Get the current leaderboard for a room */
-export function getLeaderboard(roomId: RoomId, dateKey: DateKey): LeaderboardEntry[] {
-    const room = getRoom(roomId, dateKey);
+export function getLeaderboard(
+    roomId: RoomId,
+    dateKey: DateKey,
+    language: Language = 'en',
+    puzzleVariant?: PuzzleVariant,
+): LeaderboardEntry[] {
+    const room = getRoom(roomId, dateKey, language, puzzleVariant);
     return room?.leaderboard ?? [];
 }
 
@@ -120,6 +148,7 @@ export function createPlayerState(
     mode: GameMode = 'daily',
     language: Language = 'en',
     profile: UserProfile = { displayName: visibleUserId, avatarUrl: null },
+    puzzleVariant?: PuzzleVariant,
 ): PlayerState {
     const now = Date.now();
     return {
@@ -128,6 +157,7 @@ export function createPlayerState(
         dateKey,
         mode,
         language,
+        puzzleVariant,
         profile,
         gameState,
         createdAt: now,
@@ -141,9 +171,11 @@ export function updatePlayerGameState(
     roomId: RoomId,
     dateKey: DateKey,
     visibleUserId: VisibleUserId,
-    gameState: GameState
+    gameState: GameState,
+    language: Language = 'en',
+    puzzleVariant?: PuzzleVariant,
 ): PlayerState | undefined {
-    const player = getPlayer(roomId, dateKey, visibleUserId);
+    const player = getPlayer(roomId, dateKey, visibleUserId, language, puzzleVariant);
     if (!player) return undefined;
 
     const now = Date.now();
@@ -164,7 +196,7 @@ export function updatePlayerGameState(
 
 /** Add a WebSocket connection to a room */
 export function addWsConnection(client: WsClient): void {
-    const key = makeRoomKey(client.roomId, client.dateKey);
+    const key = makeRoomKey(client.roomId, client.dateKey, client.language, client.puzzleVariant);
     let connections = wsConnections.get(key);
     if (!connections) {
         connections = new Set();
@@ -175,7 +207,7 @@ export function addWsConnection(client: WsClient): void {
 
 /** Remove a WebSocket connection from a room */
 export function removeWsConnection(client: WsClient): void {
-    const key = makeRoomKey(client.roomId, client.dateKey);
+    const key = makeRoomKey(client.roomId, client.dateKey, client.language, client.puzzleVariant);
     const connections = wsConnections.get(key);
     if (connections) {
         connections.delete(client);
@@ -186,17 +218,24 @@ export function removeWsConnection(client: WsClient): void {
 }
 
 /** Get all WebSocket connections for a room */
-export function getWsConnections(roomId: RoomId, dateKey: DateKey): Set<WsClient> {
-    return wsConnections.get(makeRoomKey(roomId, dateKey)) ?? new Set();
+export function getWsConnections(
+    roomId: RoomId,
+    dateKey: DateKey,
+    language: Language = 'en',
+    puzzleVariant?: PuzzleVariant,
+): Set<WsClient> {
+    return wsConnections.get(makeRoomKey(roomId, dateKey, language, puzzleVariant)) ?? new Set();
 }
 
 /** Find a WebSocket client by userId in a room */
 export function findWsClient(
     roomId: RoomId,
     dateKey: DateKey,
-    visibleUserId: VisibleUserId
+    visibleUserId: VisibleUserId,
+    language: Language = 'en',
+    puzzleVariant?: PuzzleVariant,
 ): WsClient | undefined {
-    const connections = getWsConnections(roomId, dateKey);
+    const connections = getWsConnections(roomId, dateKey, language, puzzleVariant);
     for (const client of connections) {
         if (client.visibleUserId === visibleUserId) {
             return client;

@@ -4,6 +4,11 @@ import Redis from "ioredis";
 import cron from "node-cron";
 import { calculatePerformanceMetrics } from "@quordle/engine/assistance";
 import { getBotCompletionStatus, getBotLanguagePresentation } from "./botPresentation.js";
+import {
+    completionKeyForEvent,
+    leaderboardSources,
+    playerKeyForSource,
+} from "./botPersistence.js";
 
 // Load .env from parent directory in dev, or current directory in production
 dotenv.config({ path: "../.env" });
@@ -158,26 +163,20 @@ async function getActiveChannels() {
 }
 
 // ========== COMPLETION DEDUP ==========
-// Key: dailyFinish:{guildId}:{channelId}:{dateKey}:{userId}
-
-function makeCompletionDedupeKey(guildId, channelId, dateKey, userId, language = 'en') {
-    return `dailyFinish:${guildId}:${channelId}:${dateKey}:${language}:${userId}`;
-}
-
-async function hasCompletionBeenPosted(guildId, channelId, dateKey, userId, language = 'en') {
+async function hasCompletionBeenPosted(event) {
     if (!redis) return false;
     try {
-        const val = await redis.get(makeCompletionDedupeKey(guildId, channelId, dateKey, userId, language));
+        const val = await redis.get(completionKeyForEvent(event));
         return !!val;
     } catch (err) {
         return false;
     }
 }
 
-async function markCompletionPosted(guildId, channelId, dateKey, userId, language = 'en') {
+async function markCompletionPosted(event) {
     if (!redis) return;
     try {
-        await redis.setex(makeCompletionDedupeKey(guildId, channelId, dateKey, userId, language), DEDUP_TTL_SECONDS, "1");
+        await redis.setex(completionKeyForEvent(event), DEDUP_TTL_SECONDS, "1");
     } catch (err) {
         console.error("[Bot] Failed to mark completion posted:", err.message);
     }
@@ -407,7 +406,7 @@ async function handleDailyFinished(event) {
     await trackActiveChannel(guildId, channelId);
 
     // Dedup check is language-aware so each puzzle can be reported independently.
-    const alreadyPosted = await hasCompletionBeenPosted(guildId, channelId, dateKey, visibleUserId, lang);
+    const alreadyPosted = await hasCompletionBeenPosted(event);
     if (alreadyPosted) {
         console.log(`[Bot] Already posted completion for ${displayName} in ${channelId} on ${dateKey} (${lang})`);
         return;
@@ -424,7 +423,7 @@ async function handleDailyFinished(event) {
         const components = [buildPlayButton()];
 
         await channel.send({ embeds: [embed], components });
-        await markCompletionPosted(guildId, channelId, dateKey, visibleUserId, lang);
+        await markCompletionPosted(event);
         console.log(`[Bot] Posted daily completion for ${displayName} in ${guildId}/${channelId} (${lang})`);
     } catch (err) {
         console.error(`[Bot] Failed to post completion:`, err.message);
@@ -438,15 +437,15 @@ async function fetchLeaderboardForChannel(channelId, dateKey) {
     if (!redis) return [];
 
     const entries = [];
-    for (const language of ["en", "ko", "zh"]) {
+    for (const source of leaderboardSources(channelId, dateKey)) {
+        const { language, puzzleVariant } = source;
         try {
-            const setKey = `roomPlayers:${channelId}:${dateKey}:${language}`;
-            const visibleUserIds = await redis.smembers(setKey);
+            const visibleUserIds = await redis.smembers(source.redisKey);
             if (!visibleUserIds || visibleUserIds.length === 0) continue;
 
             // Load all player states in parallel
             const playerPromises = visibleUserIds.map(async (uid) => {
-                const key = `player:${channelId}:${dateKey}:${language}:${uid}`;
+                const key = playerKeyForSource(source, channelId, dateKey, uid);
                 const data = await redis.get(key);
                 return data ? JSON.parse(data) : null;
             });
@@ -470,6 +469,7 @@ async function fetchLeaderboardForChannel(channelId, dateKey) {
                     won: gs.won,
                     finishedAt: player.finishedAt,
                     language,
+                    ...(puzzleVariant ? { puzzleVariant } : {}),
                 });
             }
         } catch (err) {
@@ -839,10 +839,10 @@ function buildWasPlayingEmbed(profile, gameState, language = 'en') {
 }
 
 async function handleActivityLeave(event) {
-    const { userId, guildId, channelId, profile, gameState, language = 'en' } = event;
+    const { userId, guildId, channelId, profile, gameState, language = 'en', puzzleVariant } = event;
 
     // Dedupe check
-    const dedupeKey = `${guildId}:${channelId}:${language}:${userId}`;
+    const dedupeKey = `${guildId}:${channelId}:${language}:${puzzleVariant || 'legacy'}:${userId}`;
     const lastLeave = recentLeaves.get(dedupeKey);
     const now = Date.now();
 

@@ -1,5 +1,5 @@
 import { calculatePerformanceMetrics } from '@quordle/engine/assistance';
-import type { GameState, HintType } from '@quordle/engine';
+import type { GameState, HintType, PuzzleVariant } from '@quordle/engine';
 
 // ============================================================================
 // Keys
@@ -23,6 +23,7 @@ export interface PlayerKey {
     dateKey: DateKey;
     visibleUserId: VisibleUserId;
     language?: Language;
+    puzzleVariant?: PuzzleVariant;
 }
 
 /** Composite key for room state storage */
@@ -30,6 +31,7 @@ export interface RoomKey {
     roomId: RoomId;
     dateKey: DateKey;
     language?: Language;
+    puzzleVariant?: PuzzleVariant;
 }
 
 // ============================================================================
@@ -61,6 +63,7 @@ export interface LeaderboardEntry {
     gameOver: boolean;
     won: boolean;
     finishedAt: number | null; // timestamp when game completed (for tiebreaker)
+    puzzleVariant?: PuzzleVariant;
 }
 
 /** Server-authoritative state for a single player */
@@ -70,6 +73,7 @@ export interface PlayerState {
     dateKey: DateKey;
     mode: GameMode;
     language: Language;
+    puzzleVariant?: PuzzleVariant;
     profile: UserProfile;
     gameState: GameState;
     createdAt: number;         // timestamp
@@ -81,6 +85,8 @@ export interface PlayerState {
 export interface RoomState {
     roomId: RoomId;
     dateKey: DateKey;
+    language?: Language;
+    puzzleVariant?: PuzzleVariant;
     players: Map<VisibleUserId, PlayerState>;
     leaderboard: LeaderboardEntry[];
     lastBroadcastAt: number;   // timestamp of last broadcast
@@ -97,6 +103,7 @@ export interface JoinMessage {
     visibleUserId: VisibleUserId;
     profile: UserProfile;
     language?: Language;
+    puzzleVariant?: PuzzleVariant;
 }
 
 export interface GuessMessage {
@@ -106,6 +113,18 @@ export interface GuessMessage {
     visibleUserId: VisibleUserId;
     guess: string;
     language?: Language;
+    puzzleVariant?: PuzzleVariant;
+}
+
+export interface InvalidGuessAttemptMessage {
+    type: 'INVALID_GUESS_ATTEMPT';
+    roomId: RoomId;
+    dateKey: DateKey;
+    visibleUserId: VisibleUserId;
+    guess: string;
+    attemptId: string;
+    language?: Language;
+    puzzleVariant?: PuzzleVariant;
 }
 
 export interface HintMessage {
@@ -116,6 +135,7 @@ export interface HintMessage {
     boardIndex: number;
     hintType: HintType;
     language: Language;
+    puzzleVariant?: PuzzleVariant;
 }
 
 export interface LeaveMessage {
@@ -127,7 +147,7 @@ export interface LeaveMessage {
 }
 
 /** Union of all client-to-server messages */
-export type ClientMessage = JoinMessage | GuessMessage | HintMessage | LeaveMessage;
+export type ClientMessage = JoinMessage | GuessMessage | InvalidGuessAttemptMessage | HintMessage | LeaveMessage;
 
 /** All valid client message types */
 export type ClientMessageType = ClientMessage['type'];
@@ -145,6 +165,7 @@ export interface LeaderboardMessage {
     type: 'LEADERBOARD';
     leaderboard: LeaderboardEntry[];
     language?: Language;
+    puzzleVariant?: PuzzleVariant;
 }
 
 export interface RoomEventMessage {
@@ -172,6 +193,10 @@ export type ServerMessageType = ServerMessage['type'];
 export const ErrorCodes = {
     INVALID_MESSAGE: 'INVALID_MESSAGE',
     INVALID_GUESS: 'INVALID_GUESS',
+    INVALID_FORMAT: 'INVALID_FORMAT',
+    INVALID_LENGTH: 'INVALID_LENGTH',
+    NOT_IN_LIST: 'NOT_IN_LIST',
+    UNSUPPORTED_PUZZLE_VERSION: 'UNSUPPORTED_PUZZLE_VERSION',
     INVALID_LANGUAGE: 'INVALID_LANGUAGE',
     INVALID_BOARD: 'INVALID_BOARD',
     INVALID_HINT: 'INVALID_HINT',
@@ -192,7 +217,12 @@ export type ErrorCode = typeof ErrorCodes[keyof typeof ErrorCodes];
 export function isClientMessage(msg: unknown): msg is ClientMessage {
     if (typeof msg !== 'object' || msg === null) return false;
     const m = msg as Record<string, unknown>;
-    return m.type === 'JOIN' || m.type === 'GUESS' || m.type === 'HINT' || m.type === 'LEAVE';
+    return m.type === 'JOIN' || m.type === 'GUESS' || m.type === 'INVALID_GUESS_ATTEMPT'
+        || m.type === 'HINT' || m.type === 'LEAVE';
+}
+
+function hasSupportedPuzzleVersion(message: Record<string, unknown>): boolean {
+    return message.language !== 'zh' || message.puzzleVariant === 'pinyin-latin-v2';
 }
 
 export function isJoinMessage(msg: unknown): msg is JoinMessage {
@@ -202,7 +232,8 @@ export function isJoinMessage(msg: unknown): msg is JoinMessage {
         m.type === 'JOIN' &&
         typeof m.roomId === 'string' &&
         typeof m.dateKey === 'string' &&
-        typeof m.visibleUserId === 'string'
+        typeof m.visibleUserId === 'string' &&
+        hasSupportedPuzzleVersion(m)
     );
 }
 
@@ -214,7 +245,22 @@ export function isGuessMessage(msg: unknown): msg is GuessMessage {
         typeof m.roomId === 'string' &&
         typeof m.dateKey === 'string' &&
         typeof m.visibleUserId === 'string' &&
-        typeof m.guess === 'string'
+        typeof m.guess === 'string' &&
+        hasSupportedPuzzleVersion(m)
+    );
+}
+
+export function isInvalidGuessAttemptMessage(msg: unknown): msg is InvalidGuessAttemptMessage {
+    if (typeof msg !== 'object' || msg === null) return false;
+    const m = msg as Record<string, unknown>;
+    return (
+        m.type === 'INVALID_GUESS_ATTEMPT' &&
+        typeof m.roomId === 'string' &&
+        typeof m.dateKey === 'string' &&
+        typeof m.visibleUserId === 'string' &&
+        typeof m.guess === 'string' &&
+        typeof m.attemptId === 'string' &&
+        hasSupportedPuzzleVersion(m)
     );
 }
 
@@ -228,7 +274,8 @@ export function isHintMessage(msg: unknown): msg is HintMessage {
         typeof m.visibleUserId === 'string' &&
         (m.language === 'en' || m.language === 'ko' || m.language === 'zh') &&
         Number.isInteger(m.boardIndex) &&
-        typeof m.hintType === 'string'
+        typeof m.hintType === 'string' &&
+        hasSupportedPuzzleVersion(m)
     );
 }
 
@@ -295,23 +342,45 @@ export function isErrorMessage(msg: unknown): msg is ErrorMessage {
 // ============================================================================
 
 /** Create a composite key string for player state storage */
-export function makePlayerKey(roomId: RoomId, dateKey: DateKey, visibleUserId: VisibleUserId): string {
-    return `${roomId}:${dateKey}:${visibleUserId}`;
+function gameplayNamespace(language: Language = 'en', puzzleVariant?: PuzzleVariant): string {
+    return language === 'zh' && puzzleVariant === 'pinyin-latin-v2'
+        ? `${language}:${puzzleVariant}`
+        : language;
+}
+
+export function makePlayerKey(
+    roomId: RoomId,
+    dateKey: DateKey,
+    visibleUserId: VisibleUserId,
+    language: Language = 'en',
+    puzzleVariant?: PuzzleVariant,
+): string {
+    return `${makeRoomKey(roomId, dateKey, language, puzzleVariant)}:${visibleUserId}`;
 }
 
 /** Create a composite key string for room state storage */
-export function makeRoomKey(roomId: RoomId, dateKey: DateKey): string {
-    return `${roomId}:${dateKey}`;
+export function makeRoomKey(
+    roomId: RoomId,
+    dateKey: DateKey,
+    language: Language = 'en',
+    puzzleVariant?: PuzzleVariant,
+): string {
+    return `${roomId}:${dateKey}:${gameplayNamespace(language, puzzleVariant)}`;
 }
 
 /** Parse a player key string back to components */
 export function parsePlayerKey(key: string): PlayerKey | null {
     const parts = key.split(':');
-    if (parts.length !== 3) return null;
+    if (parts.length < 3 || parts.length > 5) return null;
+    if (parts.length === 3) {
+        return { roomId: parts[0], dateKey: parts[1], visibleUserId: parts[2] };
+    }
     return {
         roomId: parts[0],
         dateKey: parts[1],
-        visibleUserId: parts[2],
+        language: parts[2] as Language,
+        ...(parts.length === 5 ? { puzzleVariant: parts[3] as PuzzleVariant } : {}),
+        visibleUserId: parts[parts.length - 1] as VisibleUserId,
     };
 }
 
@@ -341,6 +410,7 @@ export function toLeaderboardEntry(player: PlayerState): LeaderboardEntry {
         gameOver: gs.gameOver,
         won: gs.won,
         finishedAt: player.finishedAt,
+        ...(player.puzzleVariant ? { puzzleVariant: player.puzzleVariant } : {}),
     };
 }
 
@@ -384,8 +454,12 @@ export function createStateMessage(playerState: PlayerState): StateMessage {
 }
 
 /** Create leaderboard message helper */
-export function createLeaderboardMessage(leaderboard: LeaderboardEntry[], language?: Language): LeaderboardMessage {
-    return { type: 'LEADERBOARD', leaderboard, language };
+export function createLeaderboardMessage(
+    leaderboard: LeaderboardEntry[],
+    language?: Language,
+    puzzleVariant?: PuzzleVariant,
+): LeaderboardMessage {
+    return { type: 'LEADERBOARD', leaderboard, language, puzzleVariant };
 }
 
 /** Create room event message helper */

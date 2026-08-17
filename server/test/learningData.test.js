@@ -170,7 +170,7 @@ test('Chinese learning events and Saved Words are accepted and isolated from leg
     suffix: 'zh-hint-aggregate', language: 'zh', hintType: 'tone-pattern', boardIndex: 1,
   }), 'multilingual-user');
   const chineseSummary = await service.getSummary({
-    from: '2026-08-06', to: '2026-08-06', language: 'zh', mode: 'practice',
+    from: '2026-08-06', to: '2026-08-06', language: 'zh', mode: 'practice', puzzleVariant: 'hanzi-v1',
   });
   assert.equal(chineseSummary.hintsByType['tone-pattern'], 1);
 
@@ -186,6 +186,91 @@ test('Chinese learning events and Saved Words are accepted and isolated from leg
   await service.saveWord('multilingual-user', '기관', { language: 'ko' });
   await service.unsaveWord('multilingual-user', '기관', { language: 'ko' });
   assert.deepEqual(await service.getSavedWords('multilingual-user', 'ko'), []);
+});
+
+test('Pinyin gameplay events keep guess keys separate from canonical target identifiers', () => {
+  const guessEventId = randomUUID();
+  const pinyinGuess = normalizeLearningEvent(event('valid_guess_submitted', {
+    suffix: 'pinyin-guess',
+    eventId: guessEventId,
+    language: 'zh',
+    puzzleVariant: 'pinyin-latin-v2',
+    roundId: 'practice:zh:pinyin-latin-v2:one',
+    guessKey: 'xuesheng',
+  }), { client: true, ...validators });
+  assert.deepEqual(pinyinGuess, {
+    ok: true,
+    event: {
+      version: 1,
+      eventId: guessEventId,
+      type: 'valid_guess_submitted',
+      occurredAt: Date.parse('2026-08-06T12:00:00Z'),
+      dateKey: '2026-08-06',
+      language: 'zh',
+      puzzleVariant: 'pinyin-latin-v2',
+      mode: 'practice',
+      roundId: 'practice:zh:pinyin-latin-v2:one',
+      guessKey: 'xuesheng',
+    },
+  });
+
+  const solved = normalizeLearningEvent(event('board_solved', {
+    suffix: 'pinyin-solved',
+    language: 'zh',
+    puzzleVariant: 'pinyin-latin-v2',
+    roundId: 'practice:zh:pinyin-latin-v2:one',
+    boardIndex: 0,
+    word: '学生',
+  }), { client: true, ...validators });
+  assert.equal(solved.ok, true);
+  assert.equal(solved.event.word, '学生');
+  assert.equal('guessKey' in solved.event, false);
+});
+
+test('Chinese summaries default to Pinyin aggregates and read legacy Hanzi only when requested', async () => {
+  const service = createLearningDataService({
+    enabled: true,
+    hmacSecret: 'analytics-secret',
+    allowMemoryFallback: true,
+    ...validators,
+  });
+  const sharedEventId = randomUUID();
+  const legacy = event('round_started', {
+    suffix: 'legacy-round',
+    eventId: sharedEventId,
+    language: 'zh',
+    mode: 'daily',
+    roundId: 'daily:2026-08-06:zh',
+  });
+  const pinyin = {
+    ...legacy,
+    puzzleVariant: 'pinyin-latin-v2',
+    roundId: 'daily:2026-08-06:zh:pinyin-latin-v2',
+  };
+  assert.equal((await service.recordEvent(legacy, 'same-user')).duplicate, false);
+  assert.equal((await service.recordEvent(pinyin, 'same-user')).duplicate, false);
+  await service.recordEvent(event('valid_guess_submitted', {
+    suffix: 'pinyin-aggregate-guess',
+    language: 'zh',
+    puzzleVariant: 'pinyin-latin-v2',
+    mode: 'daily',
+    roundId: 'daily:2026-08-06:zh:pinyin-latin-v2',
+    guessKey: 'xuesheng',
+  }), 'same-user');
+
+  const defaultChinese = await service.getSummary({
+    from: '2026-08-06', to: '2026-08-06', language: 'zh', mode: 'daily',
+  });
+  assert.equal(defaultChinese.filters.puzzleVariant, 'pinyin-latin-v2');
+  assert.equal(defaultChinese.totals.round_started, 1);
+  assert.equal(defaultChinese.totals.valid_guess_submitted, 1);
+
+  const legacyChinese = await service.getSummary({
+    from: '2026-08-06', to: '2026-08-06', language: 'zh', mode: 'daily', puzzleVariant: 'hanzi-v1',
+  });
+  assert.equal(legacyChinese.filters.puzzleVariant, 'hanzi-v1');
+  assert.equal(legacyChinese.totals.round_started, 1);
+  assert.equal(legacyChinese.totals.valid_guess_submitted, 0);
 });
 
 test('production-style service fails closed without Redis', () => {

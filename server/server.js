@@ -9,11 +9,26 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { fileURLToPath } from "url";
 import Redis from "ioredis";
-import { evaluateGuessKo } from "@quordle/engine/evaluatorKo";
 import { KO_ANSWER_WORDS, isValidKoreanGuess } from "@quordle/engine/koreanLexicon";
-import { ZH_ANSWER_WORDS, isValidChineseGuess } from "@quordle/engine/chineseLexicon";
+import { isValidChineseGuess } from "@quordle/engine/chineseLexicon";
 import { calculatePerformanceMetrics, normalizeAssistanceState } from "@quordle/engine/assistance";
 import { requestHint } from "@quordle/engine/hints";
+import {
+  createDailyGame,
+  transitionPlayerGuess,
+  validateDailyGuess,
+} from "./gameplay.js";
+import {
+  PINYIN_PUZZLE_VARIANT,
+  dailyRoundId,
+  isCompatiblePersistedPlayer,
+  makePlayerRedisKey,
+  makePlayerStoreKey as makePlayerKey,
+  makeRoomPlayersRedisKey as makeRoomPlayersSetKey,
+  makeRoomStoreKey as makeRoomKey,
+  parseReadPuzzleVariant,
+  parseRequiredPuzzleVariant,
+} from "./gameNamespace.js";
 import { createLearningDataService } from "./learningData.js";
 import {
   createAppSessionToken,
@@ -49,6 +64,27 @@ function parseLanguage(value) {
   if (value === undefined || value === null || value === '') return { ok: true, language: 'en' };
   if (SUPPORTED_LANGUAGES.has(value)) return { ok: true, language: value };
   return { ok: false, language: null };
+}
+
+function gameplayError(code, message) {
+  return { code, error: message, message };
+}
+
+function sendWebSocketError(ws, error) {
+  ws.send(JSON.stringify({ type: 'ERROR', code: error.code, message: error.message || error.error }));
+}
+
+function parseGameplayRequest(language, puzzleVariant) {
+  return parseRequiredPuzzleVariant(language, puzzleVariant);
+}
+
+function submissionError(language, validation) {
+  if (language === 'zh') return validation;
+  return {
+    code: 'INVALID_GUESS',
+    error: validation.error || 'Invalid guess.',
+    message: validation.error || 'Invalid guess.',
+  };
 }
 
 function normalizeGuessForLanguage(guess, language) {
@@ -173,8 +209,9 @@ function learningEventBase(player, overrides = {}) {
     occurredAt: Date.now(),
     dateKey,
     language,
+    ...(player.puzzleVariant ? { puzzleVariant: player.puzzleVariant } : {}),
     mode: 'daily',
-    roundId: `daily:${dateKey}:${language}`,
+    roundId: dailyRoundId(dateKey, language, player.puzzleVariant),
     ...overrides,
   };
 }
@@ -191,7 +228,7 @@ async function safelyRecordLearningEvent(event, userId, options = {}) {
 async function recordDailyRoundStarted(player) {
   if (!player) return;
   await safelyRecordLearningEvent(learningEventBase(player, {
-    eventId: `round-start:daily:${player.dateKey}:${player.language || 'en'}`,
+    eventId: `round-start:${dailyRoundId(player.dateKey, player.language || 'en', player.puzzleVariant)}`,
     type: 'round_started',
     occurredAt: player.createdAt || Date.now(),
   }), player.visibleUserId);
@@ -200,34 +237,36 @@ async function recordDailyRoundStarted(player) {
 async function recordDailyGuessTransition(player, previousGameState, nextGameState, guess) {
   if (!player || !previousGameState || !nextGameState) return;
   const guessNumber = nextGameState.guessCount;
-  const baseId = `daily:${player.dateKey}:${player.language || 'en'}:${guessNumber}`;
+  const roundId = dailyRoundId(player.dateKey, player.language || 'en', player.puzzleVariant);
+  const baseId = `${roundId}:${guessNumber}`;
   await safelyRecordLearningEvent(learningEventBase(player, {
     eventId: `guess:${baseId}`,
     type: 'valid_guess_submitted',
-    word: guess,
+    ...(player.puzzleVariant === PINYIN_PUZZLE_VARIANT ? { guessKey: guess } : { word: guess }),
   }), player.visibleUserId);
 
   for (let boardIndex = 0; boardIndex < nextGameState.boards.length; boardIndex += 1) {
     const before = previousGameState.boards[boardIndex];
     const after = nextGameState.boards[boardIndex];
     if (!before.solved && after.solved) {
+      const targetId = after.targetId || after.targetWord;
       await safelyRecordLearningEvent(learningEventBase(player, {
         eventId: `board-solved:${baseId}:${boardIndex}`,
         type: 'board_solved',
         boardIndex,
-        word: after.targetWord,
+        word: targetId,
       }), player.visibleUserId);
+      if (['ko', 'zh'].includes(player.language)) {
+        await learningData.markSavedWordLaterGuessed(player.visibleUserId, targetId, {
+          language: player.language,
+          puzzleVariant: player.puzzleVariant,
+          dateKey: player.dateKey,
+          mode: 'daily',
+          roundId,
+          roundStartedAt: player.createdAt,
+        }).catch((error) => console.warn('[Learning] Saved-word recall failed:', error.message));
+      }
     }
-  }
-
-  if (['ko', 'zh'].includes(player.language)) {
-    await learningData.markSavedWordLaterGuessed(player.visibleUserId, guess, {
-      language: player.language,
-      dateKey: player.dateKey,
-      mode: 'daily',
-      roundId: `daily:${player.dateKey}:${player.language}`,
-      roundStartedAt: player.createdAt,
-    }).catch((error) => console.warn('[Learning] Saved-word recall failed:', error.message));
   }
 
   if (!previousGameState.gameOver && nextGameState.gameOver) {
@@ -235,16 +274,16 @@ async function recordDailyGuessTransition(player, previousGameState, nextGameSta
       const board = nextGameState.boards[boardIndex];
       if (!board.solved) {
         await safelyRecordLearningEvent(learningEventBase(player, {
-          eventId: `board-failed:daily:${player.dateKey}:${player.language || 'en'}:${boardIndex}`,
+          eventId: `board-failed:${roundId}:${boardIndex}`,
           type: 'board_failed',
           boardIndex,
-          word: board.targetWord,
+          word: board.targetId || board.targetWord,
         }), player.visibleUserId);
       }
     }
     const performance = calculatePerformanceMetrics(nextGameState);
     await safelyRecordLearningEvent(learningEventBase(player, {
-      eventId: `round-completed:daily:${player.dateKey}:${player.language || 'en'}`,
+      eventId: `round-completed:${roundId}`,
       type: 'round_completed',
       metrics: {
         won: nextGameState.won,
@@ -261,7 +300,7 @@ async function recordDailyGuessTransition(player, previousGameState, nextGameSta
 async function recordDailyHint(player, hint) {
   if (!player || !hint) return;
   await safelyRecordLearningEvent(learningEventBase(player, {
-    eventId: `hint:daily:${player.dateKey}:${player.language || 'en'}:${hint.boardIndex}:${hint.type}`,
+    eventId: `hint:${dailyRoundId(player.dateKey, player.language || 'en', player.puzzleVariant)}:${hint.boardIndex}:${hint.type}`,
     type: 'hint_used',
     boardIndex: hint.boardIndex,
     hintType: hint.type,
@@ -286,18 +325,6 @@ async function recordDailyInvalidGuess(player, guess, attemptId) {
       : (language === 'ko' ? 'unrecognized' : 'not-in-list'),
     ...(recognizedKorean ? { word: normalizedGuess } : {}),
   }), player.visibleUserId);
-}
-
-// ========== REDIS KEY HELPERS ==========
-// Keys: player:{roomId}:{dateKey}:{language}:{visibleUserId} for PlayerState
-// Keys: roomPlayers:{roomId}:{dateKey}:{language} (Set) for leaderboard index
-
-function makePlayerRedisKey(roomId, dateKey, visibleUserId, language = 'en') {
-  return `player:${roomId}:${dateKey}:${language}:${visibleUserId}`;
-}
-
-function makeRoomPlayersSetKey(roomId, dateKey, language = 'en') {
-  return `roomPlayers:${roomId}:${dateKey}:${language}`;
 }
 
 function normalizePersistedPlayer(player) {
@@ -337,14 +364,6 @@ const roomGuildMap = new Map();
 /** @type {Map<string, Set<{ws: WebSocket, visibleUserId: string, roomId: string, dateKey: string}>>} */
 const wsConnectionsByRoom = new Map();
 
-function makeRoomKey(roomId, dateKey, language = 'en') {
-  return `${roomId}:${dateKey}:${language}`;
-}
-
-function makePlayerKey(roomId, dateKey, visibleUserId, language = 'en') {
-  return `${roomId}:${dateKey}:${language}:${visibleUserId}`;
-}
-
 // ========== REDIS PERSISTENCE HELPERS ==========
 // Redis is source of truth for player state; in-memory Maps are cache
 
@@ -355,8 +374,9 @@ async function persistPlayerToRedis(playerState) {
     return;
   }
   const language = playerState.language || 'en';
-  const key = makePlayerRedisKey(playerState.roomId, playerState.dateKey, playerState.visibleUserId, language);
-  const setKey = makeRoomPlayersSetKey(playerState.roomId, playerState.dateKey, language);
+  const puzzleVariant = playerState.puzzleVariant;
+  const key = makePlayerRedisKey(playerState.roomId, playerState.dateKey, playerState.visibleUserId, language, puzzleVariant);
+  const setKey = makeRoomPlayersSetKey(playerState.roomId, playerState.dateKey, language, puzzleVariant);
 
   // Log what we're about to save
   const guessCount = playerState.gameState?.guessCount || 0;
@@ -384,17 +404,21 @@ async function persistPlayerToRedis(playerState) {
 }
 
 /** Load a single player state from Redis */
-async function loadPlayerFromRedis(roomId, dateKey, visibleUserId, language = 'en') {
+async function loadPlayerFromRedis(roomId, dateKey, visibleUserId, language = 'en', puzzleVariant) {
   if (!hasRedisConnection()) {
     console.log('[Redis] Skipping load - no Redis connection');
     return null;
   }
   try {
-    const key = makePlayerRedisKey(roomId, dateKey, visibleUserId, language);
+    const key = makePlayerRedisKey(roomId, dateKey, visibleUserId, language, puzzleVariant);
     console.log('[Redis LOAD] Attempting to load:', key);
     const data = await redis.get(key);
     if (data) {
       const parsed = normalizePersistedPlayer(JSON.parse(data));
+      if (!isCompatiblePersistedPlayer(parsed, language, puzzleVariant)) {
+        console.warn('[Redis LOAD] Rejected incompatible player state:', key);
+        return null;
+      }
       const guessCount = parsed.gameState?.guessCount || 0;
       const boardGuesses = parsed.gameState?.boards?.map(b => b.guesses?.length || 0) || [];
       console.log('[Redis LOAD OK]', key, '- guesses:', guessCount, 'boards:', boardGuesses, 'bytes:', data.length);
@@ -409,24 +433,25 @@ async function loadPlayerFromRedis(roomId, dateKey, visibleUserId, language = 'e
 }
 
 /** Rebuild leaderboard from Redis by loading all players in the roomPlayers set */
-async function rebuildLeaderboardFromRedis(roomId, dateKey, language = 'en') {
+async function rebuildLeaderboardFromRedis(roomId, dateKey, language = 'en', puzzleVariant) {
   if (!hasRedisConnection()) {
     console.log('[Redis] Cannot rebuild leaderboard - no Redis connection');
     return null;
   }
   try {
-    const setKey = makeRoomPlayersSetKey(roomId, dateKey, language);
+    const setKey = makeRoomPlayersSetKey(roomId, dateKey, language, puzzleVariant);
     const visibleUserIds = await redis.smembers(setKey);
     console.log('[Redis] Rebuilding leaderboard for', setKey, '- found', visibleUserIds?.length || 0, 'players');
     if (!visibleUserIds || visibleUserIds.length === 0) return null;
 
-    const room = getOrCreateRoom(roomId, dateKey, language);
+    const room = getOrCreateRoom(roomId, dateKey, language, puzzleVariant);
 
     // Load all players in parallel
     const playerPromises = visibleUserIds.map(async (visibleUserId) => {
-      const key = makePlayerRedisKey(roomId, dateKey, visibleUserId, language);
+      const key = makePlayerRedisKey(roomId, dateKey, visibleUserId, language, puzzleVariant);
       const data = await redis.get(key);
-      return data ? normalizePersistedPlayer(JSON.parse(data)) : null;
+      const player = data ? normalizePersistedPlayer(JSON.parse(data)) : null;
+      return isCompatiblePersistedPlayer(player, language, puzzleVariant) ? player : null;
     });
 
     const players = await Promise.all(playerPromises);
@@ -451,13 +476,13 @@ async function rebuildLeaderboardFromRedis(roomId, dateKey, language = 'en') {
 }
 
 /** Get or create room state (rebuilds from Redis if cache empty) */
-async function getOrCreateRoomAsync(roomId, dateKey, language = 'en') {
-  const key = makeRoomKey(roomId, dateKey, language);
+async function getOrCreateRoomAsync(roomId, dateKey, language = 'en', puzzleVariant) {
+  const key = makeRoomKey(roomId, dateKey, language, puzzleVariant);
   let room = roomStateStore.get(key);
 
   // If room exists in memory but is empty, try to rebuild from Redis
   if ((!room || room.players.size === 0) && hasRedisConnection()) {
-    const rebuilt = await rebuildLeaderboardFromRedis(roomId, dateKey, language);
+    const rebuilt = await rebuildLeaderboardFromRedis(roomId, dateKey, language, puzzleVariant);
     if (rebuilt && rebuilt.players.size > 0) {
       return rebuilt;
     }
@@ -467,6 +492,8 @@ async function getOrCreateRoomAsync(roomId, dateKey, language = 'en') {
     room = {
       roomId,
       dateKey,
+      language,
+      puzzleVariant,
       players: new Map(),
       leaderboard: [],
       lastBroadcastAt: Date.now(),
@@ -477,13 +504,15 @@ async function getOrCreateRoomAsync(roomId, dateKey, language = 'en') {
 }
 
 /** Get or create room state (sync version for non-async contexts) */
-function getOrCreateRoom(roomId, dateKey, language = 'en') {
-  const key = makeRoomKey(roomId, dateKey, language);
+function getOrCreateRoom(roomId, dateKey, language = 'en', puzzleVariant) {
+  const key = makeRoomKey(roomId, dateKey, language, puzzleVariant);
   let room = roomStateStore.get(key);
   if (!room) {
     room = {
       roomId,
       dateKey,
+      language,
+      puzzleVariant,
       players: new Map(),
       leaderboard: [],
       lastBroadcastAt: Date.now(),
@@ -494,21 +523,21 @@ function getOrCreateRoom(roomId, dateKey, language = 'en') {
 }
 
 /** Get player state from room (checks Redis first) */
-async function getPlayerAsync(roomId, dateKey, visibleUserId, language = 'en') {
+async function getPlayerAsync(roomId, dateKey, visibleUserId, language = 'en', puzzleVariant) {
   // First check in-memory cache
-  const room = roomStateStore.get(makeRoomKey(roomId, dateKey, language));
+  const room = roomStateStore.get(makeRoomKey(roomId, dateKey, language, puzzleVariant));
   const cachedPlayer = room?.players.get(visibleUserId);
-  if (cachedPlayer) {
+  if (cachedPlayer && isCompatiblePersistedPlayer(cachedPlayer, language, puzzleVariant)) {
     console.log('[getPlayerAsync] Found in cache:', visibleUserId, 'guesses:', cachedPlayer.gameState?.guessCount || 0);
     return cachedPlayer;
   }
 
   // Try to load from Redis
   console.log('[getPlayerAsync] Not in cache, trying Redis for:', visibleUserId);
-  const redisPlayer = await loadPlayerFromRedis(roomId, dateKey, visibleUserId, language);
+  const redisPlayer = await loadPlayerFromRedis(roomId, dateKey, visibleUserId, language, puzzleVariant);
   if (redisPlayer) {
     // Cache in memory
-    const r = getOrCreateRoom(roomId, dateKey, language);
+    const r = getOrCreateRoom(roomId, dateKey, language, puzzleVariant);
     r.players.set(visibleUserId, redisPlayer);
     updateLeaderboard(r);
     console.log('[getPlayerAsync] Cached from Redis:', visibleUserId);
@@ -519,15 +548,16 @@ async function getPlayerAsync(roomId, dateKey, visibleUserId, language = 'en') {
 }
 
 /** Get player state from room (sync) */
-function getPlayer(roomId, dateKey, visibleUserId, language = 'en') {
-  const room = roomStateStore.get(makeRoomKey(roomId, dateKey, language));
-  return room?.players.get(visibleUserId) ?? null;
+function getPlayer(roomId, dateKey, visibleUserId, language = 'en', puzzleVariant) {
+  const room = roomStateStore.get(makeRoomKey(roomId, dateKey, language, puzzleVariant));
+  const player = room?.players.get(visibleUserId) ?? null;
+  return isCompatiblePersistedPlayer(player, language, puzzleVariant) ? player : null;
 }
 
 /** Set player state in room (also persists to Redis) */
 function setPlayer(playerState) {
   const language = playerState.language || 'en';
-  const room = getOrCreateRoom(playerState.roomId, playerState.dateKey, language);
+  const room = getOrCreateRoom(playerState.roomId, playerState.dateKey, language, playerState.puzzleVariant);
   room.players.set(playerState.visibleUserId, playerState);
   updateLeaderboard(room);
   // Fire-and-forget Redis persistence of individual player
@@ -540,6 +570,7 @@ function toLeaderboardEntry(player) {
   const performance = calculatePerformanceMetrics(gs);
   return {
     visibleUserId: player.visibleUserId,
+    ...(player.puzzleVariant ? { puzzleVariant: player.puzzleVariant } : {}),
     profile: player.profile || { displayName: player.visibleUserId, avatarUrl: null },
     solvedCount: performance.solvedCount,
     guessCount: performance.guessCount,
@@ -576,7 +607,7 @@ function updateLeaderboard(room) {
 }
 
 /** Create new player state */
-function createPlayerState(roomId, dateKey, visibleUserId, gameState, profile = { displayName: visibleUserId, avatarUrl: null }, language = 'en') {
+function createPlayerState(roomId, dateKey, visibleUserId, gameState, profile = { displayName: visibleUserId, avatarUrl: null }, language = 'en', puzzleVariant) {
   const now = Date.now();
   return {
     visibleUserId,
@@ -584,6 +615,7 @@ function createPlayerState(roomId, dateKey, visibleUserId, gameState, profile = 
     dateKey,
     mode: 'daily',
     language,
+    ...(puzzleVariant ? { puzzleVariant } : {}),
     profile,
     gameState: {
       ...gameState,
@@ -600,8 +632,8 @@ const gameStateStore = {
   /** @type {Map<string, object>} */
   _store: new Map(),
 
-  _makeKey(roomId, dateKey, userId, language = 'en') {
-    return `${roomId}:${dateKey}:${language}:${userId}`;
+  _makeKey(roomId, dateKey, userId, language = 'en', puzzleVariant) {
+    return makePlayerKey(roomId, dateKey, userId, language, puzzleVariant);
   },
 
   _makeLegacyKey(roomId, dateKey, userId) {
@@ -614,29 +646,30 @@ const gameStateStore = {
     return stateLanguage === language;
   },
 
-  async get(roomId, dateKey, userId, language = 'en') {
+  async get(roomId, dateKey, userId, language = 'en', puzzleVariant) {
     // First check new room store
-    const player = getPlayer(roomId, dateKey, userId, language);
+    const player = getPlayer(roomId, dateKey, userId, language, puzzleVariant);
     if (player) {
       return {
         gameState: player.gameState,
         gameMode: player.mode,
         dateKey: player.dateKey,
         language: player.language || language,
+        ...(player.puzzleVariant ? { puzzleVariant: player.puzzleVariant } : {}),
       };
     }
 
     // Fallback to language-aware legacy store
-    const key = this._makeKey(roomId, dateKey, userId, language);
+    const key = this._makeKey(roomId, dateKey, userId, language, puzzleVariant);
     const stored = this._store.get(key);
-    if (stored) {
+    if (stored && isCompatiblePersistedPlayer(stored, language, puzzleVariant)) {
       return stored;
     }
 
     // Backward compatibility for older in-memory keys created before language isolation.
     const legacyKey = this._makeLegacyKey(roomId, dateKey, userId);
     const legacyState = this._store.get(legacyKey);
-    if (legacyState && this._matchesLanguage(legacyState, language)) {
+    if (language !== 'zh' && legacyState && this._matchesLanguage(legacyState, language)) {
       this._store.set(key, legacyState);
       this._store.delete(legacyKey);
       return legacyState;
@@ -645,8 +678,8 @@ const gameStateStore = {
     return null;
   },
 
-  async set(roomId, dateKey, userId, state, language = 'en') {
-    const player = getPlayer(roomId, dateKey, userId, language);
+  async set(roomId, dateKey, userId, state, language = 'en', puzzleVariant) {
+    const player = getPlayer(roomId, dateKey, userId, language, puzzleVariant);
     if (player) {
       const now = Date.now();
       const gameState = {
@@ -657,25 +690,26 @@ const gameStateStore = {
         ...player,
         gameState,
         language,
+        ...(puzzleVariant ? { puzzleVariant } : {}),
         updatedAt: now,
         finishedAt: gameState.gameOver && !player.finishedAt ? now : player.finishedAt,
       };
       setPlayer(updatedPlayer);
       broadcastToRoomByKey(
-        makeRoomKey(roomId, dateKey, language),
-        { type: 'LEADERBOARD', leaderboard: getOrCreateRoom(roomId, dateKey, language).leaderboard, language },
+        makeRoomKey(roomId, dateKey, language, puzzleVariant),
+        { type: 'LEADERBOARD', leaderboard: getOrCreateRoom(roomId, dateKey, language, puzzleVariant).leaderboard, language, puzzleVariant },
       );
       return;
     }
-    const key = this._makeKey(roomId, dateKey, userId, language);
-    this._store.set(key, { ...state, language });
-    this._store.delete(this._makeLegacyKey(roomId, dateKey, userId));
+    const key = this._makeKey(roomId, dateKey, userId, language, puzzleVariant);
+    this._store.set(key, { ...state, language, ...(puzzleVariant ? { puzzleVariant } : {}) });
+    if (language !== 'zh') this._store.delete(this._makeLegacyKey(roomId, dateKey, userId));
   },
 
-  async delete(roomId, dateKey, userId, language = 'en') {
-    const key = this._makeKey(roomId, dateKey, userId, language);
+  async delete(roomId, dateKey, userId, language = 'en', puzzleVariant) {
+    const key = this._makeKey(roomId, dateKey, userId, language, puzzleVariant);
     this._store.delete(key);
-    this._store.delete(this._makeLegacyKey(roomId, dateKey, userId));
+    if (language !== 'zh') this._store.delete(this._makeLegacyKey(roomId, dateKey, userId));
   },
 };
 
@@ -691,6 +725,7 @@ wss.on("connection", (ws, req) => {
   let currentRoomId = null;
   let currentDateKey = null;
   let currentLanguage = 'en';
+  let currentPuzzleVariant;
 
   ws.on("message", async (data) => {
     try {
@@ -699,13 +734,19 @@ wss.on("connection", (ws, req) => {
       switch (message.type) {
         // ===== NEW PROTOCOL =====
         case "JOIN": {
-          const { roomId, dateKey, visibleUserId, profile, guildId, language: msgLanguage } = message;
+          const { roomId, dateKey, visibleUserId, profile, guildId, language: msgLanguage, puzzleVariant: msgPuzzleVariant } = message;
           const parsedLanguage = parseLanguage(msgLanguage);
           if (!parsedLanguage.ok) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_LANGUAGE', message: 'Unsupported language' }));
             return;
           }
           const language = parsedLanguage.language;
+          const parsedVariant = parseGameplayRequest(language, msgPuzzleVariant);
+          if (!parsedVariant.ok) {
+            sendWebSocketError(ws, parsedVariant);
+            return;
+          }
+          const puzzleVariant = parsedVariant.puzzleVariant;
           if (!roomId || !dateKey || !visibleUserId) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing required fields' }));
             return;
@@ -717,7 +758,7 @@ wss.on("connection", (ws, req) => {
             avatarUrl: (profile?.avatarUrl || null),
           };
 
-          const newRoomKey = makeRoomKey(roomId, dateKey, language);
+          const newRoomKey = makeRoomKey(roomId, dateKey, language, puzzleVariant);
 
           // If switching languages (or rooms), remove ws from old room's connection set
           if (currentRoomKey && currentRoomKey !== newRoomKey) {
@@ -740,6 +781,7 @@ wss.on("connection", (ws, req) => {
           currentRoomId = roomId;
           currentDateKey = dateKey;
           currentLanguage = language;
+          currentPuzzleVariant = puzzleVariant;
 
           // Track guildId for this room (needed for announcements)
           if (guildId) {
@@ -761,13 +803,13 @@ wss.on("connection", (ws, req) => {
           }
 
           // Get or create player state (checks Redis first)
-          let playerState = await getPlayerAsync(roomId, dateKey, visibleUserId, language);
+          let playerState = await getPlayerAsync(roomId, dateKey, visibleUserId, language, puzzleVariant);
           if (!playerState) {
             // Create new daily game
             console.log('[JOIN] Creating new player state for:', visibleUserId, 'language:', language);
-            const targetWords = getDailyTargets(dateKey, language);
-            const gameState = createGameState(targetWords, undefined, language);
-            playerState = createPlayerState(roomId, dateKey, visibleUserId, gameState, cleanProfile, language);
+            const targetWords = language === 'zh' ? undefined : getDailyTargets(dateKey, language);
+            const gameState = createDailyGame(dateKey, language, puzzleVariant, targetWords);
+            playerState = createPlayerState(roomId, dateKey, visibleUserId, gameState, cleanProfile, language, puzzleVariant);
           } else {
             // Update existing player's profile (in case they changed their display name)
             console.log('[JOIN] Loaded existing player state for:', visibleUserId, 'guesses:', playerState.gameState?.guessCount || 0);
@@ -782,7 +824,7 @@ wss.on("connection", (ws, req) => {
           ws.send(JSON.stringify({ type: 'STATE', playerState }));
 
           // Broadcast LEADERBOARD to ALL players in room (rebuilds from Redis if cache empty)
-          const room = await getOrCreateRoomAsync(roomId, dateKey, language);
+          const room = await getOrCreateRoomAsync(roomId, dateKey, language, puzzleVariant);
           if (DEBUG_WS) {
             console.log('[WS JOIN] Broadcasting leaderboard, players in room:', room.players.size);
           }
@@ -791,7 +833,7 @@ wss.on("connection", (ws, req) => {
             console.log('[LEADERBOARD DEBUG] leaderboard payload length:', room.leaderboard.length);
             console.log('[LEADERBOARD DEBUG] leaderboard:', JSON.stringify(room.leaderboard));
           }
-          broadcastToRoomByKey(currentRoomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard, language });
+          broadcastToRoomByKey(currentRoomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard, language, puzzleVariant });
 
           // Broadcast ROOM_EVENT join to everyone in room (including joiner)
           broadcastToRoomByKey(currentRoomKey, { type: 'ROOM_EVENT', event: 'join', visibleUserId });
@@ -800,7 +842,7 @@ wss.on("connection", (ws, req) => {
 
         case "INVALID_GUESS_ATTEMPT": {
           const {
-            roomId, dateKey, visibleUserId, guess, attemptId, language: guessLanguage,
+            roomId, dateKey, visibleUserId, guess, attemptId, language: guessLanguage, puzzleVariant: guessPuzzleVariant,
           } = message;
           const parsedLanguage = parseLanguage(guessLanguage);
           if (!parsedLanguage.ok) {
@@ -808,33 +850,48 @@ wss.on("connection", (ws, req) => {
             return;
           }
           const language = parsedLanguage.language;
+          const parsedVariant = parseGameplayRequest(language, guessPuzzleVariant);
+          if (!parsedVariant.ok) {
+            sendWebSocketError(ws, parsedVariant);
+            return;
+          }
+          const puzzleVariant = parsedVariant.puzzleVariant;
           if (!roomId || !dateKey || !visibleUserId || !guess || !UUID_RE.test(String(attemptId ?? ''))) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing or invalid fields' }));
             return;
           }
-          const playerState = getPlayer(roomId, dateKey, visibleUserId, language);
+          const playerState = getPlayer(roomId, dateKey, visibleUserId, language, puzzleVariant);
           if (!playerState || playerState.gameState.gameOver) return;
-          const normalizedGuess = normalizeGuessForLanguage(guess, language);
-          if (isValidGuessFormat(normalizedGuess, language)) return;
+          const validation = validateDailyGuess(playerState.gameState, guess, {
+            isAcceptedEnglishGuess: (word) => englishGuessWords.has(word),
+            isAcceptedKoreanGuess: isValidKoreanGuess,
+          });
+          if (validation.valid) return;
           await recordDailyInvalidGuess(playerState, guess, attemptId);
           ws.send(JSON.stringify({ type: 'ANALYTICS_ACK', event: 'invalid_guess', attemptId }));
           break;
         }
 
         case "GUESS": {
-          const { roomId, dateKey, visibleUserId, guess, language: guessLanguage } = message;
+          const { roomId, dateKey, visibleUserId, guess, language: guessLanguage, puzzleVariant: guessPuzzleVariant } = message;
           const parsedLanguage = parseLanguage(guessLanguage);
           if (!parsedLanguage.ok) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_LANGUAGE', message: 'Unsupported language' }));
             return;
           }
           const language = parsedLanguage.language;
+          const parsedVariant = parseGameplayRequest(language, guessPuzzleVariant);
+          if (!parsedVariant.ok) {
+            sendWebSocketError(ws, parsedVariant);
+            return;
+          }
+          const puzzleVariant = parsedVariant.puzzleVariant;
           if (!roomId || !dateKey || !visibleUserId || !guess) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing required fields' }));
             return;
           }
 
-          const playerState = getPlayer(roomId, dateKey, visibleUserId, language);
+          const playerState = getPlayer(roomId, dateKey, visibleUserId, language, puzzleVariant);
           if (!playerState) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'PLAYER_NOT_FOUND', message: 'Player not found. Send JOIN first.' }));
             return;
@@ -845,69 +902,29 @@ wss.on("connection", (ws, req) => {
             return;
           }
 
-          // Validate guess
-          const normalizedGuess = normalizeGuessForLanguage(guess, language);
-          if (!isValidGuessFormat(normalizedGuess, language)) {
+          const transition = transitionPlayerGuess(playerState, guess, {
+            isAcceptedEnglishGuess: (word) => englishGuessWords.has(word),
+            isAcceptedKoreanGuess: isValidKoreanGuess,
+          });
+          if (!transition.ok) {
             await recordDailyInvalidGuess(
               playerState,
-              normalizedGuess,
+              guess,
               UUID_RE.test(String(message.attemptId ?? '')) ? message.attemptId : crypto.randomUUID(),
             );
-            const expectedLen = getWordLengthForLanguage(language);
-            const units = language === 'en' ? 'letters' : language === 'ko' ? 'syllables' : 'characters';
-            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_GUESS', message: `Guess must be ${expectedLen} ${units}` }));
+            sendWebSocketError(ws, submissionError(language, transition));
             return;
           }
-
-          // Apply guess to game state
-          const oldGameState = playerState.gameState;
-          const newBoards = oldGameState.boards.map((board) => {
-            if (board.solved) {
-              const prevKoResult = board.koResults?.[board.koResults.length - 1];
-              return {
-                ...board,
-                guesses: [...board.guesses, normalizedGuess],
-                results: [...board.results, board.results[board.results.length - 1] || []],
-                ...(language === 'ko' && prevKoResult ? {
-                  koResults: [...(board.koResults || []), prevKoResult],
-                } : {}),
-              };
-            }
-            const result = evaluateGuess(normalizedGuess, board.targetWord);
-            const solved = result.every(r => r === 'correct');
-            const koResult = language === 'ko' ? evaluateGuessKo(normalizedGuess, board.targetWord) : undefined;
-            return {
-              ...board,
-              guesses: [...board.guesses, normalizedGuess],
-              results: [...board.results, result],
-              ...(koResult ? { koResults: [...(board.koResults || []), koResult] } : {}),
-              solved,
-              solvedOnGuess: solved ? oldGameState.guessCount + 1 : board.solvedOnGuess,
-            };
-          });
-
-          const newGuessCount = oldGameState.guessCount + 1;
-          const allSolved = newBoards.every(b => b.solved);
-          const outOfGuesses = newGuessCount >= oldGameState.maxGuesses;
-          const newGameOver = allSolved || outOfGuesses;
-
-          const newGameState = {
-            ...oldGameState,
-            boards: newBoards,
-            currentGuess: '',
-            guessCount: newGuessCount,
-            gameOver: newGameOver,
-            won: allSolved,
-          };
-
-          // Update player state
-          const now = Date.now();
-          const updatedPlayerState = {
-            ...playerState,
+          const {
+            previousGameState: oldGameState,
             gameState: newGameState,
-            updatedAt: now,
-            finishedAt: newGameOver && !playerState.finishedAt ? now : playerState.finishedAt,
-          };
+            playerState: updatedPlayerState,
+            normalizedGuess,
+          } = transition;
+          const newBoards = newGameState.boards;
+          const newGuessCount = newGameState.guessCount;
+          const newGameOver = newGameState.gameOver;
+          const allSolved = newGameState.won;
           console.log('[GUESS] Updating player:', visibleUserId, 'guessCount:', newGuessCount, 'boards:', newBoards.map(b => b.guesses.length));
           setPlayer(updatedPlayerState);
           await recordDailyGuessTransition(updatedPlayerState, oldGameState, newGameState, normalizedGuess);
@@ -936,6 +953,7 @@ wss.on("connection", (ws, req) => {
               assisted: performance.assisted,
               score: performance.score,
               language,
+              puzzleVariant,
               timestamp: Date.now(),
             });
             redis.publish('activity:events', finishEvent).catch(err => {
@@ -948,8 +966,8 @@ wss.on("connection", (ws, req) => {
           ws.send(JSON.stringify({ type: 'STATE', playerState: updatedPlayerState }));
 
           // Broadcast updated LEADERBOARD to room
-          const room = getOrCreateRoom(roomId, dateKey, language);
-          const roomKey = makeRoomKey(roomId, dateKey, language);
+          const room = getOrCreateRoom(roomId, dateKey, language, puzzleVariant);
+          const roomKey = makeRoomKey(roomId, dateKey, language, puzzleVariant);
           if (DEBUG_WS) {
             console.log('[WS GUESS] Broadcasting leaderboard, players in room:', room.players.size);
           }
@@ -958,12 +976,12 @@ wss.on("connection", (ws, req) => {
             console.log('[LEADERBOARD DEBUG] GUESS - room.players.size:', room.players.size);
             console.log('[LEADERBOARD DEBUG] GUESS - leaderboard payload length:', room.leaderboard.length);
           }
-          broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard, language });
+          broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard, language, puzzleVariant });
           break;
         }
 
         case "HINT": {
-          const { roomId, dateKey, visibleUserId, boardIndex, hintType, language: hintLanguage } = message;
+          const { roomId, dateKey, visibleUserId, boardIndex, hintType, language: hintLanguage, puzzleVariant: hintPuzzleVariant } = message;
           if (!roomId || !dateKey || !visibleUserId || !Number.isInteger(boardIndex) || typeof hintType !== 'string') {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing or invalid hint request fields' }));
             return;
@@ -973,8 +991,14 @@ wss.on("connection", (ws, req) => {
             return;
           }
           const language = hintLanguage;
+          const parsedVariant = parseGameplayRequest(language, hintPuzzleVariant);
+          if (!parsedVariant.ok) {
+            sendWebSocketError(ws, parsedVariant);
+            return;
+          }
+          const puzzleVariant = parsedVariant.puzzleVariant;
 
-          const playerState = getPlayer(roomId, dateKey, visibleUserId, language);
+          const playerState = getPlayer(roomId, dateKey, visibleUserId, language, puzzleVariant);
           if (!playerState) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'PLAYER_NOT_FOUND', message: 'Player not found. Send JOIN first.' }));
             return;
@@ -999,17 +1023,17 @@ wss.on("connection", (ws, req) => {
 
           ws.send(JSON.stringify({ type: 'STATE', playerState: updatedPlayerState }));
           if (!result.duplicate) {
-            const room = getOrCreateRoom(roomId, dateKey, language);
+            const room = getOrCreateRoom(roomId, dateKey, language, puzzleVariant);
             broadcastToRoomByKey(
-              makeRoomKey(roomId, dateKey, language),
-              { type: 'LEADERBOARD', leaderboard: room.leaderboard, language },
+              makeRoomKey(roomId, dateKey, language, puzzleVariant),
+              { type: 'LEADERBOARD', leaderboard: room.leaderboard, language, puzzleVariant },
             );
           }
           break;
         }
 
         case "LEAVE": {
-          const { roomId, dateKey, visibleUserId, language: leaveLang } = message;
+          const { roomId, dateKey, visibleUserId, language: leaveLang, puzzleVariant: leaveVariant } = message;
           if (!roomId || !dateKey || !visibleUserId) {
             return;
           }
@@ -1019,7 +1043,7 @@ wss.on("connection", (ws, req) => {
             return;
           }
           const leaveLanguage = parsedLanguage.language;
-          handleLeave(roomId, dateKey, visibleUserId, ws, leaveLanguage);
+          handleLeave(roomId, dateKey, visibleUserId, ws, leaveLanguage, leaveVariant ?? currentPuzzleVariant);
           break;
         }
 
@@ -1079,7 +1103,7 @@ wss.on("connection", (ws, req) => {
   ws.on("close", () => {
     // Handle new protocol disconnect
     if (currentRoomKey && currentVisibleUserId) {
-      handleLeave(currentRoomId, currentDateKey, currentVisibleUserId, ws, currentLanguage);
+      handleLeave(currentRoomId, currentDateKey, currentVisibleUserId, ws, currentLanguage, currentPuzzleVariant);
     }
 
     // Handle legacy protocol disconnect
@@ -1112,8 +1136,8 @@ wss.on("connection", (ws, req) => {
 });
 
 /** Handle player leaving (LEAVE message or disconnect) */
-function handleLeave(roomId, dateKey, visibleUserId, ws, language = 'en') {
-  const roomKey = makeRoomKey(roomId, dateKey, language);
+function handleLeave(roomId, dateKey, visibleUserId, ws, language = 'en', puzzleVariant) {
+  const roomKey = makeRoomKey(roomId, dateKey, language, puzzleVariant);
   const connections = wsConnectionsByRoom.get(roomKey);
   if (connections) {
     for (const client of connections) {
@@ -1138,7 +1162,7 @@ function handleLeave(roomId, dateKey, visibleUserId, ws, language = 'en') {
       console.log('[LEADERBOARD DEBUG] LEAVE - room.players.size:', room.players.size);
       console.log('[LEADERBOARD DEBUG] LEAVE - leaderboard payload length:', room.leaderboard.length);
     }
-    broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard, language });
+    broadcastToRoomByKey(roomKey, { type: 'LEADERBOARD', leaderboard: room.leaderboard, language, puzzleVariant });
   }
 }
 
@@ -1215,31 +1239,7 @@ const WORD_LIST = [
 /** Get word list for a given language */
 function getWordListForLanguage(language) {
   if (language === 'ko') return KO_ANSWER_WORDS;
-  if (language === 'zh') return ZH_ANSWER_WORDS;
   return WORD_LIST;
-}
-
-/** Get expected word length for a given language */
-function getWordLengthForLanguage(language) {
-  return language === 'en' ? 5 : 2;
-}
-
-/** Get max guesses for a given language */
-function getMaxGuessesForLanguage(language) {
-  return language === 'ko' ? 9 : 9;
-}
-
-/** Validate guess format for a given language */
-function isValidGuessFormat(guess, language) {
-  if (language === 'ko') {
-    return guess.length === 2 && /^[\uAC00-\uD7A3]+$/.test(guess) && isValidKoreanGuess(guess);
-  }
-  if (language === 'zh') {
-    return Array.from(guess).length === 2 && /^\p{Script=Han}{2}$/u.test(guess) && isValidChineseGuess(guess);
-  }
-  return guess.length === 5
-    && /^[a-z]+$/.test(guess)
-    && (englishGuessWords.has(guess) || WORD_LIST.includes(guess));
 }
 
 function dateKeyToSeed(dateKey) {
@@ -1278,40 +1278,6 @@ function getDailyTargets(dateKey, language = 'en') {
     indices.push(idx);
   }
   return [wordList[indices[0]], wordList[indices[1]], wordList[indices[2]], wordList[indices[3]]];
-}
-
-function createBoardState(targetWord) {
-  return {
-    targetWord: targetWord.toLowerCase(),
-    guesses: [],
-    results: [],
-    solved: false,
-    solvedOnGuess: null,
-  };
-}
-
-function createGameState(targetWords, maxGuesses, language = 'en') {
-  if (maxGuesses === undefined || maxGuesses === null) {
-    maxGuesses = getMaxGuessesForLanguage(language);
-  }
-  return {
-    boards: [
-      createBoardState(targetWords[0]),
-      createBoardState(targetWords[1]),
-      createBoardState(targetWords[2]),
-      createBoardState(targetWords[3]),
-    ],
-    currentGuess: '',
-    guessCount: 0,
-    maxGuesses,
-    gameOver: false,
-    won: false,
-    language,
-    assistance: {
-      scoringVersion: 1,
-      hints: [],
-    },
-  };
 }
 
 function getTodayDateKey() {
@@ -1370,12 +1336,13 @@ app.post('/api/analytics/events', learningRoute(async (req, res) => {
     else acceptedIds.push(result.event.eventId);
     if (
       !result.duplicate
-      && result.event.type === 'valid_guess_submitted'
+      && result.event.type === 'board_solved'
       && result.event.mode === 'practice'
       && ['ko', 'zh'].includes(result.event.language)
     ) {
       await learningData.markSavedWordLaterGuessed(userId, result.event.word, {
         language: result.event.language,
+        puzzleVariant: result.event.puzzleVariant,
         dateKey: result.event.dateKey,
         mode: 'practice',
         roundId: result.event.roundId,
@@ -1419,6 +1386,7 @@ app.put('/api/learning/saved-words/:word', learningRoute(async (req, res) => {
   try {
     const result = await learningData.saveWord(userId, req.params.word, {
       language: parsedLanguage.language,
+      puzzleVariant: req.body?.puzzleVariant,
       source: req.body?.source,
       dateKey: req.body?.dateKey,
       mode: req.body?.mode,
@@ -1447,6 +1415,7 @@ app.delete('/api/learning/saved-words/:word', learningRoute(async (req, res) => 
   try {
     const result = await learningData.unsaveWord(userId, req.params.word, {
       language: parsedLanguage.language,
+      puzzleVariant: req.body?.puzzleVariant,
       dateKey: req.body?.dateKey,
       mode: req.body?.mode,
       roundId: req.body?.roundId,
@@ -1471,6 +1440,7 @@ app.get('/api/admin/analytics/summary', learningRoute(async (req, res) => {
       from: req.query.from,
       to: req.query.to,
       language: req.query.language,
+      puzzleVariant: req.query.puzzleVariant,
       mode: req.query.mode,
     });
     return res.json(summary);
@@ -1483,7 +1453,7 @@ app.get('/api/admin/analytics/summary', learningRoute(async (req, res) => {
 // Activity leave notification - triggers "was playing" message in Discord
 app.post("/api/activity/leave", async (req, res) => {
   try {
-    const { userId, guildId, channelId, dateKey, profile, gameState, language: reqLanguage } = req.body;
+    const { userId, guildId, channelId, dateKey, profile, gameState, language: reqLanguage, puzzleVariant } = req.body;
     const parsedLanguage = parseLanguage(reqLanguage);
     if (!parsedLanguage.ok) {
       return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
@@ -1502,6 +1472,7 @@ app.post("/api/activity/leave", async (req, res) => {
         channelId,
         dateKey: dateKey || getTodayDateKey(),
         language: parsedLanguage.language,
+        puzzleVariant,
         profile: profile || { displayName: 'Player', avatarUrl: null },
         gameState: gameState || null,
         timestamp: Date.now(),
@@ -1526,13 +1497,18 @@ app.get("/api/room/:roomId/:dateKey/leaderboard", async (req, res) => {
     return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
   }
   const language = parsedLanguage.language;
+  const parsedVariant = parseReadPuzzleVariant(language, req.query.puzzleVariant);
+  if (!parsedVariant.ok) {
+    return res.status(400).json(gameplayError(parsedVariant.code, parsedVariant.message));
+  }
+  const puzzleVariant = parsedVariant.puzzleVariant;
   if (!roomId || !dateKey) {
     return res.status(400).json({ error: "roomId and dateKey required" });
   }
 
   // Try to rebuild from Redis if room not in memory
-  const room = await getOrCreateRoomAsync(roomId, dateKey, language);
-  res.json({ language, leaderboard: room.leaderboard });
+  const room = await getOrCreateRoomAsync(roomId, dateKey, language, puzzleVariant);
+  res.json({ language, puzzleVariant, leaderboard: room.leaderboard });
 });
 
 // GET players in a room (from Redis roomPlayers set)
@@ -1543,6 +1519,11 @@ app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
     return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
   }
   const language = parsedLanguage.language;
+  const parsedVariant = parseReadPuzzleVariant(language, req.query.puzzleVariant);
+  if (!parsedVariant.ok) {
+    return res.status(400).json(gameplayError(parsedVariant.code, parsedVariant.message));
+  }
+  const puzzleVariant = parsedVariant.puzzleVariant;
   if (!roomId || !dateKey) {
     return res.status(400).json({ error: "roomId and dateKey required" });
   }
@@ -1553,12 +1534,12 @@ app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
   // Try Redis first for authoritative list
   if (hasRedisConnection()) {
     try {
-      const setKey = makeRoomPlayersSetKey(roomId, dateKey, language);
+      const setKey = makeRoomPlayersSetKey(roomId, dateKey, language, puzzleVariant);
       visibleUserIds = await redis.smembers(setKey);
 
       // Also load player details from Redis
       for (const visibleUserId of visibleUserIds) {
-        const playerKey = makePlayerRedisKey(roomId, dateKey, visibleUserId, language);
+        const playerKey = makePlayerRedisKey(roomId, dateKey, visibleUserId, language, puzzleVariant);
         const data = await redis.get(playerKey);
         if (data) {
           const parsed = JSON.parse(data);
@@ -1584,7 +1565,7 @@ app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
 
   // Fallback to in-memory if Redis empty/unavailable
   if (visibleUserIds.length === 0) {
-    const room = roomStateStore.get(makeRoomKey(roomId, dateKey, language));
+    const room = roomStateStore.get(makeRoomKey(roomId, dateKey, language, puzzleVariant));
     if (room) {
       visibleUserIds = Array.from(room.players.keys());
       for (const [visibleUserId, player] of room.players) {
@@ -1603,6 +1584,7 @@ app.get("/api/room/:roomId/:dateKey/players", async (req, res) => {
     roomId,
     dateKey,
     language,
+    puzzleVariant,
     count: visibleUserIds.length,
     visibleUserIds,
     playerDetails,
@@ -1616,11 +1598,17 @@ app.get("/api/room/:roomId/:dateKey/player/:visibleUserId", (req, res) => {
   if (!parsedLanguage.ok) {
     return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
   }
+  const language = parsedLanguage.language;
+  const parsedVariant = parseReadPuzzleVariant(language, req.query.puzzleVariant);
+  if (!parsedVariant.ok) {
+    return res.status(400).json(gameplayError(parsedVariant.code, parsedVariant.message));
+  }
+  const puzzleVariant = parsedVariant.puzzleVariant;
   if (!roomId || !dateKey || !visibleUserId) {
     return res.status(400).json({ error: "roomId, dateKey, and visibleUserId required" });
   }
 
-  const playerState = getPlayer(roomId, dateKey, visibleUserId, parsedLanguage.language);
+  const playerState = getPlayer(roomId, dateKey, visibleUserId, language, puzzleVariant);
   if (!playerState) {
     return res.status(404).json({ error: "Player not found" });
   }
@@ -1631,6 +1619,10 @@ app.get("/api/room/:roomId/:dateKey/player/:visibleUserId", (req, res) => {
 // Debug endpoint to verify Redis persistence
 app.get("/api/debug/persist", async (req, res) => {
   const { roomId, dateKey, visibleUserId } = req.query;
+  const parsedLanguage = parseLanguage(req.query.language);
+  const language = parsedLanguage.ok ? parsedLanguage.language : 'en';
+  const parsedVariant = parseReadPuzzleVariant(language, req.query.puzzleVariant);
+  const puzzleVariant = parsedVariant.ok ? parsedVariant.puzzleVariant : undefined;
 
   const status = {
     redisConnected: hasRedisConnection(),
@@ -1653,8 +1645,8 @@ app.get("/api/debug/persist", async (req, res) => {
 
   // If specific player requested, test load/save
   if (roomId && dateKey && visibleUserId) {
-    const playerKey = makePlayerRedisKey(roomId, dateKey, visibleUserId);
-    const setKey = makeRoomPlayersSetKey(roomId, dateKey);
+    const playerKey = makePlayerRedisKey(roomId, dateKey, visibleUserId, language, puzzleVariant);
+    const setKey = makeRoomPlayersSetKey(roomId, dateKey, language, puzzleVariant);
 
     // Test GET player
     try {
@@ -1763,12 +1755,17 @@ app.post("/api/token", async (req, res) => {
 // JOIN: Get or create game state for a player in a room
 app.post("/api/game/join", async (req, res) => {
   try {
-    const { roomId, userId, dateKey: clientDateKey, language: reqLanguage, guildId, profile } = req.body;
+    const { roomId, userId, dateKey: clientDateKey, language: reqLanguage, puzzleVariant: reqPuzzleVariant, guildId, profile } = req.body;
     const parsedLanguage = parseLanguage(reqLanguage);
     if (!parsedLanguage.ok) {
       return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
     }
     const language = parsedLanguage.language;
+    const parsedVariant = parseGameplayRequest(language, reqPuzzleVariant);
+    if (!parsedVariant.ok) {
+      return res.status(400).json(gameplayError(parsedVariant.code, parsedVariant.message));
+    }
+    const puzzleVariant = parsedVariant.puzzleVariant;
     if (!roomId || !userId) {
       return res.status(400).json({ error: "roomId and userId required" });
     }
@@ -1778,37 +1775,39 @@ app.post("/api/game/join", async (req, res) => {
       ? clientDateKey
       : getTodayDateKey();
     if (guildId) roomGuildMap.set(roomId, guildId);
-    let playerState = await getPlayerAsync(roomId, dateKey, userId, language);
+    let playerState = await getPlayerAsync(roomId, dateKey, userId, language, puzzleVariant);
     let state = playerState ? {
       gameState: playerState.gameState,
       gameMode: playerState.mode,
       dateKey: playerState.dateKey,
       language: playerState.language,
-    } : await gameStateStore.get(roomId, dateKey, userId, language);
+      ...(playerState.puzzleVariant ? { puzzleVariant: playerState.puzzleVariant } : {}),
+    } : await gameStateStore.get(roomId, dateKey, userId, language, puzzleVariant);
 
     if (!playerState) {
-      const targetWords = getDailyTargets(dateKey, language);
-      const gameState = state?.gameState ?? createGameState(targetWords, undefined, language);
+      const targetWords = language === 'zh' ? undefined : getDailyTargets(dateKey, language);
+      const gameState = state?.gameState ?? createDailyGame(dateKey, language, puzzleVariant, targetWords);
       const cleanProfile = {
         displayName: (profile?.displayName || userId).slice(0, 100),
         avatarUrl: profile?.avatarUrl || null,
       };
-      playerState = createPlayerState(roomId, dateKey, userId, gameState, cleanProfile, language);
+      playerState = createPlayerState(roomId, dateKey, userId, gameState, cleanProfile, language, puzzleVariant);
       setPlayer(playerState);
-      await gameStateStore.delete(roomId, dateKey, userId, language);
+      await gameStateStore.delete(roomId, dateKey, userId, language, puzzleVariant);
       state = {
         gameState: playerState.gameState,
         gameMode: playerState.mode,
         dateKey: playerState.dateKey,
         language: playerState.language,
+        ...(playerState.puzzleVariant ? { puzzleVariant: playerState.puzzleVariant } : {}),
       };
     }
 
     await recordDailyRoundStarted(playerState);
 
     broadcastToRoomByKey(
-      makeRoomKey(roomId, dateKey, language),
-      { type: 'LEADERBOARD', leaderboard: getOrCreateRoom(roomId, dateKey, language).leaderboard, language },
+      makeRoomKey(roomId, dateKey, language, puzzleVariant),
+      { type: 'LEADERBOARD', leaderboard: getOrCreateRoom(roomId, dateKey, language, puzzleVariant).leaderboard, language, puzzleVariant },
     );
     res.json(state);
   } catch (err) {
@@ -1821,27 +1820,35 @@ app.post("/api/game/join", async (req, res) => {
 app.post('/api/game/invalid-guess', async (req, res) => {
   try {
     const {
-      roomId, userId, guess, attemptId, dateKey: clientDateKey, language: reqLanguage,
+      roomId, userId, guess, attemptId, dateKey: clientDateKey, language: reqLanguage, puzzleVariant: reqPuzzleVariant,
     } = req.body;
     const parsedLanguage = parseLanguage(reqLanguage);
     if (!parsedLanguage.ok) {
       return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
     }
     const language = parsedLanguage.language;
+    const parsedVariant = parseGameplayRequest(language, reqPuzzleVariant);
+    if (!parsedVariant.ok) {
+      return res.status(400).json(gameplayError(parsedVariant.code, parsedVariant.message));
+    }
+    const puzzleVariant = parsedVariant.puzzleVariant;
     if (!roomId || !userId || !guess || !UUID_RE.test(String(attemptId ?? ''))) {
       return res.status(400).json({ error: 'roomId, userId, guess, and UUID attemptId required' });
     }
     const dateKey = clientDateKey && /^\d{4}-\d{2}-\d{2}$/.test(clientDateKey)
       ? clientDateKey
       : getTodayDateKey();
-    const player = await getPlayerAsync(roomId, dateKey, userId, language);
+    const player = await getPlayerAsync(roomId, dateKey, userId, language, puzzleVariant);
     if (!player) return res.status(404).json({ error: 'No game found. Call /api/game/join first.' });
     if (player.gameState.gameOver) return res.status(204).end();
-    const normalizedGuess = normalizeGuessForLanguage(guess, language);
-    if (isValidGuessFormat(normalizedGuess, language)) {
+    const validation = validateDailyGuess(player.gameState, guess, {
+      isAcceptedEnglishGuess: (word) => englishGuessWords.has(word),
+      isAcceptedKoreanGuess: isValidKoreanGuess,
+    });
+    if (validation.valid) {
       return res.status(400).json({ error: 'Guess is accepted by the current lexicon' });
     }
-    await recordDailyInvalidGuess(player, normalizedGuess, attemptId);
+    await recordDailyInvalidGuess(player, guess, attemptId);
     return res.status(202).json({ accepted: true });
   } catch (error) {
     console.warn('[Learning] Invalid-guess instrumentation failed:', error.message);
@@ -1852,12 +1859,17 @@ app.post('/api/game/invalid-guess', async (req, res) => {
 // GUESS: Submit a guess and get updated state
 app.post("/api/game/guess", async (req, res) => {
   try {
-    const { roomId, userId, guess, dateKey: clientDateKey, language: reqLanguage } = req.body;
+    const { roomId, userId, guess, dateKey: clientDateKey, language: reqLanguage, puzzleVariant: reqPuzzleVariant } = req.body;
     const parsedLanguage = parseLanguage(reqLanguage);
     if (!parsedLanguage.ok) {
       return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
     }
     const language = parsedLanguage.language;
+    const parsedVariant = parseGameplayRequest(language, reqPuzzleVariant);
+    if (!parsedVariant.ok) {
+      return res.status(400).json(gameplayError(parsedVariant.code, parsedVariant.message));
+    }
+    const puzzleVariant = parsedVariant.puzzleVariant;
     if (!roomId || !userId || !guess) {
       return res.status(400).json({ error: "roomId, userId, and guess required" });
     }
@@ -1866,83 +1878,55 @@ app.post("/api/game/guess", async (req, res) => {
     const dateKey = (clientDateKey && /^\d{4}-\d{2}-\d{2}$/.test(clientDateKey))
       ? clientDateKey
       : getTodayDateKey();
-    let state = await gameStateStore.get(roomId, dateKey, userId, language);
+    let state = await gameStateStore.get(roomId, dateKey, userId, language, puzzleVariant);
 
     if (!state) {
       return res.status(404).json({ error: "No game found. Call /api/game/join first." });
     }
 
     const { gameState } = state;
-    const existingPlayer = await getPlayerAsync(roomId, dateKey, userId, language);
+    const existingPlayer = await getPlayerAsync(roomId, dateKey, userId, language, puzzleVariant);
     if (gameState.gameOver) {
       return res.json(state); // Game already over, return current state
     }
 
-    // Validate guess format (language-aware)
-    const normalizedGuess = normalizeGuessForLanguage(guess, language);
-    if (!isValidGuessFormat(normalizedGuess, language)) {
+    const playerForTransition = existingPlayer ?? {
+      roomId,
+      dateKey,
+      visibleUserId: userId,
+      language,
+      puzzleVariant,
+      gameState,
+      createdAt: Date.now(),
+      finishedAt: null,
+    };
+    const transition = transitionPlayerGuess(playerForTransition, guess, {
+      isAcceptedEnglishGuess: (word) => englishGuessWords.has(word),
+      isAcceptedKoreanGuess: isValidKoreanGuess,
+    });
+    if (!transition.ok) {
       if (existingPlayer) {
         await recordDailyInvalidGuess(
           existingPlayer,
-          normalizedGuess,
+          guess,
           UUID_RE.test(String(req.body.attemptId ?? '')) ? req.body.attemptId : crypto.randomUUID(),
         );
       }
-      return res.status(400).json({ error: "Invalid guess format" });
+      const error = submissionError(language, transition);
+      return res.status(400).json(gameplayError(error.code, error.message));
     }
-
-    // Apply guess to all boards
-    const newBoards = gameState.boards.map((board) => {
-      if (board.solved) {
-        const prevKoResult = board.koResults?.[board.koResults.length - 1];
-        return {
-          ...board,
-          guesses: [...board.guesses, normalizedGuess],
-          results: [...board.results, board.results[board.results.length - 1]],
-          ...(language === 'ko' && prevKoResult ? {
-            koResults: [...(board.koResults || []), prevKoResult],
-          } : {}),
-        };
-      }
-
-      const result = evaluateGuess(normalizedGuess, board.targetWord);
-      const solved = result.every(r => r === 'correct');
-      const koResult = language === 'ko' ? evaluateGuessKo(normalizedGuess, board.targetWord) : undefined;
-
-      return {
-        ...board,
-        guesses: [...board.guesses, normalizedGuess],
-        results: [...board.results, result],
-        ...(koResult ? { koResults: [...(board.koResults || []), koResult] } : {}),
-        solved,
-        solvedOnGuess: solved ? gameState.guessCount + 1 : null,
-      };
-    });
-
-    const newGuessCount = gameState.guessCount + 1;
-    const allSolved = newBoards.every(b => b.solved);
-    const outOfGuesses = newGuessCount >= gameState.maxGuesses;
-    const newGameOver = allSolved || outOfGuesses;
-
-    const newGameState = {
-      ...gameState,
-      boards: newBoards,
-      currentGuess: '',
-      guessCount: newGuessCount,
-      gameOver: newGameOver,
-      won: allSolved,
-    };
-
-    state = { ...state, gameState: { ...newGameState, language }, language };
-    await gameStateStore.set(roomId, dateKey, userId, state, language);
-
-    const updatedPlayer = getPlayer(roomId, dateKey, userId, language) || (existingPlayer ? {
-      ...existingPlayer,
+    const { previousGameState, gameState: newGameState, normalizedGuess } = transition;
+    state = {
+      ...state,
       gameState: newGameState,
       language,
-    } : null);
+      ...(puzzleVariant ? { puzzleVariant } : {}),
+    };
+    await gameStateStore.set(roomId, dateKey, userId, state, language, puzzleVariant);
+
+    const updatedPlayer = getPlayer(roomId, dateKey, userId, language, puzzleVariant) || transition.playerState;
     if (updatedPlayer) {
-      await recordDailyGuessTransition(updatedPlayer, gameState, newGameState, normalizedGuess);
+      await recordDailyGuessTransition(updatedPlayer, previousGameState, newGameState, normalizedGuess);
     }
 
     res.json(state);
@@ -1955,7 +1939,7 @@ app.post("/api/game/guess", async (req, res) => {
 // HINT: Apply one server-authoritative language-specific hint to an unsolved board
 app.post("/api/game/hint", async (req, res) => {
   try {
-    const { roomId, userId, boardIndex, hintType, dateKey: clientDateKey, language: reqLanguage } = req.body;
+    const { roomId, userId, boardIndex, hintType, dateKey: clientDateKey, language: reqLanguage, puzzleVariant: reqPuzzleVariant } = req.body;
     if (!roomId || !userId || !Number.isInteger(boardIndex) || typeof hintType !== 'string') {
       return res.status(400).json({ error: 'roomId, userId, boardIndex, and hintType required', code: 'INVALID_MESSAGE' });
     }
@@ -1963,12 +1947,17 @@ app.post("/api/game/hint", async (req, res) => {
       return res.status(400).json({ error: 'Hints are available only for Korean and Chinese games.', code: 'INVALID_LANGUAGE' });
     }
     const language = reqLanguage;
+    const parsedVariant = parseGameplayRequest(language, reqPuzzleVariant);
+    if (!parsedVariant.ok) {
+      return res.status(400).json(gameplayError(parsedVariant.code, parsedVariant.message));
+    }
+    const puzzleVariant = parsedVariant.puzzleVariant;
 
     const dateKey = (clientDateKey && /^\d{4}-\d{2}-\d{2}$/.test(clientDateKey))
       ? clientDateKey
       : getTodayDateKey();
-    const playerState = await getPlayerAsync(roomId, dateKey, userId, language);
-    const legacyState = playerState ? null : await gameStateStore.get(roomId, dateKey, userId, language);
+    const playerState = await getPlayerAsync(roomId, dateKey, userId, language, puzzleVariant);
+    const legacyState = playerState ? null : await gameStateStore.get(roomId, dateKey, userId, language, puzzleVariant);
     const gameState = playerState?.gameState ?? legacyState?.gameState;
     if (!gameState) {
       return res.status(404).json({ error: 'No game found. Call /api/game/join first.', code: 'PLAYER_NOT_FOUND' });
@@ -1992,10 +1981,10 @@ app.post("/api/game/hint", async (req, res) => {
           (entry) => entry.boardIndex === boardIndex && entry.type === hintType,
         );
         await recordDailyHint(updatedPlayerState, hint);
-        const room = getOrCreateRoom(roomId, dateKey, language);
+        const room = getOrCreateRoom(roomId, dateKey, language, puzzleVariant);
         broadcastToRoomByKey(
-          makeRoomKey(roomId, dateKey, language),
-          { type: 'LEADERBOARD', leaderboard: room.leaderboard, language },
+          makeRoomKey(roomId, dateKey, language, puzzleVariant),
+          { type: 'LEADERBOARD', leaderboard: room.leaderboard, language, puzzleVariant },
         );
       }
       return res.json({
@@ -2003,49 +1992,18 @@ app.post("/api/game/hint", async (req, res) => {
         gameMode: updatedPlayerState.mode,
         dateKey: updatedPlayerState.dateKey,
         language: updatedPlayerState.language,
+        ...(updatedPlayerState.puzzleVariant ? { puzzleVariant: updatedPlayerState.puzzleVariant } : {}),
       });
     }
 
-    const state = { ...legacyState, gameState: result.state, language };
-    await gameStateStore.set(roomId, dateKey, userId, state, language);
+    const state = { ...legacyState, gameState: result.state, language, ...(puzzleVariant ? { puzzleVariant } : {}) };
+    await gameStateStore.set(roomId, dateKey, userId, state, language, puzzleVariant);
     return res.json(state);
   } catch (err) {
     console.error('HINT error:', err);
     return res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
   }
 });
-
-// Evaluate a guess against a target word (server-side version)
-// Works for both English (5 chars) and Korean (2 syllable blocks)
-function evaluateGuess(guess, target) {
-  const len = target.length;
-  const result = new Array(len).fill('absent');
-  const targetLetterCounts = new Map();
-
-  for (const letter of target) {
-    targetLetterCounts.set(letter, (targetLetterCounts.get(letter) || 0) + 1);
-  }
-
-  // First pass: correct letters
-  for (let i = 0; i < len; i++) {
-    if (guess[i] === target[i]) {
-      result[i] = 'correct';
-      targetLetterCounts.set(guess[i], targetLetterCounts.get(guess[i]) - 1);
-    }
-  }
-
-  // Second pass: present letters
-  for (let i = 0; i < len; i++) {
-    if (result[i] === 'correct') continue;
-    const remaining = targetLetterCounts.get(guess[i]) || 0;
-    if (remaining > 0) {
-      result[i] = 'present';
-      targetLetterCounts.set(guess[i], remaining - 1);
-    }
-  }
-
-  return result;
-}
 
 // ========== STATIC FILE SERVING ==========
 // Serve built client files from public folder

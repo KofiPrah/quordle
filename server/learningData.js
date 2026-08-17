@@ -42,13 +42,20 @@ const KOREAN_HINT_TYPES = new Set([
   'batchim-count',
   'reveal-first-syllable',
 ]);
-const CHINESE_HINT_TYPES = new Set([
+const LEGACY_CHINESE_HINT_TYPES = new Set([
   'tone-pattern',
   'pinyin-initials',
   'broad-meaning',
   'reveal-first-character',
 ]);
-const HINT_TYPES = new Set([...KOREAN_HINT_TYPES, ...CHINESE_HINT_TYPES]);
+const PINYIN_CHINESE_HINT_TYPES = new Set([
+  'syllable-boundary',
+  'reveal-letter',
+  'broad-meaning',
+]);
+const HINT_TYPES = new Set([...KOREAN_HINT_TYPES, ...LEGACY_CHINESE_HINT_TYPES, ...PINYIN_CHINESE_HINT_TYPES]);
+const PINYIN_PUZZLE_VARIANT = 'pinyin-latin-v2';
+const HANZI_PUZZLE_VARIANT = 'hanzi-v1';
 const CLASSIFICATIONS = new Set(['recognized-unaccepted', 'unrecognized', 'not-in-list']);
 const SOURCES = new Set(['dictionary', 'nearby', 'post-game']);
 const AGGREGATE_TTL_SECONDS = 60 * 60 * 24 * 180;
@@ -59,6 +66,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const KOREAN_WORD_RE = /^[\uAC00-\uD7A3]{2}$/u;
 const CHINESE_WORD_RE = /^\p{Script=Han}{2}$/u;
 const ENGLISH_WORD_RE = /^[a-z]{5}$/;
+const PINYIN_GUESS_KEY_RE = /^[a-z]{4,9}$/;
 
 function finiteInteger(value, fallback = 0) {
   return Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : fallback;
@@ -131,6 +139,11 @@ export function normalizeLearningEvent(value, options = {}) {
   const roundId = typeof value.roundId === 'string' ? value.roundId.trim() : '';
   const dateKey = isValidDateKey(value.dateKey) ? value.dateKey : null;
   const occurredAt = Number(value.occurredAt);
+  const puzzleVariant = value.puzzleVariant === PINYIN_PUZZLE_VARIANT
+    ? PINYIN_PUZZLE_VARIANT
+    : value.puzzleVariant === HANZI_PUZZLE_VARIANT
+      ? HANZI_PUZZLE_VARIANT
+      : undefined;
   if (
     value.version !== LEARNING_EVENT_VERSION
     || !EVENT_TYPES.has(type)
@@ -142,6 +155,8 @@ export function normalizeLearningEvent(value, options = {}) {
     || !roundId
     || roundId.length > 160
     || !Number.isFinite(occurredAt)
+    || (value.puzzleVariant !== undefined && !puzzleVariant)
+    || (language !== 'zh' && puzzleVariant !== undefined)
   ) return { ok: false, code: 'INVALID_EVENT' };
 
   if (options.client === true) {
@@ -151,6 +166,9 @@ export function normalizeLearningEvent(value, options = {}) {
   }
 
   let word = normalizeWord(value.word, language);
+  const guessKey = typeof value.guessKey === 'string' && PINYIN_GUESS_KEY_RE.test(value.guessKey)
+    ? value.guessKey
+    : undefined;
   const classification = CLASSIFICATIONS.has(value.classification) ? value.classification : undefined;
   if (type === 'invalid_guess_submitted') {
     const canRetainRecognizedKorean = language === 'ko'
@@ -159,7 +177,10 @@ export function normalizeLearningEvent(value, options = {}) {
       && options.isRecognizedKoreanWord?.(word) === true;
     if (!canRetainRecognizedKorean) word = null;
   }
-  if (
+  if (type === 'valid_guess_submitted' && puzzleVariant === PINYIN_PUZZLE_VARIANT) {
+    if (!guessKey) return { ok: false, code: 'INVALID_GUESS_KEY' };
+    word = null;
+  } else if (
     ['valid_guess_submitted', 'board_solved', 'board_failed'].includes(type)
     && (!word || !isAcceptedLearningWord(word, language, options))
   ) return { ok: false, code: 'INVALID_WORD' };
@@ -172,7 +193,9 @@ export function normalizeLearningEvent(value, options = {}) {
   const hintType = HINT_TYPES.has(value.hintType) ? value.hintType : undefined;
   const hintMatchesLanguage = language === 'ko'
     ? KOREAN_HINT_TYPES.has(hintType)
-    : language === 'zh' && CHINESE_HINT_TYPES.has(hintType);
+    : language === 'zh' && (puzzleVariant === PINYIN_PUZZLE_VARIANT
+      ? PINYIN_CHINESE_HINT_TYPES.has(hintType)
+      : LEGACY_CHINESE_HINT_TYPES.has(hintType));
   if (type === 'hint_used' && (!hintType || !hintMatchesLanguage)) return { ok: false, code: 'INVALID_HINT' };
   if (type === 'round_completed' && (!value.metrics || typeof value.metrics !== 'object')) {
     return { ok: false, code: 'INVALID_METRICS' };
@@ -193,9 +216,11 @@ export function normalizeLearningEvent(value, options = {}) {
       occurredAt,
       dateKey,
       language,
+      ...(puzzleVariant ? { puzzleVariant } : {}),
       mode,
       roundId,
       ...(word ? { word } : {}),
+      ...(guessKey ? { guessKey } : {}),
       ...(classification ? { classification } : {}),
       ...(hintType ? { hintType } : {}),
       ...(boardIndex !== undefined ? { boardIndex } : {}),
@@ -330,13 +355,29 @@ export function createLearningDataService(options = {}) {
     .digest('hex');
   const redis = () => redisProvider?.() ?? null;
   const available = () => enabled && Boolean(hmacSecret) && (Boolean(redis()) || allowMemoryFallback);
-  const aggregateKey = (dateKey, language, mode) => `analytics:v1:daily:${dateKey}:${language}:${mode}`;
-  const wordKey = (metric, dateKey, language, mode) => `analytics:v1:words:${metric}:${dateKey}:${language}:${mode}`;
+  const analyticsLanguage = (language, puzzleVariant) => language === 'zh' && puzzleVariant === PINYIN_PUZZLE_VARIANT
+    ? `${language}:${PINYIN_PUZZLE_VARIANT}`
+    : language;
+  const aggregateKey = (dateKey, language, mode, puzzleVariant) => (
+    `analytics:v1:daily:${dateKey}:${analyticsLanguage(language, puzzleVariant)}:${mode}`
+  );
+  const wordKey = (metric, dateKey, language, mode, puzzleVariant) => (
+    `analytics:v1:words:${metric}:${dateKey}:${analyticsLanguage(language, puzzleVariant)}:${mode}`
+  );
+  const analyticsDedupeKey = (hashedActor, eventId, language, puzzleVariant) => (
+    `analytics:v1:dedupe:${hashedActor}:${analyticsLanguage(language, puzzleVariant)}:${eventId}`
+  );
+  const retentionKey = (kind, dateKey, language, mode, puzzleVariant) => (
+    `analytics:v1:${kind}:${dateKey}:${analyticsLanguage(language, puzzleVariant)}:${mode}`
+  );
+  const firstSeenKey = (language, mode, hashedActor, puzzleVariant) => (
+    `analytics:v1:first-${analyticsLanguage(language, puzzleVariant)}:${mode}:${hashedActor}`
+  );
   const savedKey = (userId) => `learning:v1:saved:${actorHash(userId)}`;
 
-  async function claimEvent(eventId, hashedActor) {
+  async function claimEvent(event, hashedActor) {
     const client = redis();
-    const key = `analytics:v1:dedupe:${hashedActor}:${eventId}`;
+    const key = analyticsDedupeKey(hashedActor, event.eventId, event.language, event.puzzleVariant);
     if (client) {
       return (await client.set(key, '1', 'EX', DEDUPE_TTL_SECONDS, 'NX')) === 'OK';
     }
@@ -350,12 +391,12 @@ export function createLearningDataService(options = {}) {
     if (event.type !== 'round_started' || !['ko', 'zh'].includes(event.language)) return;
     const language = event.language;
     const client = redis();
-    const activeKey = `analytics:v1:active:${event.dateKey}:${language}:${event.mode}`;
-    const activeAllKey = `analytics:v1:active:${event.dateKey}:${language}:all`;
-    const cohortKey = `analytics:v1:cohort:${event.dateKey}:${language}:${event.mode}`;
-    const cohortAllKey = `analytics:v1:cohort:${event.dateKey}:${language}:all`;
-    const firstKey = `analytics:v1:first-${language}:${event.mode}:${hashedActor}`;
-    const firstAllKey = `analytics:v1:first-${language}:all:${hashedActor}`;
+    const activeKey = retentionKey('active', event.dateKey, language, event.mode, event.puzzleVariant);
+    const activeAllKey = retentionKey('active', event.dateKey, language, 'all', event.puzzleVariant);
+    const cohortKey = retentionKey('cohort', event.dateKey, language, event.mode, event.puzzleVariant);
+    const cohortAllKey = retentionKey('cohort', event.dateKey, language, 'all', event.puzzleVariant);
+    const firstKey = firstSeenKey(language, event.mode, hashedActor, event.puzzleVariant);
+    const firstAllKey = firstSeenKey(language, 'all', hashedActor, event.puzzleVariant);
     if (client) {
       const first = await client.set(firstKey, event.dateKey, 'EX', FIRST_SEEN_TTL_SECONDS, 'NX');
       const firstAll = await client.set(firstAllKey, event.dateKey, 'EX', FIRST_SEEN_TTL_SECONDS, 'NX');
@@ -400,23 +441,23 @@ export function createLearningDataService(options = {}) {
     const hashedActor = actorHash(userId);
     const increments = incrementsForEvent(event);
     const client = redis();
-    const aggregate = aggregateKey(event.dateKey, event.language, event.mode);
+    const aggregate = aggregateKey(event.dateKey, event.language, event.mode, event.puzzleVariant);
     const wordMetric = getWordMetric(event);
     if (client) {
       const retentionEvent = event.type === 'round_started' && ['ko', 'zh'].includes(event.language);
       const retentionLanguage = retentionEvent ? event.language : 'ko';
-      const activeKey = `analytics:v1:active:${event.dateKey}:${retentionLanguage}:${event.mode}`;
-      const activeAllKey = `analytics:v1:active:${event.dateKey}:${retentionLanguage}:all`;
-      const firstKey = `analytics:v1:first-${retentionLanguage}:${event.mode}:${hashedActor}`;
-      const cohortKey = `analytics:v1:cohort:${event.dateKey}:${retentionLanguage}:${event.mode}`;
-      const firstAllKey = `analytics:v1:first-${retentionLanguage}:all:${hashedActor}`;
-      const cohortAllKey = `analytics:v1:cohort:${event.dateKey}:${retentionLanguage}:all`;
+      const activeKey = retentionKey('active', event.dateKey, retentionLanguage, event.mode, event.puzzleVariant);
+      const activeAllKey = retentionKey('active', event.dateKey, retentionLanguage, 'all', event.puzzleVariant);
+      const firstKey = firstSeenKey(retentionLanguage, event.mode, hashedActor, event.puzzleVariant);
+      const cohortKey = retentionKey('cohort', event.dateKey, retentionLanguage, event.mode, event.puzzleVariant);
+      const firstAllKey = firstSeenKey(retentionLanguage, 'all', hashedActor, event.puzzleVariant);
+      const cohortAllKey = retentionKey('cohort', event.dateKey, retentionLanguage, 'all', event.puzzleVariant);
       const recorded = await client.eval(
         RECORD_EVENT_SCRIPT,
         9,
-        `analytics:v1:dedupe:${hashedActor}:${event.eventId}`,
+        analyticsDedupeKey(hashedActor, event.eventId, event.language, event.puzzleVariant),
         aggregate,
-        wordMetric ? wordKey(wordMetric, event.dateKey, event.language, event.mode) : aggregate,
+        wordMetric ? wordKey(wordMetric, event.dateKey, event.language, event.mode, event.puzzleVariant) : aggregate,
         activeKey,
         activeAllKey,
         firstKey,
@@ -435,14 +476,14 @@ export function createLearningDataService(options = {}) {
       );
       if (Number(recorded) === 0) return { accepted: true, duplicate: true, event };
     } else {
-      if (!(await claimEvent(event.eventId, hashedActor))) {
+      if (!(await claimEvent(event, hashedActor))) {
         return { accepted: true, duplicate: true, event };
       }
       const counters = memory.counters.get(aggregate) ?? new Map();
       for (const [field, amount] of Object.entries(increments)) addToMap(counters, field, amount);
       memory.counters.set(aggregate, counters);
       const addWordMetric = (metric) => {
-        const key = wordKey(metric, event.dateKey, event.language, event.mode);
+        const key = wordKey(metric, event.dateKey, event.language, event.mode, event.puzzleVariant);
         const words = memory.words.get(key) ?? new Map();
         addToMap(words, event.word, 1);
         memory.words.set(key, words);
@@ -530,6 +571,9 @@ export function createLearningDataService(options = {}) {
         occurredAt: current.savedAt,
         dateKey: isValidDateKey(context.dateKey) ? context.dateKey : chicagoDateKey(current.savedAt),
         language,
+        ...(language === 'zh' && context.puzzleVariant === PINYIN_PUZZLE_VARIANT
+          ? { puzzleVariant: PINYIN_PUZZLE_VARIANT }
+          : {}),
         mode: context.mode === 'practice' ? 'practice' : 'daily',
         roundId: typeof context.roundId === 'string' && context.roundId ? context.roundId : 'saved-words',
         word: normalized,
@@ -561,6 +605,9 @@ export function createLearningDataService(options = {}) {
         occurredAt: now(),
         dateKey: isValidDateKey(context.dateKey) ? context.dateKey : chicagoDateKey(now()),
         language,
+        ...(language === 'zh' && context.puzzleVariant === PINYIN_PUZZLE_VARIANT
+          ? { puzzleVariant: PINYIN_PUZZLE_VARIANT }
+          : {}),
         mode: context.mode === 'practice' ? 'practice' : 'daily',
         roundId: typeof context.roundId === 'string' && context.roundId ? context.roundId : 'saved-words',
         word: normalized,
@@ -600,6 +647,9 @@ export function createLearningDataService(options = {}) {
       occurredAt: record.recalledAt,
       dateKey: isValidDateKey(context.dateKey) ? context.dateKey : chicagoDateKey(record.recalledAt),
       language,
+      ...(language === 'zh' && context.puzzleVariant === PINYIN_PUZZLE_VARIANT
+        ? { puzzleVariant: PINYIN_PUZZLE_VARIANT }
+        : {}),
       mode: context.mode === 'practice' ? 'practice' : 'daily',
       roundId: typeof context.roundId === 'string' && context.roundId ? context.roundId : 'unknown-round',
       word: normalized,
@@ -645,6 +695,11 @@ export function createLearningDataService(options = {}) {
     if (query.mode !== undefined && !['daily', 'practice', 'all'].includes(query.mode)) {
       throw new Error('INVALID_FILTER');
     }
+    if (query.puzzleVariant !== undefined
+      && ![PINYIN_PUZZLE_VARIANT, HANZI_PUZZLE_VARIANT].includes(query.puzzleVariant)) {
+      throw new Error('INVALID_FILTER');
+    }
+    if (query.puzzleVariant !== undefined && query.language !== 'zh') throw new Error('INVALID_FILTER');
     const to = isValidDateKey(query.to) ? query.to : chicagoDateKey(now());
     const defaultFrom = shiftDate(to, -29);
     const from = isValidDateKey(query.from) ? query.from : defaultFrom;
@@ -652,6 +707,9 @@ export function createLearningDataService(options = {}) {
     if (dates.length < 1 || dates.length > 90) throw new Error('INVALID_DATE_RANGE');
     const languages = ['en', 'ko', 'zh'].includes(query.language) ? [query.language] : ['en', 'ko', 'zh'];
     const modes = query.mode === 'daily' || query.mode === 'practice' ? [query.mode] : ['daily', 'practice'];
+    const chinesePuzzleVariant = query.language === 'zh'
+      ? (query.puzzleVariant || PINYIN_PUZZLE_VARIANT)
+      : PINYIN_PUZZLE_VARIANT;
     const totals = emptyCounters();
     const lookedUp = new Map();
     const rejected = new Map();
@@ -660,15 +718,16 @@ export function createLearningDataService(options = {}) {
 
     for (const dateKey of dates) {
       for (const language of languages) {
+        const puzzleVariant = language === 'zh' ? chinesePuzzleVariant : undefined;
         for (const mode of modes) {
-          const counters = await readCounterKey(aggregateKey(dateKey, language, mode));
+          const counters = await readCounterKey(aggregateKey(dateKey, language, mode, puzzleVariant));
           for (const [field, amount] of counters) totals[field] = (totals[field] ?? 0) + amount;
           for (const [metric, destination] of [
             ['looked-up', lookedUp],
             ['recognized-rejected', rejected],
             ...(mode === 'daily' ? [['answer-solved', solved], ['answer-failed', failed]] : []),
           ]) {
-            const words = await readWordKey(wordKey(metric, dateKey, language, mode));
+            const words = await readWordKey(wordKey(metric, dateKey, language, mode, puzzleVariant));
             for (const [word, count] of words) addToMap(destination, word, count);
           }
         }
@@ -680,13 +739,14 @@ export function createLearningDataService(options = {}) {
       let cohortSize = 0;
       let returned = 0;
       for (const language of languages.filter((candidate) => ['ko', 'zh'].includes(candidate))) {
+        const puzzleVariant = language === 'zh' ? chinesePuzzleVariant : undefined;
         const retentionModes = modes.length === 1 ? modes : ['all'];
         for (const mode of retentionModes) {
           for (const cohortDate of dates) {
             const activeDate = shiftDate(cohortDate, offset);
             if (activeDate > to) continue;
-            const cohort = await readSet(`analytics:v1:cohort:${cohortDate}:${language}:${mode}`, memory.cohorts);
-            const active = await readSet(`analytics:v1:active:${activeDate}:${language}:${mode}`, memory.active);
+            const cohort = await readSet(retentionKey('cohort', cohortDate, language, mode, puzzleVariant), memory.cohorts);
+            const active = await readSet(retentionKey('active', activeDate, language, mode, puzzleVariant), memory.active);
             cohortSize += cohort.size;
             for (const actor of cohort) if (active.has(actor)) returned += 1;
           }
@@ -724,6 +784,7 @@ export function createLearningDataService(options = {}) {
       filters: {
         language: languages.length === 1 ? languages[0] : 'all',
         mode: modes.length === 1 ? modes[0] : 'all',
+        ...(languages.includes('zh') ? { puzzleVariant: chinesePuzzleVariant } : {}),
       },
       totals,
       rates: {

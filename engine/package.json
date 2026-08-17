@@ -36,6 +36,14 @@
         "./hints": {
             "import": "./dist/hints.js",
             "types": "./dist/hints.d.ts"
+        },
+        "./game": {
+            "import": "./dist/game.js",
+            "types": "./dist/game.d.ts"
+        },
+        "./pinyinDaily": {
+            "import": "./dist/pinyinDaily.js",
+            "types": "./dist/pinyinDaily.d.ts"
         }
     },
     "scripts": {

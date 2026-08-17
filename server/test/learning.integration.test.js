@@ -93,6 +93,56 @@ test('learning APIs authenticate, persist Saved Words, ingest practice events, a
     };
 
     assert.equal((await request('/api/learning/saved-words')).status, 401);
+
+    for (const word of ['太阳', '态样']) {
+      const saved = await request(`/api/learning/saved-words/${encodeURIComponent(word)}`, {
+        method: 'PUT',
+        headers: authHeaders,
+        body: JSON.stringify({
+          language: 'zh',
+          puzzleVariant: 'pinyin-latin-v2',
+          source: 'dictionary',
+          dateKey: '2025-12-31',
+          mode: 'daily',
+          roundId: 'saved-before-pinyin-round',
+        }),
+      });
+      assert.equal(saved.status, 201);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const pinyinJoin = await request('/api/game/join', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        roomId: 'pinyin-recall',
+        userId: 'learning-player',
+        dateKey: '2026-01-01',
+        language: 'zh',
+        puzzleVariant: 'pinyin-latin-v2',
+      }),
+    });
+    const pinyinState = await pinyinJoin.json();
+    const canonicalBoard = pinyinState.gameState.boards.find((board) => board.targetId === '太阳');
+    assert.equal(canonicalBoard.targetWord, 'taiyang');
+    const pinyinGuess = await request('/api/game/guess', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        roomId: 'pinyin-recall',
+        userId: 'learning-player',
+        dateKey: '2026-01-01',
+        language: 'zh',
+        puzzleVariant: 'pinyin-latin-v2',
+        guess: 'tai yang',
+      }),
+    });
+    assert.equal(pinyinGuess.status, 200);
+    const chineseSavedWords = await (
+      await request('/api/learning/saved-words?language=zh', { headers: authHeaders })
+    ).json();
+    assert.ok(chineseSavedWords.words.find((record) => record.word === '太阳').recalledAt);
+    assert.equal(chineseSavedWords.words.find((record) => record.word === '态样').recalledAt, null);
+
     const join = await request('/api/game/join', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -142,6 +192,7 @@ test('learning APIs authenticate, persist Saved Words, ingest practice events, a
     const occurredAt = Date.now() + 10;
     const practiceStartId = randomUUID();
     const practiceGuessId = randomUUID();
+    const practiceSolvedId = randomUUID();
     const analyticsResponse = await request('/api/analytics/events', {
       method: 'POST',
       headers: authHeaders,
@@ -169,10 +220,23 @@ test('learning APIs authenticate, persist Saved Words, ingest practice events, a
           roundId: 'practice:test',
           word,
         },
+        {
+          version: 1,
+          eventId: practiceSolvedId,
+          type: 'board_solved',
+          occurredAt: occurredAt + 1,
+          roundStartedAt: occurredAt - 1,
+          dateKey: '2026-08-06',
+          language: 'ko',
+          mode: 'practice',
+          roundId: 'practice:test',
+          boardIndex: 0,
+          word,
+        },
       ] }),
     });
     assert.equal(analyticsResponse.status, 200);
-    assert.deepEqual((await analyticsResponse.json()).acceptedIds, [practiceStartId, practiceGuessId]);
+    assert.deepEqual((await analyticsResponse.json()).acceptedIds, [practiceStartId, practiceGuessId, practiceSolvedId]);
 
     const savedWords = await (await request('/api/learning/saved-words?language=ko', { headers: authHeaders })).json();
     assert.equal(savedWords.version, 2);
