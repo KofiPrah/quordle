@@ -182,6 +182,125 @@ test('transport failure retains a correlated receipt through stale state until l
   assert.equal(confirmed?.state.sourceText, '');
 });
 
+test('advanced authoritative history confirms an older submission after a newer receipt displaced it', () => {
+  const started = chineseInput.beginChineseSubmission(
+    update('jie3 jie3', 6),
+    1,
+    { createSubmissionId: submissionIdFactory('submission-1') },
+  );
+  const unresolved = chineseInput.rejectChineseSubmission(
+    started.state,
+    'Network unavailable.',
+    { retainSubmissionFingerprint: true },
+  );
+
+  const reconciliation = chineseInput.reconcileChineseSubmissionAgainstState(unresolved, {
+    pinyinSubmissionReceipt: {
+      submissionId: 'submission-2',
+      normalizedGuess: 'gongsi',
+      guessIndex: 2,
+    },
+    gameState: {
+      guessCount: 3,
+      boards: Array.from({ length: 4 }, () => ({
+        guesses: ['laoshi', 'jiejie', 'gongsi'],
+      })),
+    },
+  });
+
+  assert.equal(reconciliation.status, 'confirmed');
+  assert.equal(reconciliation.state.sourceText, '');
+  assert.equal(reconciliation.state.submissionFingerprint, null);
+});
+
+test('advanced authoritative history with a different key releases only old retry metadata', () => {
+  const started = chineseInput.beginChineseSubmission(
+    update('jie3 jie3', 6),
+    1,
+    { createSubmissionId: submissionIdFactory('submission-1') },
+  );
+  const unresolved = chineseInput.rejectChineseSubmission(
+    started.state,
+    'Network unavailable.',
+    { retainSubmissionFingerprint: true },
+  );
+
+  const reconciliation = chineseInput.reconcileChineseSubmissionAgainstState(unresolved, {
+    pinyinSubmissionReceipt: {
+      submissionId: 'submission-2',
+      normalizedGuess: 'gongsi',
+      guessIndex: 2,
+    },
+    gameState: {
+      guessCount: 3,
+      boards: Array.from({ length: 4 }, () => ({
+        guesses: ['laoshi', 'xuesheng', 'gongsi'],
+      })),
+    },
+  });
+
+  assert.equal(reconciliation.status, 'rejected');
+  assert.equal(reconciliation.state.sourceText, 'jie3 jie3');
+  assert.equal(reconciliation.state.normalizedText, 'jiejie');
+  assert.equal(reconciliation.state.validationStatus, 'valid');
+  assert.equal(reconciliation.state.pendingSubmission, false);
+  assert.equal(reconciliation.state.submissionFingerprint, null);
+
+  const restoredGameState = chineseInput.syncChineseDraftIntoGameState?.(
+    {
+      guessCount: 3,
+      wordLength: 6,
+      currentGuess: '',
+      gameOver: false,
+    },
+    reconciliation.state,
+  );
+  assert.equal(restoredGameState?.guessCount, 3);
+  assert.equal(restoredGameState?.currentGuess, 'jiejie');
+
+  const fresh = chineseInput.beginChineseSubmission(reconciliation.state, 3, {
+    createSubmissionId: submissionIdFactory('submission-3'),
+  });
+  assert.equal(fresh.submission.submissionId, 'submission-3');
+  assert.equal(fresh.state.submissionFingerprint.guessCount, 3);
+});
+
+test('authoritative counts behind or equal to the fingerprint stay unresolved and cannot relocate it', () => {
+  const started = chineseInput.beginChineseSubmission(
+    update('jie3 jie3', 6),
+    2,
+    { createSubmissionId: submissionIdFactory('submission-1') },
+  );
+  const unresolved = chineseInput.rejectChineseSubmission(
+    started.state,
+    'Network unavailable.',
+    { retainSubmissionFingerprint: true },
+  );
+
+  for (const guessCount of [1, 2]) {
+    const reconciliation = chineseInput.reconcileChineseSubmissionAgainstState(unresolved, {
+      pinyinSubmissionReceipt: {
+        submissionId: 'submission-1',
+        normalizedGuess: 'jiejie',
+        guessIndex: 2,
+      },
+      gameState: {
+        guessCount,
+        boards: Array.from({ length: 4 }, () => ({ guesses: ['laoshi', 'gongsi'] })),
+      },
+    });
+
+    assert.equal(reconciliation.status, 'unconfirmed');
+    assert.deepEqual(reconciliation.state.submissionFingerprint, unresolved.submissionFingerprint);
+  }
+
+  const wrongIndexRetry = chineseInput.beginChineseSubmission(unresolved, 1, {
+    createSubmissionId: submissionIdFactory('must-not-be-used'),
+  });
+  assert.equal(wrongIndexRetry.submission, null);
+  assert.deepEqual(wrongIndexRetry.state.submissionFingerprint, unresolved.submissionFingerprint);
+});
+
 test('same-draft retry reuses its submission ID and a different draft stays blocked while unresolved', () => {
   const createSubmissionId = submissionIdFactory('submission-1');
   const started = chineseInput.beginChineseSubmission?.(
@@ -395,6 +514,139 @@ test('versioned plain-string drafts remain readable while corrupt or stale finge
   assert.equal(corruptStorage.value(legacyKey), '旧草稿');
 });
 
+test('a draft storage read exception stays recovery-blocked until an explicit readable reload', () => {
+  const roundId = 'daily:2026-08-17:zh:pinyin-latin-v2';
+  const options = { wordLength: 6, guessKeys, parseInput, normalizeInput };
+  let mutations = 0;
+  const unreadableStorage = {
+    getItem() {
+      throw new Error('storage denied');
+    },
+    setItem() {
+      mutations += 1;
+    },
+    removeItem() {
+      mutations += 1;
+    },
+  };
+
+  const blocked = chineseInput.loadChineseDraftState(unreadableStorage, roundId, options);
+  assert.equal(blocked.submissionRecoveryBlocked, true);
+  assert.match(blocked.error, /storage|saved Pinyin/i);
+  assert.equal(chineseInput.beginChineseSubmission(blocked, 0).submission, null);
+
+  const edited = chineseInput.updateChineseInput(blocked, 'jie3 jie3', options);
+  assert.equal(edited.submissionRecoveryBlocked, true);
+  assert.equal(edited.error, blocked.error);
+  assert.equal(chineseInput.persistChineseDraftState(unreadableStorage, roundId, edited), false);
+  assert.equal(mutations, 0);
+
+  const readableStorage = createMemoryStorage([[
+    chineseInput.getChineseDraftStorageKey(roundId),
+    'jie3 jie3',
+  ]]);
+  const recovered = chineseInput.loadChineseDraftState(readableStorage, roundId, options);
+  assert.equal(recovered.submissionRecoveryBlocked, false);
+  assert.equal(recovered.sourceText, 'jie3 jie3');
+});
+
+test('a failed fingerprint write blocks recovery and prevents the submission from being sent', () => {
+  const roundId = 'daily:2026-08-17:zh:pinyin-latin-v2';
+  const key = chineseInput.getChineseDraftStorageKey(roundId);
+  const previousRecord = 'jie3 jie3';
+  let sent = 0;
+  let removed = 0;
+  const storage = {
+    getItem() {
+      return previousRecord;
+    },
+    setItem() {
+      throw new Error('quota exceeded');
+    },
+    removeItem() {
+      removed += 1;
+    },
+    value(requestedKey) {
+      return requestedKey === key ? previousRecord : undefined;
+    },
+  };
+  const started = chineseInput.beginChineseSubmission(
+    update('jie3 jie3', 6),
+    2,
+    { createSubmissionId: submissionIdFactory('submission-1') },
+  );
+
+  const boundary = chineseInput.persistChineseSubmissionBeforeSend?.(
+    storage,
+    roundId,
+    started.state,
+    () => {
+      sent += 1;
+      return 'sent';
+    },
+  );
+
+  assert.equal(boundary?.sent, false);
+  assert.equal(boundary?.result, null);
+  assert.equal(boundary?.state.pendingSubmission, false);
+  assert.equal(boundary?.state.submissionRecoveryBlocked, true);
+  assert.equal(boundary?.state.sourceText, 'jie3 jie3');
+  assert.deepEqual(boundary?.state.submissionFingerprint, started.state.submissionFingerprint);
+  assert.equal(sent, 0);
+  assert.equal(removed, 0);
+  assert.equal(storage.value(key), previousRecord);
+});
+
+test('the submission boundary sends only after the full fingerprint is persisted successfully', () => {
+  const roundId = 'daily:2026-08-17:zh:pinyin-latin-v2';
+  const key = chineseInput.getChineseDraftStorageKey(roundId);
+  const storage = createMemoryStorage();
+  const started = chineseInput.beginChineseSubmission(
+    update('jie3 jie3', 6),
+    2,
+    { createSubmissionId: submissionIdFactory('submission-1') },
+  );
+  let sent = 0;
+
+  const boundary = chineseInput.persistChineseSubmissionBeforeSend?.(
+    storage,
+    roundId,
+    started.state,
+    () => {
+      const persisted = JSON.parse(storage.value(key));
+      assert.deepEqual(persisted.submissionFingerprint, {
+        submissionId: 'submission-1',
+        normalizedText: 'jiejie',
+        guessCount: 2,
+      });
+      sent += 1;
+      return 'sent';
+    },
+  );
+
+  assert.equal(boundary?.sent, true);
+  assert.equal(boundary?.result, 'sent');
+  assert.equal(boundary?.state, started.state);
+  assert.equal(sent, 1);
+});
+
+test('recovery-blocked persistence reports failure without deleting unread evidence', () => {
+  const roundId = 'daily:2026-08-17:zh:pinyin-latin-v2';
+  const key = chineseInput.getChineseDraftStorageKey(roundId);
+  const unreadEvidence = '{"schemaVersion":';
+  const storage = createMemoryStorage([[key, unreadEvidence]]);
+  const blocked = chineseInput.loadChineseDraftState(storage, roundId, {
+    wordLength: 6,
+    guessKeys,
+    parseInput,
+    normalizeInput,
+  });
+
+  assert.equal(blocked.submissionRecoveryBlocked, true);
+  assert.equal(chineseInput.persistChineseDraftState(storage, roundId, blocked), false);
+  assert.equal(storage.value(key), unreadEvidence);
+});
+
 test('a duplicate Enter while pending is ignored and confirmation is the only path that clears the draft', () => {
   const initial = update('jie3 jie3', 6);
   const started = chineseInput.beginChineseSubmission?.(initial, 0);
@@ -405,7 +657,7 @@ test('a duplicate Enter while pending is ignored and confirmation is the only pa
   assert.equal(chineseInput.confirmChineseSubmission?.(started.state).sourceText, '');
 });
 
-test('authoritative confirmation matches the submitted normalized guess and later guess count', () => {
+test('authoritative confirmation requires the submitted key in every board history and a later count', () => {
   const createSubmissionId = submissionIdFactory('submission-1');
   const started = chineseInput.beginChineseSubmission?.(
     update('jie3 jie3', 6),
@@ -438,11 +690,23 @@ test('authoritative confirmation matches the submitted normalized guess and late
   }), false);
   assert.equal(chineseInput.isChineseSubmissionConfirmed?.(started, {
     ...confirmedState,
+    gameState: {
+      ...confirmedState.gameState,
+      boards: [
+        { guesses: ['jiejie'] },
+        { guesses: ['jiejie'] },
+        { guesses: ['gongsi'] },
+        { guesses: ['jiejie'] },
+      ],
+    },
+  }), false);
+  assert.equal(chineseInput.isChineseSubmissionConfirmed?.(started, {
+    ...confirmedState,
     pinyinSubmissionReceipt: {
       ...confirmedState.pinyinSubmissionReceipt,
       submissionId: 'unrelated-submission',
     },
-  }), false);
+  }), true);
 });
 
 test('Chinese gameplay payloads carry the exact variant while English and Korean remain unchanged', () => {

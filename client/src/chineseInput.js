@@ -8,6 +8,8 @@ const VALIDATION_MESSAGES = Object.freeze({
   LOADING: 'The Pinyin word list is still loading.',
 });
 
+const STORAGE_RECOVERY_ERROR = 'Pinyin draft storage is unavailable. Submission was not sent.';
+
 export function createChineseInputState() {
   return {
     sourceText: '',
@@ -27,14 +29,25 @@ export function getChineseInputValue(state) {
   return state?.sourceText ?? '';
 }
 
+export function syncChineseDraftIntoGameState(gameState, state) {
+  if (!gameState || gameState.gameOver) return gameState;
+  return {
+    ...gameState,
+    currentGuess: state?.normalizedText || '',
+  };
+}
+
 export function updateChineseInput(state, value, options = {}) {
   if (state?.pendingSubmission) return state;
   const sourceText = String(value ?? '').slice(0, 64);
+  const submissionRecoveryBlocked = state?.submissionRecoveryBlocked === true;
+  const recoveryError = submissionRecoveryBlocked ? state?.error || STORAGE_RECOVERY_ERROR : '';
   if (!sourceText) {
     return {
       ...createChineseInputState(),
       submissionFingerprint: state?.submissionFingerprint ?? null,
-      submissionRecoveryBlocked: state?.submissionRecoveryBlocked === true,
+      submissionRecoveryBlocked,
+      error: recoveryError,
     };
   }
 
@@ -71,8 +84,8 @@ export function updateChineseInput(state, value, options = {}) {
     pendingSubmission: false,
     submissionGuessCount: null,
     submissionFingerprint: state?.submissionFingerprint ?? null,
-    submissionRecoveryBlocked: state?.submissionRecoveryBlocked === true,
-    error: '',
+    submissionRecoveryBlocked,
+    error: recoveryError,
   };
 }
 
@@ -100,6 +113,15 @@ export function beginChineseSubmission(state, guessCount, options = {}) {
   const retainedFingerprint = hasChineseSubmissionAwaitingConfirmation(state)
     ? state.submissionFingerprint
     : null;
+  if (retainedFingerprint && retainedFingerprint.guessCount !== guessIndex) {
+    return {
+      state: {
+        ...state,
+        error: 'Checking the previous guess with the server before retrying.',
+      },
+      submission: null,
+    };
+  }
   if (retainedFingerprint && retainedFingerprint.normalizedText !== state?.normalizedText) {
     return {
       state: {
@@ -202,22 +224,38 @@ export function hasChineseSubmissionAwaitingConfirmation(state) {
 
 export function isChineseSubmissionConfirmed(state, playerState) {
   if (!hasChineseSubmissionAwaitingConfirmation(state)) return false;
-  const { submissionId, normalizedText, guessCount } = state.submissionFingerprint;
-  const receipt = playerState?.pinyinSubmissionReceipt;
-  if (receipt?.submissionId !== submissionId
-    || receipt.normalizedGuess !== normalizedText
-    || receipt.guessIndex !== guessCount) return false;
+  const { normalizedText, guessCount } = state.submissionFingerprint;
   const gameState = playerState?.gameState;
   if (!Number.isInteger(gameState?.guessCount) || gameState.guessCount <= guessCount) return false;
-  return gameState.boards?.some((board) => (
-    board?.guesses?.[guessCount] === normalizedText
-  )) ?? false;
+  return Array.isArray(gameState.boards)
+    && gameState.boards.length > 0
+    && gameState.boards.every((board) => board?.guesses?.[guessCount] === normalizedText);
 }
 
 export function reconcileChineseSubmissionAgainstState(state, playerState) {
   if (!hasChineseSubmissionAwaitingConfirmation(state)) return { state, status: 'none' };
   if (isChineseSubmissionConfirmed(state, playerState)) {
     return { state: confirmChineseSubmission(state), status: 'confirmed' };
+  }
+  const { normalizedText, guessCount } = state.submissionFingerprint;
+  const gameState = playerState?.gameState;
+  const guessesAtIndex = Array.isArray(gameState?.boards) && gameState.boards.length > 0
+    ? gameState.boards.map((board) => board?.guesses?.[guessCount])
+    : [];
+  const indexIsAuthoritativelyOccupied = Number.isInteger(gameState?.guessCount)
+    && gameState.guessCount > guessCount
+    && guessesAtIndex.length > 0
+    && guessesAtIndex.every((guess) => typeof guess === 'string');
+  if (indexIsAuthoritativelyOccupied && guessesAtIndex.some((guess) => guess !== normalizedText)) {
+    return {
+      state: {
+        ...state,
+        pendingSubmission: false,
+        submissionGuessCount: null,
+        submissionFingerprint: null,
+      },
+      status: 'rejected',
+    };
   }
   return { state, status: 'unconfirmed' };
 }
@@ -337,26 +375,60 @@ export function deserializeChineseDraftState(serialized, options = {}) {
 }
 
 export function loadChineseDraftState(storage, roundId, options = {}) {
-  if (!storage || !roundId) return createChineseInputState();
+  if (!roundId) return createChineseInputState();
+  if (!storage || typeof storage.getItem !== 'function') {
+    return createBlockedChineseDraftState('', options);
+  }
   try {
     return deserializeChineseDraftState(
       storage.getItem(getChineseDraftStorageKey(roundId)),
       options,
     );
   } catch {
-    return createChineseInputState();
+    return createBlockedChineseDraftState('', options);
   }
 }
 
 export function persistChineseDraftState(storage, roundId, state) {
-  if (!storage || !roundId) return;
-  if (state?.submissionRecoveryBlocked) return;
+  if (!storage || !roundId || state?.submissionRecoveryBlocked) return false;
   const key = getChineseDraftStorageKey(roundId);
   if (!state?.sourceText && !hasChineseSubmissionAwaitingConfirmation(state)) {
+    if (typeof storage.removeItem !== 'function') return false;
     storage.removeItem(key);
-    return;
+    return true;
   }
+  if (typeof storage.setItem !== 'function') return false;
   storage.setItem(key, serializeChineseDraftState(state));
+  return true;
+}
+
+export function persistChineseSubmissionBeforeSend(storage, roundId, state, send) {
+  let persisted = false;
+  if (state?.pendingSubmission && hasChineseSubmissionAwaitingConfirmation(state)) {
+    try {
+      persisted = persistChineseDraftState(storage, roundId, state) === true;
+    } catch {
+      persisted = false;
+    }
+  }
+  if (!persisted) {
+    return {
+      state: {
+        ...state,
+        pendingSubmission: false,
+        submissionGuessCount: null,
+        submissionRecoveryBlocked: true,
+        error: STORAGE_RECOVERY_ERROR,
+      },
+      sent: false,
+      result: null,
+    };
+  }
+  return {
+    state,
+    sent: true,
+    result: send(),
+  };
 }
 
 export function getClientCompletionId(roundId) {

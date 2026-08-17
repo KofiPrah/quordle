@@ -79,12 +79,13 @@ import {
   getClientCompletionId,
   getClientGameStorageKey,
   getClientRoundId,
-  isChineseSubmissionConfirmed,
   loadChineseDraftState,
   persistChineseDraftState,
+  persistChineseSubmissionBeforeSend,
   reconcileChineseSubmissionAgainstState,
   rejectChineseSubmission,
   rejectChineseSubmissionFromAuthoritativeError,
+  syncChineseDraftIntoGameState,
   updateChineseInput,
   withChinesePuzzleVariant,
 } from "./src/chineseInput.js";
@@ -542,7 +543,7 @@ function resetChineseInput(value = '') {
 
 function syncChineseGuessState() {
   if (!gameState || currentLanguage !== 'zh') return;
-  gameState = setCurrentGuess(gameState, chineseInputState.normalizedText || '');
+  gameState = syncChineseDraftIntoGameState(gameState, chineseInputState);
 }
 
 function focusChineseInput() {
@@ -1221,10 +1222,8 @@ function restoreSavedPayload(payload, {
       );
       shouldPreserveChineseDraft = reconciliation.status === 'unconfirmed';
     }
-    if (shouldPreserveChineseDraft) {
-      syncChineseGuessState();
-      persistChineseDraft();
-    }
+    syncChineseGuessState();
+    if (shouldPreserveChineseDraft) persistChineseDraft();
     ensureChineseGuessKeysLoaded();
   } else {
     resetChineseInput();
@@ -3508,8 +3507,8 @@ async function submitChineseDraft() {
   const attempt = beginChineseSubmission(chineseInputState, gameState.guessCount);
   chineseInputState = attempt.state;
   syncChineseGuessState();
-  persistChineseDraft();
   if (!attempt.submission) {
+    persistChineseDraft();
     setMessageFeedback(chineseInputState.error, 'word-list-error');
     if (chineseInputState.validationCode) {
       if (gameMode === 'daily') reportDailyInvalidGuess(chineseInputState.sourceText);
@@ -3523,9 +3522,31 @@ async function submitChineseDraft() {
     return;
   }
   clearGuessFeedback();
+  let submissionResult;
+  if (gameMode === 'daily' && discordUserId && discordRoomId) {
+    const boundary = persistChineseSubmissionBeforeSend(
+      localStorage,
+      currentRoundId,
+      chineseInputState,
+      () => submitChineseGuessWithPersistence(attempt.submission),
+    );
+    chineseInputState = boundary.state;
+    syncChineseGuessState();
+    if (!boundary.sent) {
+      setMessageFeedback(chineseInputState.error, 'storage-error');
+      renderApp();
+      setupKeyboardListeners();
+      focusChineseInput();
+      return;
+    }
+    submissionResult = boundary.result;
+  } else {
+    persistChineseDraft();
+    submissionResult = submitChineseGuessWithPersistence(attempt.submission);
+  }
   renderApp();
   setupKeyboardListeners();
-  await submitChineseGuessWithPersistence(attempt.submission);
+  await submissionResult;
 }
 
 function handleKeyPress(key) {
@@ -3694,10 +3715,7 @@ async function submitChineseGuessWithPersistence(submission) {
     const serverState = result.data;
     const nextLanguage = serverState?.language || currentLanguage;
     const normalizedState = normalizeRestoredGameState(serverState?.gameState, nextLanguage);
-    if (!normalizedState || !isChineseSubmissionConfirmed(chineseInputState, {
-      ...serverState,
-      gameState: normalizedState,
-    })) {
+    if (!normalizedState) {
       const message = 'The server did not confirm this guess. Your Pinyin draft was preserved.';
       rejectPendingChineseSubmission(message, { retainSubmissionFingerprint: true });
       setMessageFeedback(message, 'server-error');
@@ -3707,8 +3725,21 @@ async function submitChineseGuessWithPersistence(submission) {
       return;
     }
 
-    chineseInputState = confirmChineseSubmission(chineseInputState);
-    persistChineseDraft();
+    const reconciliation = reconcileChineseAuthoritativeState(
+      serverState,
+      normalizedState,
+      nextLanguage,
+    );
+    if (reconciliation.status === 'unconfirmed') {
+      rejectPendingChineseSubmission(
+        'The server did not confirm this guess. Your Pinyin draft was preserved.',
+        { retainSubmissionFingerprint: true },
+      );
+    } else if (reconciliation.status === 'rejected') {
+      rejectPendingChineseSubmission(
+        'The server accepted a different guess at this position. Your Pinyin draft was preserved.',
+      );
+    }
     restoreSavedPayload({
       gameState: normalizedState,
       gameMode: serverState.gameMode || gameMode,
@@ -3716,8 +3747,19 @@ async function submitChineseGuessWithPersistence(submission) {
       dateKey: serverState.dateKey || getTodayDateKey(),
       lastActiveAt: Date.now(),
       savedAt: Date.now(),
-    }, { markActive: true });
+    }, {
+      markActive: true,
+      preserveChineseDraft: reconciliation.status !== 'confirmed',
+      authoritativePlayerState: serverState,
+    });
     saveGameState();
+    if (reconciliation.status !== 'confirmed') {
+      setMessageFeedback(chineseInputState.error, 'server-error');
+      renderApp();
+      setupKeyboardListeners();
+      focusChineseInput();
+      return;
+    }
     renderApp();
     setupKeyboardListeners();
     return;
