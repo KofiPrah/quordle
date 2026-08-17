@@ -5,6 +5,14 @@ import { fileURLToPath } from 'node:url';
 const modulePath = fileURLToPath(import.meta.url);
 const defaultEngineRoot = path.resolve(path.dirname(modulePath), '..');
 const SUPPORTED_LENGTHS = [4, 5, 6, 7, 8, 9];
+const MARKED_VOWELS = {
+  a: ['a', 'ā', 'á', 'ǎ', 'à'],
+  e: ['e', 'ē', 'é', 'ě', 'è'],
+  i: ['i', 'ī', 'í', 'ǐ', 'ì'],
+  o: ['o', 'ō', 'ó', 'ǒ', 'ò'],
+  u: ['u', 'ū', 'ú', 'ǔ', 'ù'],
+  v: ['ü', 'ǖ', 'ǘ', 'ǚ', 'ǜ'],
+};
 
 const json = (value) => JSON.stringify(value, null, 2);
 const compare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
@@ -35,6 +43,38 @@ function readPinyinCandidates(sourceDir) {
   )));
 }
 
+function markedSyllable(plain, tone) {
+  if (tone === 5) return plain.replace(/v/gu, 'ü');
+  const characters = Array.from(plain);
+  let markIndex = characters.length - 1;
+  const a = characters.indexOf('a');
+  const e = characters.indexOf('e');
+  const ou = plain.indexOf('ou');
+  if (a >= 0) markIndex = a;
+  else if (e >= 0) markIndex = e;
+  else if (ou >= 0) markIndex = ou;
+  else {
+    markIndex = characters.map((character, index) => ({ character, index }))
+      .filter(({ character }) => ['a', 'e', 'i', 'o', 'u', 'v'].includes(character))
+      .at(-1)?.index ?? -1;
+  }
+  if (markIndex < 0 || !MARKED_VOWELS[characters[markIndex]]) return '';
+  characters[markIndex] = MARKED_VOWELS[characters[markIndex]][tone];
+  return characters.join('').replace(/v/gu, 'ü');
+}
+
+export function assertCanonicalPinyinMetadata({ numeric, marked, plain, tones, word }) {
+  for (let index = 0; index < 2; index += 1) {
+    const numericMatch = /^([a-z]+(?::)?)([1-5])$/u.exec(numeric[index]);
+    if (!numericMatch || canonicalKey(numericMatch[1]) !== plain[index] || Number(numericMatch[2]) !== tones[index]) {
+      throw new Error(`Chinese answer has invalid canonical Pinyin metadata: ${word}`);
+    }
+    if (marked[index].normalize('NFC') !== markedSyllable(plain[index], tones[index])) {
+      throw new Error(`Chinese answer has invalid canonical Pinyin metadata: ${word}`);
+    }
+  }
+}
+
 function pinyinSyllables(pronunciation, word) {
   const numeric = String(pronunciation?.pinyinNumeric ?? '').trim().split(/\s+/u);
   const marked = String(pronunciation?.pinyinMarked ?? '').trim().split(/\s+/u);
@@ -50,6 +90,7 @@ function pinyinSyllables(pronunciation, word) {
   if (!/^[a-z]+$/u.test(first) || !/^[a-z]+$/u.test(second)) {
     throw new Error(`Chinese answer has malformed Pinyin syllables: ${word}`);
   }
+  assertCanonicalPinyinMetadata({ numeric, marked, plain: [first, second], tones, word });
   return { numeric: numeric.join(' '), marked: marked.join(' '), first, second, tones: [tones[0], tones[1]] };
 }
 

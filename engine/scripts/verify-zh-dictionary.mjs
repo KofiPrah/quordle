@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertCanonicalPinyinMetadata } from './generate-zh-pinyin-catalog.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const engineRoot = path.resolve(__dirname, '..');
@@ -78,6 +79,13 @@ for (const answer of CHINESE_PINYIN_PUZZLE_ANSWERS) {
   assert.equal(answer.answerEligible, true, `Chinese answer is not marked eligible: ${answer.id}`);
   const pronunciation = entry.pronunciations[0];
   assert(pronunciation, `Chinese answer lacks pronunciation: ${answer.id}`);
+  assertCanonicalPinyinMetadata({
+    numeric: pronunciation.pinyinNumeric.trim().split(/\s+/u),
+    marked: pronunciation.pinyinMarked.trim().split(/\s+/u),
+    plain: pronunciation.pinyinPlain.trim().split(/\s+/u).map(canonicalKey),
+    tones: pronunciation.tones,
+    word: answer.id,
+  });
   assert.equal(answer.pinyinNumeric, pronunciation.pinyinNumeric, `Chinese numeric Pinyin drifted: ${answer.id}`);
   assert.equal(answer.pinyinMarked, pronunciation.pinyinMarked, `Chinese marked Pinyin drifted: ${answer.id}`);
   assert.deepEqual([...answer.tones], pronunciation.tones, `Chinese tones drifted: ${answer.id}`);

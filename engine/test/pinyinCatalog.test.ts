@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
     CHINESE_PINYIN_PUZZLE_ANSWERS,
     PINYIN_PUZZLE_VARIANT,
@@ -6,8 +10,38 @@ import {
 } from '../src/chineseLexicon.js';
 import { parseChinesePinyinInput } from '../src/pinyin.js';
 import { ZH_PINYIN_GUESS_KEYS_BY_LENGTH } from '../src/zhPinyinGuessKeys.generated.js';
+import { generateChinesePinyinCatalog } from '../scripts/generate-zh-pinyin-catalog.mjs';
+
+const engineRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+function withCorruptedPronunciation(mutate: (pronunciation: Record<string, unknown>) => void): { fixtureRoot: string; dispose: () => void } {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'quordle-pinyin-catalog-'));
+    fs.cpSync(path.join(engineRoot, 'src'), path.join(fixtureRoot, 'src'), { recursive: true });
+    const manifestPath = path.join(fixtureRoot, 'src', 'zhDictionary.generated.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const shardPath = manifest.shards
+        .map((id: string) => path.join(fixtureRoot, 'src', 'zhDictionaryShards', `${id}.json`))
+        .find((candidate: string) => JSON.parse(fs.readFileSync(candidate, 'utf8')).entries['学生']);
+    if (!shardPath) throw new Error('The checked-in student fixture is missing');
+    const shard = JSON.parse(fs.readFileSync(shardPath, 'utf8'));
+    mutate(shard.entries['学生'].pronunciations[0]);
+    fs.writeFileSync(shardPath, `${JSON.stringify(shard)}\n`);
+    return { fixtureRoot, dispose: () => fs.rmSync(fixtureRoot, { recursive: true, force: true }) };
+}
 
 describe('Chinese Pinyin puzzle catalog', () => {
+    it.each([
+        ['numeric', (pronunciation: Record<string, unknown>) => { pronunciation.pinyinNumeric = 'bad data'; }],
+        ['marked', (pronunciation: Record<string, unknown>) => { pronunciation.pinyinMarked = 'xué shang'; }],
+    ])('fails generation when %s pronunciation metadata disagrees with its canonical plain syllables', (_kind, mutate) => {
+        const { fixtureRoot, dispose } = withCorruptedPronunciation(mutate);
+        try {
+            expect(() => generateChinesePinyinCatalog({ engineRoot: fixtureRoot, quiet: true })).toThrow(/canonical Pinyin metadata/u);
+        } finally {
+            dispose();
+        }
+    });
+
     it('ships the 64 curated Hanzi identities with playable keys and canonical metadata', () => {
         expect(PINYIN_PUZZLE_VARIANT).toBe('pinyin-latin-v2');
         expect(CHINESE_PINYIN_PUZZLE_ANSWERS).toHaveLength(64);
