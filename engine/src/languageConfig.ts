@@ -1,4 +1,4 @@
-import type { Language, LanguageConfig } from './types.js';
+import type { Language, LanguageConfig, PuzzleVariant } from './types.js';
 import { WORD_LIST, GUESS_WORDS } from './words.js';
 import {
     KO_ANSWER_WORDS,
@@ -7,11 +7,14 @@ import {
     koGuessWordsSet,
 } from './koreanLexicon.js';
 import {
+    CHINESE_PINYIN_PUZZLE_ANSWERS,
+    PINYIN_PUZZLE_VARIANT,
     ZH_ANSWER_WORDS,
     ZH_GUESS_WORDS_LIST,
     zhAnswerWordsSet,
     zhGuessWordsSet,
 } from './chineseLexicon.js';
+import { ZH_PINYIN_GUESS_KEYS_BY_LENGTH } from './zhPinyinGuessKeys.generated.js';
 
 // ========== ENGLISH CONFIG ==========
 const enGuessWordsSet = new Set([...GUESS_WORDS, ...WORD_LIST]);
@@ -52,7 +55,30 @@ const LANGUAGE_CONFIGS: Record<Language, LanguageConfig> = {
     zh: ZH_CONFIG,
 };
 
-export function getLanguageConfig(language: Language): LanguageConfig {
+const PINYIN_CONFIGS = new Map<number, LanguageConfig>();
+
+export function getLanguageConfig(
+    language: Language,
+    wordLength?: number,
+    puzzleVariant?: PuzzleVariant,
+): LanguageConfig {
+    if (language === 'zh' && puzzleVariant === PINYIN_PUZZLE_VARIANT && wordLength !== undefined) {
+        const existing = PINYIN_CONFIGS.get(wordLength);
+        if (existing) return existing;
+        const guessKeys = ZH_PINYIN_GUESS_KEYS_BY_LENGTH[wordLength] ?? [];
+        const config: LanguageConfig = {
+            wordLength,
+            maxGuesses: 9,
+            validateCharRegex: /^[a-z]+$/iu,
+            filterCharRegex: /[^a-z]/giu,
+            answerWords: CHINESE_PINYIN_PUZZLE_ANSWERS
+                .filter((answer) => answer.length === wordLength)
+                .map((answer) => answer.key),
+            guessWords: new Set(guessKeys),
+        };
+        PINYIN_CONFIGS.set(wordLength, config);
+        return config;
+    }
     return LANGUAGE_CONFIGS[language];
 }
 

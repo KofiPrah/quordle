@@ -1,12 +1,19 @@
 // Types
 export type {
     Language,
+    PuzzleVariant,
     LanguageWord,
     KoreanHintType,
+    LegacyChineseHintType,
+    PinyinChineseHintType,
     ChineseHintType,
+    RevealLetterHintPayload,
     HintType,
     HintUse,
+    PinyinChineseHintUse,
     AssistanceState,
+    LegacyAssistanceState,
+    PinyinAssistanceState,
     LetterResult,
     GuessResult,
     JamoSlot,
@@ -17,6 +24,8 @@ export type {
     BoardLetterStatuses,
     GameState,
     GameConfig,
+    GuessValidationErrorCode,
+    GameGuessValidation,
     LanguageConfig,
 } from './types.js';
 
@@ -79,6 +88,8 @@ export type {
 export {
     createGame,
     submitGuess,
+    validateGuessForGame,
+    applyValidatedGuess,
     setCurrentGuess,
     validateGuess,
     getRemainingGuesses,
@@ -112,9 +123,11 @@ export { classifyKoreanGuess, rankNearbyKoreanWords } from './nearbyWords.js';
 // Assistance and language-specific learning hints
 export {
     ASSISTANCE_SCORING_VERSION,
+    PINYIN_ASSISTANCE_SCORING_VERSION,
     HINT_COSTS,
     KOREAN_HINT_TYPES,
     CHINESE_HINT_TYPES,
+    PINYIN_CHINESE_HINT_TYPES,
     isHintTypeForLanguage,
     createEmptyAssistanceState,
     normalizeAssistanceState,
@@ -198,5 +211,9 @@ export {
     isValidChinesePinyinGuessKey,
 } from './zhPinyinGuessKeys.generated.js';
 
-// Daily
-export { getDailyTargets } from './daily.js';
+// Daily and practice selection
+export {
+    getDailyTargets,
+    getDailyChinesePinyinRound,
+    getPracticeChinesePinyinRound,
+} from './daily.js';

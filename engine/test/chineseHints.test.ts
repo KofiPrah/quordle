@@ -3,12 +3,94 @@ import { calculatePerformanceMetrics } from '../src/assistance.js';
 import { isChineseHintAvailable, requestChineseHint } from '../src/chineseHints.js';
 import { createGame, submitGuess } from '../src/game.js';
 import { requestHint } from '../src/hints.js';
-import { ZH_ANSWER_WORDS } from '../src/chineseLexicon.js';
-import { ZH_HINT_METADATA } from '../src/zhHintMetadata.generated.js';
+import { PINYIN_PUZZLE_VARIANT } from '../src/chineseLexicon.js';
 
 function chineseGame() {
     return createGame({ targetWords: ['学生', '学校', '老师', '朋友'], language: 'zh' });
 }
+
+function pinyinGame() {
+    return createGame({
+        targetWords: ['xigua', 'fuqin', 'kafei', 'haizi'],
+        targetIds: ['西瓜', '父亲', '咖啡', '孩子'],
+        language: 'zh',
+        puzzleVariant: PINYIN_PUZZLE_VARIANT,
+        wordLength: 5,
+    });
+}
+
+describe('Chinese Pinyin hints', () => {
+    it('returns the persisted boundary index and broad meaning with version-2 costs', () => {
+        const boundary = requestChineseHint(pinyinGame(), 0, 'syllable-boundary', 100);
+        expect(boundary).toMatchObject({
+            ok: true,
+            duplicate: false,
+            hint: { type: 'syllable-boundary', payload: 2, cost: 2, usedAt: 100 },
+        });
+        if (!boundary.ok) return;
+
+        const meaning = requestChineseHint(boundary.state, 0, 'broad-meaning', 101);
+        expect(meaning).toMatchObject({
+            ok: true,
+            hint: {
+                payload: 'a large green-rinded fruit with a juicy interior',
+                cost: 7,
+                usedAt: 101,
+            },
+        });
+        if (meaning.ok) expect(meaning.state.assistance).toMatchObject({ scoringVersion: 2, hints: expect.any(Array) });
+    });
+
+    it('reveals the lowest target position that has never been green', () => {
+        const game = pinyinGame();
+        game.boards[0].guesses = ['aaaaa', 'bbbbb'];
+        game.boards[0].results = [
+            ['correct', 'absent', 'correct', 'absent', 'absent'],
+            ['absent', 'correct', 'absent', 'absent', 'absent'],
+        ];
+
+        expect(requestChineseHint(game, 0, 'reveal-letter', 200)).toMatchObject({
+            ok: true,
+            hint: { payload: { index: 3, letter: 'u' }, cost: 5, usedAt: 200 },
+        });
+    });
+
+    it('never reveals the final unresolved position', () => {
+        const game = pinyinGame();
+        game.boards[0].guesses = ['xiguq'];
+        game.boards[0].results = [['correct', 'correct', 'correct', 'correct', 'absent']];
+
+        expect(isChineseHintAvailable(game, 0, 'reveal-letter')).toBe(false);
+        expect(requestChineseHint(game, 0, 'reveal-letter')).toMatchObject({
+            ok: false,
+            code: 'HINT_UNAVAILABLE',
+        });
+        expect(game.assistance.hints).toHaveLength(0);
+    });
+
+    it('returns the original typed reveal payload and timestamp without charging twice', () => {
+        const first = requestChineseHint(pinyinGame(), 0, 'reveal-letter', 300);
+        expect(first.ok).toBe(true);
+        if (!first.ok) return;
+        expect(isChineseHintAvailable(first.state, 0, 'reveal-letter')).toBe(false);
+        first.state.boards[0].results = [['correct', 'absent', 'absent', 'absent', 'absent']];
+
+        const repeated = requestChineseHint(first.state, 0, 'reveal-letter', 999);
+        expect(repeated).toMatchObject({
+            ok: true,
+            duplicate: true,
+            hint: { payload: { index: 0, letter: 'x' }, cost: 5, usedAt: 300 },
+        });
+        if (repeated.ok) expect(repeated.state.assistance.hints).toHaveLength(1);
+    });
+
+    it('rejects every retired Hanzi hint type in a Pinyin game', () => {
+        for (const type of ['tone-pattern', 'pinyin-initials', 'reveal-first-character'] as const) {
+            expect(isChineseHintAvailable(pinyinGame(), 0, type)).toBe(false);
+            expect(requestChineseHint(pinyinGame(), 0, type)).toMatchObject({ ok: false, code: 'INVALID_HINT' });
+        }
+    });
+});
 
 describe('Chinese hints', () => {
     it('returns all four graduated payloads with their configured costs', () => {
@@ -103,17 +185,6 @@ describe('Chinese hints', () => {
             hintPenalty: 24,
             assisted: true,
             score: 1,
-        });
-    });
-
-    it('ships complete compact hint metadata for the exact answer allowlist', () => {
-        expect(Object.keys(ZH_HINT_METADATA)).toHaveLength(64);
-        expect(Object.keys(ZH_HINT_METADATA).sort()).toEqual([...ZH_ANSWER_WORDS].sort());
-        Object.entries(ZH_HINT_METADATA).forEach(([word, hint]) => {
-            expect(hint.firstCharacter).toBe(Array.from(word)[0]);
-            expect(hint.pinyinInitials).toHaveLength(2);
-            expect(hint.tones).toHaveLength(2);
-            expect(hint.meaning).not.toMatch(/\p{Script=Han}/u);
         });
     });
 

@@ -2,6 +2,7 @@ import type {
     BoardLetterStatuses,
     BoardState,
     GameConfig,
+    GameGuessValidation,
     GameState,
     JamoHint,
     JamoHintUnit,
@@ -13,12 +14,15 @@ import { evaluateGuess, isSolved } from './evaluator.js';
 import { evaluateGuessKo, evaluateGuessSyllable } from './evaluatorKo.js';
 import { getLanguageConfig } from './languageConfig.js';
 import { expandHangulToJamoUnits, isHangulSyllable } from './jamo.js';
+import { PINYIN_PUZZLE_VARIANT } from './chineseLexicon.js';
+import { parseChinesePinyinInput } from './pinyin.js';
 
 const DEFAULT_MAX_GUESSES = 9;
 
-function createBoardState(targetWord: string): BoardState {
+function createBoardState(targetWord: string, targetId?: string): BoardState {
     return {
         targetWord: targetWord.toLowerCase(),
+        ...(targetId ? { targetId } : {}),
         guesses: [],
         results: [],
         solved: false,
@@ -28,15 +32,26 @@ function createBoardState(targetWord: string): BoardState {
 
 export function createGame(config: GameConfig): GameState {
     const language = config.language ?? 'en';
-    const langConfig = getLanguageConfig(language);
-    const { targetWords, maxGuesses = langConfig.maxGuesses ?? DEFAULT_MAX_GUESSES } = config;
+    const {
+        targetWords,
+        targetIds,
+        puzzleVariant,
+    } = config;
+    const wordLength = config.wordLength
+        ?? (puzzleVariant === PINYIN_PUZZLE_VARIANT
+            ? targetWords[0].length
+            : getLanguageConfig(language).wordLength);
+    const langConfig = getLanguageConfig(language, wordLength, puzzleVariant);
+    const maxGuesses = puzzleVariant === PINYIN_PUZZLE_VARIANT
+        ? langConfig.maxGuesses
+        : config.maxGuesses ?? langConfig.maxGuesses ?? DEFAULT_MAX_GUESSES;
 
     return {
         boards: [
-            createBoardState(targetWords[0]),
-            createBoardState(targetWords[1]),
-            createBoardState(targetWords[2]),
-            createBoardState(targetWords[3]),
+            createBoardState(targetWords[0], targetIds?.[0]),
+            createBoardState(targetWords[1], targetIds?.[1]),
+            createBoardState(targetWords[2], targetIds?.[2]),
+            createBoardState(targetWords[3], targetIds?.[3]),
         ],
         currentGuess: '',
         guessCount: 0,
@@ -44,10 +59,11 @@ export function createGame(config: GameConfig): GameState {
         gameOver: false,
         won: false,
         language,
-        assistance: {
-            scoringVersion: 1,
-            hints: [],
-        },
+        wordLength,
+        ...(puzzleVariant ? { puzzleVariant } : {}),
+        assistance: puzzleVariant === PINYIN_PUZZLE_VARIANT
+            ? { scoringVersion: 2, puzzleVariant: PINYIN_PUZZLE_VARIANT, hints: [] }
+            : { scoringVersion: 1, hints: [] },
     };
 }
 
@@ -74,18 +90,62 @@ export function validateGuess(guess: string, language: Language = 'en'): { valid
     return { valid: true };
 }
 
-export function submitGuess(state: GameState, guess: string): GameState {
-    if (state.gameOver) {
-        return state;
+export function validateGuessForGame(state: GameState, guess: string): GameGuessValidation {
+    if (state.puzzleVariant === PINYIN_PUZZLE_VARIANT) {
+        const parsed = parseChinesePinyinInput(guess);
+        if (!parsed) {
+            return { valid: false, code: 'INVALID_FORMAT', error: 'Enter exactly two valid Pinyin syllables.' };
+        }
+        if (parsed.key.length !== state.wordLength) {
+            return {
+                valid: false,
+                code: 'INVALID_LENGTH',
+                error: `Guess must be ${state.wordLength} letters.`,
+            };
+        }
+        const config = getLanguageConfig(state.language, state.wordLength, state.puzzleVariant);
+        if (!config.guessWords.has(parsed.key)) {
+            return { valid: false, code: 'NOT_IN_LIST', error: 'Not in the Pinyin word list.' };
+        }
+        return { valid: true, normalizedGuess: parsed.key };
     }
 
     const language = state.language || 'en';
     const validation = validateGuess(guess, language);
     if (!validation.valid) {
+        const config = getLanguageConfig(language);
+        const lengthMatches = Array.from(guess).length === config.wordLength;
+        return {
+            valid: false,
+            code: lengthMatches ? 'INVALID_FORMAT' : 'INVALID_LENGTH',
+            error: validation.error ?? 'Invalid guess.',
+        };
+    }
+    return {
+        valid: true,
+        normalizedGuess: language === 'en' ? guess.toLowerCase() : guess.normalize('NFC'),
+    };
+}
+
+export function submitGuess(state: GameState, guess: string): GameState {
+    if (state.gameOver) {
         return state;
     }
 
-    const normalizedGuess = language === 'en' ? guess.toLowerCase() : guess.normalize('NFC');
+    const validation = validateGuessForGame(state, guess);
+    if (!validation.valid) {
+        return state;
+    }
+
+    return applyValidatedGuess(state, validation.normalizedGuess);
+}
+
+export function applyValidatedGuess(state: GameState, normalizedGuess: string): GameState {
+    if (state.gameOver) {
+        return state;
+    }
+
+    const language = state.language || 'en';
     const newBoards = state.boards.map((board) => {
         if (board.solved) {
             const prevResult = board.results[board.results.length - 1];
@@ -149,7 +209,9 @@ export function setCurrentGuess(state: GameState, guess: string): GameState {
     const config = getLanguageConfig(language);
     let limited: string;
 
-    if (language === 'ko' || language === 'zh') {
+    if (state.puzzleVariant === PINYIN_PUZZLE_VARIANT) {
+        limited = guess.toLowerCase().replace(/[^a-z]/gu, '').slice(0, state.wordLength);
+    } else if (language === 'ko' || language === 'zh') {
         limited = guess.replace(config.filterCharRegex, '').slice(0, config.wordLength);
     } else {
         limited = guess.slice(0, config.wordLength).toLowerCase().replace(config.filterCharRegex, '');

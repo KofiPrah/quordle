@@ -1,6 +1,9 @@
 /** Supported languages */
 export type Language = 'en' | 'ko' | 'zh';
 
+/** Versioned gameplay rules layered on top of a language. */
+export type PuzzleVariant = 'pinyin-latin-v2';
+
 /** Language-neutral learning metadata consumed by shared dictionary UI. */
 export interface LanguageWord {
     id: string;
@@ -23,26 +26,50 @@ export interface LanguageWord {
 /** Korean learning hints available during an active round. */
 export type KoreanHintType = 'part-of-speech' | 'semantic-category' | 'batchim-count' | 'reveal-first-syllable';
 
-/** Simplified Chinese learning hints available during an active round. */
-export type ChineseHintType = 'tone-pattern' | 'pinyin-initials' | 'broad-meaning' | 'reveal-first-character';
+/** Historical Hanzi Chinese hints retained for persisted version-1 games. */
+export type LegacyChineseHintType = 'tone-pattern' | 'pinyin-initials' | 'broad-meaning' | 'reveal-first-character';
+
+/** Chinese Pinyin hints available in version-2 games. */
+export type PinyinChineseHintType = 'syllable-boundary' | 'reveal-letter' | 'broad-meaning';
+
+export type ChineseHintType = LegacyChineseHintType | PinyinChineseHintType;
 
 /** Every persisted scored hint type. */
 export type HintType = KoreanHintType | ChineseHintType;
+
+export interface RevealLetterHintPayload {
+    index: number;
+    letter: string;
+}
 
 /** Persisted result of one charged hint request. */
 export interface HintUse {
     boardIndex: number;
     type: HintType;
-    payload: string | string[] | number;
+    payload: string | string[] | number | RevealLetterHintPayload;
     cost: number;
     usedAt: number;
 }
 
-/** Versioned assistance history stored with a game. */
-export interface AssistanceState {
+export type PinyinChineseHintUse =
+    | (Omit<HintUse, 'type' | 'payload'> & { type: 'syllable-boundary'; payload: number })
+    | (Omit<HintUse, 'type' | 'payload'> & { type: 'reveal-letter'; payload: RevealLetterHintPayload })
+    | (Omit<HintUse, 'type' | 'payload'> & { type: 'broad-meaning'; payload: string });
+
+/** Historical assistance history retained for Korean and Hanzi Chinese games. */
+export interface LegacyAssistanceState {
     scoringVersion: 1;
     hints: HintUse[];
 }
+
+/** Variant-specific assistance history for Latin-letter Pinyin games. */
+export interface PinyinAssistanceState {
+    scoringVersion: 2;
+    puzzleVariant: 'pinyin-latin-v2';
+    hints: PinyinChineseHintUse[];
+}
+
+export type AssistanceState = LegacyAssistanceState | PinyinAssistanceState;
 
 /** Result of evaluating a single letter in a guess */
 export type LetterResult = 'correct' | 'present' | 'absent';
@@ -78,6 +105,7 @@ export interface KoSyllableResult {
 /** State of a single board in Quordle */
 export interface BoardState {
     targetWord: string;
+    targetId?: string;
     guesses: string[];
     results: GuessResult[];
     /** Korean jamo hints per guess — only present when language is 'ko' */
@@ -95,15 +123,26 @@ export interface GameState {
     gameOver: boolean;
     won: boolean;
     language: Language;
+    wordLength: number;
+    puzzleVariant?: PuzzleVariant;
     assistance: AssistanceState;
 }
 
 /** Configuration for creating a new game */
 export interface GameConfig {
     targetWords: [string, string, string, string];
+    targetIds?: [string, string, string, string];
     maxGuesses?: number;
     language?: Language;
+    wordLength?: number;
+    puzzleVariant?: PuzzleVariant;
 }
+
+export type GuessValidationErrorCode = 'INVALID_FORMAT' | 'INVALID_LENGTH' | 'NOT_IN_LIST';
+
+export type GameGuessValidation =
+    | { valid: true; normalizedGuess: string }
+    | { valid: false; code: GuessValidationErrorCode; error: string };
 
 /**
  * Per-board letter status for the keyboard 2×2 board indicator.
