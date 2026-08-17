@@ -37,7 +37,7 @@ function isFirstCharacterKnown(board: BoardState): boolean {
 }
 
 function getPinyinInitial(syllable: string): string {
-    return /^(zh|ch|sh|[bpmfdtnlgkhjqxrzcs])/u.exec(syllable)?.[1] ?? '∅';
+    return /^(zh|ch|sh|[bpmfdtnlgkhjqxrzcsyw])/u.exec(syllable)?.[1] ?? '∅';
 }
 
 function getLegacyHintPayload(board: BoardState, type: LegacyChineseHintType): HintUse['payload'] | null {

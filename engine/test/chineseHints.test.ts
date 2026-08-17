@@ -3,7 +3,8 @@ import { calculatePerformanceMetrics } from '../src/assistance.js';
 import { isChineseHintAvailable, requestChineseHint } from '../src/chineseHints.js';
 import { createGame, submitGuess } from '../src/game.js';
 import { requestHint } from '../src/hints.js';
-import { PINYIN_PUZZLE_VARIANT } from '../src/chineseLexicon.js';
+import { CHINESE_PINYIN_PUZZLE_ANSWERS, PINYIN_PUZZLE_VARIANT } from '../src/chineseLexicon.js';
+import { ZH_HINT_METADATA } from '../src/zhHintMetadata.generated.js';
 
 function chineseGame() {
     return createGame({ targetWords: ['学生', '学校', '老师', '朋友'], language: 'zh' });
@@ -93,6 +94,23 @@ describe('Chinese Pinyin hints', () => {
 });
 
 describe('Chinese hints', () => {
+    it('reconstructs every historical version-1 pinyin-initials payload', () => {
+        const mismatches = CHINESE_PINYIN_PUZZLE_ANSWERS.flatMap((answer) => {
+            const game = createGame({
+                targetWords: [answer.hanzi, answer.hanzi, answer.hanzi, answer.hanzi],
+                language: 'zh',
+            });
+            const result = requestChineseHint(game, 0, 'pinyin-initials', 100);
+            const actual = result.ok ? result.hint.payload : result;
+            const expected = [...ZH_HINT_METADATA[answer.hanzi as keyof typeof ZH_HINT_METADATA].pinyinInitials];
+            return JSON.stringify(actual) === JSON.stringify(expected)
+                ? []
+                : [{ id: answer.id, expected, actual }];
+        });
+
+        expect(mismatches).toEqual([]);
+    });
+
     it('returns all four graduated payloads with their configured costs', () => {
         let game = chineseGame();
         const expected = [
