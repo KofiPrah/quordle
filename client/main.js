@@ -15,6 +15,7 @@ import { applyValidatedGuess, createGame, setCurrentGuess, validateGuess, comput
 import { isValidGuess } from "../engine/src/words.ts";
 import { getDailyChinesePinyinRound, getDailyTargets, getPracticeChinesePinyinRound } from "../engine/src/daily.ts";
 import { normalizePinyin, parseChinesePinyinInput } from "../engine/src/pinyin.ts";
+import { CHINESE_PINYIN_PUZZLE_ANSWERS } from '../engine/src/chineseLexicon.ts';
 import { toChineseDictionaryViewModel, toKoreanDictionaryViewModel } from "../engine/src/dictionaryViewModel.ts";
 import { getLegacyLanguageConfig, getLegacyQuordleWordsForLanguage, isValidLegacyGuessForLanguage } from "../engine/src/legacyLanguageConfig.ts";
 import { canBeCoda, canBeOnset, combineCodas, combineVowels, expandHangulToJamoUnits, isConsonant, isHangulSyllable, isVowel, splitCompoundCoda, splitCompoundVowel } from "../engine/src/jamo.ts";
@@ -81,6 +82,11 @@ import {
   loadChinesePinyinGuessKeys,
 } from "./src/chineseDictionary.js";
 import {
+  createPinyinLearningSurface,
+  formatPinyinTones,
+} from './src/pinyinLearning.js';
+import { getRestoreLanguageConfig, normalizeRestoredCurrentGuess } from './src/restoreState.js';
+import {
   appendChinesePinyinKey,
   backspaceChineseInput,
   beginChineseSubmission,
@@ -103,6 +109,11 @@ import {
   updateChineseInput,
   withChinesePuzzleVariant,
 } from "./src/chineseInput.js";
+
+const {
+  requirePinyinLearningMetadata,
+  renderPinyinLearningSummary,
+} = createPinyinLearningSurface(CHINESE_PINYIN_PUZZLE_ANSWERS);
 
 // Will eventually store the authenticated user's access_token
 let auth;
@@ -1175,9 +1186,7 @@ function normalizeRestoredGameState(state, language = currentLanguage) {
     ? restoredWordLength
     : (language === 'zh' ? 0 : getLegacyLanguageConfig(language).wordLength);
   if (!wordLength) return null;
-  const languageConfig = language === 'zh'
-    ? { filterCharRegex: /[^a-z]/giu }
-    : getLegacyLanguageConfig(language);
+  const languageConfig = getRestoreLanguageConfig(language, wordLength, getLegacyLanguageConfig);
   const boards = state.boards.map((board) => {
     if (!board || typeof board.targetWord !== 'string' || !Array.isArray(board.guesses) || !Array.isArray(board.results)
       || (language === 'zh' && typeof board.targetId !== 'string')) {
@@ -1197,12 +1206,12 @@ function normalizeRestoredGameState(state, language = currentLanguage) {
     return null;
   }
 
-  let currentGuess = typeof state.currentGuess === 'string' ? state.currentGuess : '';
-  if (language === 'en') {
-    currentGuess = currentGuess.toLowerCase().replace(languageConfig.filterCharRegex, '').slice(0, languageConfig.wordLength);
-  } else {
-    currentGuess = currentGuess.normalize('NFC').replace(languageConfig.filterCharRegex, '').slice(0, languageConfig.wordLength);
-  }
+  const currentGuess = normalizeRestoredCurrentGuess(
+    state.currentGuess,
+    language,
+    wordLength,
+    languageConfig,
+  );
 
   const maxGuesses = Number.isFinite(state.maxGuesses) ? state.maxGuesses : languageConfig.maxGuesses;
   const guessCount = Number.isFinite(state.guessCount) ? state.guessCount : 0;
@@ -2780,47 +2789,46 @@ function renderKoreanLearningReview() {
 function renderChineseLearningReview() {
   const answerWords = gameState.boards.map((board) => board.targetId).filter(Boolean);
   ensureChineseDictionaryLoaded(answerWords);
-  if (chineseDictionaryLoadState === 'error') {
-    return `<div class="answers-reveal chinese-learning-review">
-      <div class="answers-title">答案 · Answer review</div>
-      <div class="dictionary-status" role="alert">
+  const dictionaryStatus = chineseDictionaryLoadState === 'error'
+    ? `<div class="dictionary-status" role="alert">
         <p>${escapeHtml(chineseDictionaryLoadError)}</p>
         <button class="dictionary-inline-retry" type="button">Retry</button>
-      </div>
-    </div>`;
-  }
-  if (answerWords.some((word) => !getLoadedChineseDictionaryEntry(word))) {
-    return `<div class="answers-reveal chinese-learning-review">
-      <div class="answers-title">答案 · Answer review</div>
-      <div class="dictionary-status" role="status">Loading answer meanings…</div>
-    </div>`;
-  }
+      </div>`
+    : answerWords.some((word) => !getLoadedChineseDictionaryEntry(word))
+      ? '<div class="dictionary-status" role="status">Loading full dictionary entries…</div>'
+      : '';
 
   const cards = gameState.boards.map((board, index) => {
     const targetId = board.targetId;
+    const learning = requirePinyinLearningMetadata(gameState, index);
     const entry = getLoadedChineseDictionaryEntry(targetId);
-    const primary = getPrimaryChinesePronunciation(entry);
-    const [firstSense, ...additional] = entry?.senses ?? [];
+    const tones = formatPinyinTones(learning.tones);
+    const dictionarySenses = entry?.senses ?? [];
     return `<article class="learning-card ${board.solved ? 'answer-solved' : 'answer-missed'}" data-review-word="${escapeHtml(targetId)}">
       <div class="learning-card-header">
         <span class="learning-card-number">#${index + 1}</span>
-        <div><strong lang="zh-Hans">${escapeHtml(entry?.word ?? targetId)}</strong><span>${escapeHtml(primary?.pinyinMarked ?? '')}</span></div>
+        <div>
+          <strong lang="zh-Hans">${escapeHtml(learning.hanzi)}</strong>
+          <span lang="zh-Latn" aria-label="Pinyin: ${escapeHtml(learning.pinyinMarked)}">${escapeHtml(learning.pinyinMarked)}</span>
+          <span class="learning-card-tones" aria-label="${escapeHtml(tones.accessible)}">${escapeHtml(tones.visible)}</span>
+        </div>
         <span class="answer-status" aria-label="${board.solved ? 'Solved' : 'Missed'}">${board.solved ? '✓' : '✗'}</span>
       </div>
-      ${firstSense ? `<div class="learning-card-primary"><strong>${(firstSense.glosses ?? []).map(escapeHtml).join('; ')}</strong></div>` : '<p>Definition unavailable.</p>'}
-      ${additional.length > 0 ? `<details class="learning-card-more">
-        <summary>${additional.length} more ${additional.length === 1 ? 'meaning' : 'meanings'}</summary>
-        <ol>${additional.map((sense) => `<li>${(sense.glosses ?? []).map(escapeHtml).join('; ')}</li>`).join('')}</ol>
+      <div class="learning-card-primary"><strong>${escapeHtml(learning.broadMeaning)}</strong></div>
+      ${dictionarySenses.length > 0 ? `<details class="learning-card-more">
+        <summary>${dictionarySenses.length} dictionary ${dictionarySenses.length === 1 ? 'meaning' : 'meanings'}</summary>
+        <ol>${dictionarySenses.map((sense) => `<li>${(sense.glosses ?? []).map(escapeHtml).join('; ')}</li>`).join('')}</ol>
       </details>` : ''}
       <div class="learning-card-actions">
-        <button class="learning-card-open" type="button" data-dictionary-word="${escapeHtml(entry.word)}">Full entry</button>
-        ${renderSaveWordButton(entry.word, 'post-game')}
+        <button class="learning-card-open" type="button" data-dictionary-word="${escapeHtml(targetId)}">Full entry</button>
+        ${renderSaveWordButton(targetId, 'post-game')}
       </div>
     </article>`;
   }).join('');
 
   return `<div class="answers-reveal chinese-learning-review">
     <div class="answers-title">答案 · Answer review</div>
+    ${dictionaryStatus}
     <div class="learning-card-list">${cards}</div>
     ${renderDictionaryAttribution()}
   </div>`;
@@ -3239,6 +3247,14 @@ function renderSolvedBoardCard(board, index) {
     rows.push(renderRow(board.guesses[guessIndex], board.results[guessIndex], false, true, koResult));
   }
   const historyHtml = `<div class="solved-board-history" id="${historyId}" ${expanded ? '' : 'hidden'}>${rows.join('')}</div>`;
+  const pinyinLearning = currentLanguage === 'zh'
+    ? requirePinyinLearningMetadata(gameState, index)
+    : null;
+  const pinyinLearningHtml = pinyinLearning ? renderPinyinLearningSummary(gameState, index) : '';
+  const pinyinTones = formatPinyinTones(pinyinLearning?.tones);
+  const solvedBoardAria = pinyinLearning
+    ? `${expanded ? 'Collapse' : 'Expand'} solved board ${index + 1}, Hanzi ${pinyinLearning.hanzi}, Pinyin ${pinyinLearning.pinyinMarked}, ${pinyinTones.accessible}, meaning: ${pinyinLearning.broadMeaning}, solved in ${solvedGuessCount} guesses`
+    : `${expanded ? 'Collapse' : 'Expand'} solved board ${index + 1}, ${answer}, solved in ${solvedGuessCount} guesses`;
 
   return `
     <article class="solved-board-card ${expanded ? 'solved-board-card-expanded' : ''}">
@@ -3248,12 +3264,13 @@ function renderSolvedBoardCard(board, index) {
         data-toggle-solved-board="${index}"
         aria-expanded="${expanded}"
         aria-controls="${historyId}"
-        aria-label="${expanded ? 'Collapse' : 'Expand'} solved board ${index + 1}, ${answer}, solved in ${solvedGuessCount} guesses"
+        aria-label="${escapeHtml(solvedBoardAria)}"
       >
         <span class="solved-board-check" aria-hidden="true">✓</span>
         <span class="solved-board-number">#${index + 1}</span>
-        <strong class="solved-board-answer">${answer}</strong>
-        ${currentLanguage === 'zh' ? `<span class="solved-board-pinyin">${escapeHtml(board.targetWord.toUpperCase())}</span>` : ''}
+        ${currentLanguage === 'zh'
+          ? pinyinLearningHtml
+          : `<strong class="solved-board-answer">${answer}</strong>`}
         <span class="solved-board-meta">${solvedGuessCount} ${solvedGuessCount === 1 ? 'guess' : 'guesses'}</span>
         <span class="solved-board-chevron" aria-hidden="true">${expanded ? '▴' : '▾'}</span>
       </button>

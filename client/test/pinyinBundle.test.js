@@ -24,6 +24,7 @@ test('production entry excludes inactive Pinyin guess-key shards', { timeout: 30
     .join('\n');
 
   assert.ok(entryCode.length > 0);
+  assert.equal(entryCode.includes('pinyin-learning-summary'), true, 'solved-card learning markup is not wired into the production entry');
   for (const inactiveSentinel of ['adie', 'anchuang', 'baishuang']) {
     assert.equal(entryCode.includes(`"${inactiveSentinel}"`), false, `${inactiveSentinel} leaked into the entry chunk`);
     assert.equal(lazyChunkCode.includes(`"${inactiveSentinel}"`), true, `${inactiveSentinel} is not lazy-loadable`);

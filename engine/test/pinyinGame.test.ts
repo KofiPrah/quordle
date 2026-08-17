@@ -26,6 +26,10 @@ function createPinyinGame(targetWords: [string, string, string, string], targetI
 }
 
 describe('Chinese Pinyin round selection', () => {
+    it('enables exactly the approved 5, 6, and 7 letter Pinyin buckets', () => {
+        expect(ENABLED_ZH_PINYIN_LENGTHS).toEqual([5, 6, 7]);
+    });
+
     it('exports the authoritative selection, validation, and transition surface', () => {
         expect(engine.getDailyChinesePinyinRound).toBe(getDailyChinesePinyinRound);
         expect(engine.getPracticeChinesePinyinRound).toBe(getPracticeChinesePinyinRound);

@@ -6,6 +6,8 @@ import {
 import { getDailyChinesePinyinRound } from '@quordle/engine/pinyinDaily';
 import { PINYIN_PUZZLE_VARIANT } from './gameNamespace.js';
 
+export const MAX_PINYIN_SUBMISSION_RECEIPTS = 9;
+
 export function createDailyGame(dateKey, language, puzzleVariant, legacyTargets) {
   if (language === 'zh' && puzzleVariant === PINYIN_PUZZLE_VARIANT) {
     const round = getDailyChinesePinyinRound(dateKey);
@@ -55,6 +57,53 @@ function isPinyinPlayer(playerState) {
     && playerState?.puzzleVariant === PINYIN_PUZZLE_VARIANT;
 }
 
+function normalizePinyinSubmissionReceipt(value) {
+  if (!value || typeof value !== 'object') return null;
+  if (typeof value.submissionId !== 'string'
+    || value.submissionId.length === 0
+    || value.submissionId.length > 128
+    || typeof value.normalizedGuess !== 'string'
+    || value.normalizedGuess.length === 0
+    || !Number.isInteger(value.guessIndex)
+    || value.guessIndex < 0) return null;
+  return {
+    submissionId: value.submissionId,
+    normalizedGuess: value.normalizedGuess,
+    guessIndex: value.guessIndex,
+  };
+}
+
+export function getPinyinSubmissionReceipts(playerState) {
+  if (!isPinyinPlayer(playerState)) return [];
+  const receipts = [];
+  const append = (candidate) => {
+    const receipt = normalizePinyinSubmissionReceipt(candidate);
+    if (!receipt) return;
+    const duplicateIndex = receipts.findIndex((entry) => entry.submissionId === receipt.submissionId);
+    if (duplicateIndex >= 0) receipts.splice(duplicateIndex, 1);
+    receipts.push(receipt);
+  };
+  if (Array.isArray(playerState.pinyinSubmissionReceipts)) {
+    playerState.pinyinSubmissionReceipts.forEach(append);
+  }
+  append(playerState.pinyinSubmissionReceipt);
+  return receipts.slice(-MAX_PINYIN_SUBMISSION_RECEIPTS);
+}
+
+export function normalizePinyinPlayerSubmissionState(playerState) {
+  if (!isPinyinPlayer(playerState)) return playerState;
+  const pinyinSubmissionReceipts = getPinyinSubmissionReceipts(playerState);
+  const pinyinSubmissionReceipt = pinyinSubmissionReceipts.at(-1);
+  const normalizedPlayerState = { ...playerState };
+  delete normalizedPlayerState.pinyinSubmissionReceipt;
+  delete normalizedPlayerState.pinyinSubmissionReceipts;
+  return {
+    ...normalizedPlayerState,
+    ...(pinyinSubmissionReceipt ? { pinyinSubmissionReceipt } : {}),
+    pinyinSubmissionReceipts,
+  };
+}
+
 export function transitionPlayerGuess(
   playerState,
   sourceGuess,
@@ -62,8 +111,11 @@ export function transitionPlayerGuess(
   timestamp = Date.now(),
   submissionId,
 ) {
-  const previousGameState = playerState.gameState;
   const pinyinPlayer = isPinyinPlayer(playerState);
+  const authoritativePlayerState = pinyinPlayer
+    ? normalizePinyinPlayerSubmissionState(playerState)
+    : playerState;
+  const previousGameState = authoritativePlayerState.gameState;
   if (pinyinPlayer && (typeof submissionId !== 'string' || submissionId.length === 0 || submissionId.length > 128)) {
     return {
       ok: false,
@@ -72,8 +124,11 @@ export function transitionPlayerGuess(
     };
   }
   const validation = validateDailyGuess(previousGameState, sourceGuess, validators);
-  const previousReceipt = pinyinPlayer ? playerState.pinyinSubmissionReceipt : null;
-  if (previousReceipt && previousReceipt.submissionId === submissionId) {
+  const pinyinSubmissionReceipts = pinyinPlayer
+    ? authoritativePlayerState.pinyinSubmissionReceipts
+    : [];
+  const previousReceipt = pinyinSubmissionReceipts.find((receipt) => receipt.submissionId === submissionId);
+  if (previousReceipt) {
     if (!validation.valid || validation.normalizedGuess !== previousReceipt.normalizedGuess) {
       return {
         ok: false,
@@ -91,7 +146,7 @@ export function transitionPlayerGuess(
       gameState: previousGameState,
       newlySolvedTargetIds: [],
       justCompleted: false,
-      playerState,
+      playerState: authoritativePlayerState,
     };
   }
   if (!validation.valid) {
@@ -117,6 +172,9 @@ export function transitionPlayerGuess(
     normalizedGuess: validation.normalizedGuess,
     guessIndex: previousGameState.guessCount,
   } : null;
+  const nextPinyinSubmissionReceipts = pinyinSubmissionReceipt
+    ? [...pinyinSubmissionReceipts, pinyinSubmissionReceipt].slice(-MAX_PINYIN_SUBMISSION_RECEIPTS)
+    : null;
   return {
     ok: true,
     idempotent: false,
@@ -127,11 +185,14 @@ export function transitionPlayerGuess(
     newlySolvedTargetIds: getNewlySolvedTargetIds(previousGameState, gameState),
     justCompleted,
     playerState: {
-      ...playerState,
+      ...authoritativePlayerState,
       gameState,
       ...(pinyinSubmissionReceipt ? { pinyinSubmissionReceipt } : {}),
+      ...(nextPinyinSubmissionReceipts ? { pinyinSubmissionReceipts: nextPinyinSubmissionReceipts } : {}),
       updatedAt: timestamp,
-      finishedAt: justCompleted && !playerState.finishedAt ? timestamp : playerState.finishedAt,
+      finishedAt: justCompleted && !authoritativePlayerState.finishedAt
+        ? timestamp
+        : authoritativePlayerState.finishedAt,
     },
   };
 }

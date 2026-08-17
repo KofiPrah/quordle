@@ -15,9 +15,11 @@ import { calculatePerformanceMetrics, normalizeAssistanceState } from "@quordle/
 import { requestHint } from "@quordle/engine/hints";
 import {
   createDailyGame,
+  normalizePinyinPlayerSubmissionState,
   transitionPlayerGuess,
   validateDailyGuess,
 } from "./gameplay.js";
+import { publishDailyFinishedForTransition } from './activityEvents.js';
 import {
   PINYIN_PUZZLE_VARIANT,
   dailyRoundId,
@@ -126,6 +128,11 @@ const REDIS_TTL_SECONDS = 60 * 60 * 48; // 48 hours TTL
 
 function hasRedisConnection() {
   return !!redis && redis.status === 'ready';
+}
+
+function getActivityEventPublisher() {
+  const redisClient = hasRedisConnection() ? redis : null;
+  return redisClient ? redisClient.publish.bind(redisClient) : null;
 }
 
 if (process.env.REDIS_URL) {
@@ -335,13 +342,13 @@ async function recordDailyInvalidGuess(player, guess, attemptId) {
 
 function normalizePersistedPlayer(player) {
   if (!player?.gameState) return player;
-  return {
+  return normalizePinyinPlayerSubmissionState({
     ...player,
     gameState: {
       ...player.gameState,
       assistance: normalizeAssistanceState(player.gameState.assistance),
     },
-  };
+  });
 }
 
 const app = express();
@@ -664,6 +671,9 @@ const gameStateStore = {
         ...(player.pinyinSubmissionReceipt
           ? { pinyinSubmissionReceipt: player.pinyinSubmissionReceipt }
           : {}),
+        ...(player.pinyinSubmissionReceipts
+          ? { pinyinSubmissionReceipts: player.pinyinSubmissionReceipts }
+          : {}),
         ...(player.puzzleVariant ? { puzzleVariant: player.puzzleVariant } : {}),
       };
     }
@@ -701,6 +711,9 @@ const gameStateStore = {
         language,
         ...(state.pinyinSubmissionReceipt
           ? { pinyinSubmissionReceipt: state.pinyinSubmissionReceipt }
+          : {}),
+        ...(state.pinyinSubmissionReceipts
+          ? { pinyinSubmissionReceipts: state.pinyinSubmissionReceipts }
           : {}),
         ...(puzzleVariant ? { puzzleVariant } : {}),
         updatedAt: now,
@@ -969,43 +982,24 @@ wss.on("connection", (ws, req) => {
           }
           const newBoards = newGameState.boards;
           const newGuessCount = newGameState.guessCount;
-          const newGameOver = newGameState.gameOver;
-          const allSolved = newGameState.won;
           console.log('[GUESS] Updating player:', visibleUserId, 'guessCount:', newGuessCount, 'boards:', newBoards.map(b => b.guesses.length));
           setPlayer(updatedPlayerState);
           await recordDailyGuessTransition(updatedPlayerState, oldGameState, newGameState, normalizedGuess);
 
-          // Publish DAILY_FINISHED event if game just ended
-          if (newGameOver && hasRedisConnection()) {
-            const solvedCount = newBoards.filter(b => b.solved).length;
-            const performance = calculatePerformanceMetrics(newGameState);
-            const resolvedGuildId = roomGuildMap.get(roomId) || null;
-            // roomId === channelId (set by client from discordSdk.channelId)
-            const finishEvent = JSON.stringify({
-              type: 'DAILY_FINISHED',
-              roomId,
-              channelId: roomId,
-              guildId: resolvedGuildId,
-              dateKey,
-              visibleUserId,
-              displayName: playerState.profile?.displayName || visibleUserId,
-              avatarUrl: playerState.profile?.avatarUrl || null,
-              won: allSolved,
-              guessCount: newGuessCount,
-              solvedBoards: solvedCount,
-              totalBoards: 4,
-              hintCount: performance.hintCount,
-              hintPenalty: performance.hintPenalty,
-              assisted: performance.assisted,
-              score: performance.score,
-              language,
-              puzzleVariant,
-              timestamp: Date.now(),
-            });
-            redis.publish('activity:events', finishEvent).catch(err => {
-              console.error('[Activity] Failed to publish DAILY_FINISHED:', err.message);
-            });
-            console.log(`[Activity] Published DAILY_FINISHED for ${visibleUserId} in ${roomId} lang=${language} (${allSolved ? 'won' : 'lost'})`);
+          const finishEvent = publishDailyFinishedForTransition({
+            transition,
+            roomId,
+            dateKey,
+            visibleUserId,
+            guildId: roomGuildMap.get(roomId) || null,
+            language,
+            puzzleVariant,
+            timestamp: Date.now(),
+            publish: getActivityEventPublisher(),
+            onError: (error) => console.error('[Activity] Failed to publish DAILY_FINISHED:', error.message),
+          });
+          if (finishEvent) {
+            console.log(`[Activity] Published DAILY_FINISHED for ${visibleUserId} in ${roomId} lang=${language} (${finishEvent.won ? 'won' : 'lost'})`);
           }
 
           // Send updated STATE to player
@@ -1830,6 +1824,9 @@ app.post("/api/game/join", async (req, res) => {
       ...(playerState.pinyinSubmissionReceipt
         ? { pinyinSubmissionReceipt: playerState.pinyinSubmissionReceipt }
         : {}),
+      ...(playerState.pinyinSubmissionReceipts
+        ? { pinyinSubmissionReceipts: playerState.pinyinSubmissionReceipts }
+        : {}),
       ...(playerState.puzzleVariant ? { puzzleVariant: playerState.puzzleVariant } : {}),
     } : await gameStateStore.get(roomId, dateKey, userId, language, puzzleVariant);
 
@@ -1850,6 +1847,9 @@ app.post("/api/game/join", async (req, res) => {
         language: playerState.language,
         ...(playerState.pinyinSubmissionReceipt
           ? { pinyinSubmissionReceipt: playerState.pinyinSubmissionReceipt }
+          : {}),
+        ...(playerState.pinyinSubmissionReceipts
+          ? { pinyinSubmissionReceipts: playerState.pinyinSubmissionReceipts }
           : {}),
         ...(playerState.puzzleVariant ? { puzzleVariant: playerState.puzzleVariant } : {}),
       };
@@ -2015,6 +2015,9 @@ app.post("/api/game/guess", async (req, res) => {
       ...(transitionedPlayer.pinyinSubmissionReceipt
         ? { pinyinSubmissionReceipt: transitionedPlayer.pinyinSubmissionReceipt }
         : {}),
+      ...(transitionedPlayer.pinyinSubmissionReceipts
+        ? { pinyinSubmissionReceipts: transitionedPlayer.pinyinSubmissionReceipts }
+        : {}),
       ...(puzzleVariant ? { puzzleVariant } : {}),
     };
     if (transition.idempotent) return res.json(state);
@@ -2023,6 +2026,22 @@ app.post("/api/game/guess", async (req, res) => {
     const updatedPlayer = getPlayer(roomId, dateKey, userId, language, puzzleVariant) || transition.playerState;
     if (updatedPlayer) {
       await recordDailyGuessTransition(updatedPlayer, previousGameState, newGameState, normalizedGuess);
+    }
+
+    const finishEvent = publishDailyFinishedForTransition({
+      transition,
+      roomId,
+      dateKey,
+      visibleUserId: userId,
+      guildId: roomGuildMap.get(roomId) || null,
+      language,
+      puzzleVariant,
+      timestamp: Date.now(),
+      publish: getActivityEventPublisher(),
+      onError: (error) => console.error('[Activity] Failed to publish DAILY_FINISHED:', error.message),
+    });
+    if (finishEvent) {
+      console.log(`[Activity] Published DAILY_FINISHED for ${userId} in ${roomId} lang=${language} (${finishEvent.won ? 'won' : 'lost'})`);
     }
 
     res.json(state);
@@ -2090,6 +2109,9 @@ app.post("/api/game/hint", async (req, res) => {
         language: updatedPlayerState.language,
         ...(updatedPlayerState.pinyinSubmissionReceipt
           ? { pinyinSubmissionReceipt: updatedPlayerState.pinyinSubmissionReceipt }
+          : {}),
+        ...(updatedPlayerState.pinyinSubmissionReceipts
+          ? { pinyinSubmissionReceipts: updatedPlayerState.pinyinSubmissionReceipts }
           : {}),
         ...(updatedPlayerState.puzzleVariant ? { puzzleVariant: updatedPlayerState.puzzleVariant } : {}),
       });

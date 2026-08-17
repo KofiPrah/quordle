@@ -2273,16 +2273,54 @@ button:focus-visible {
   font-size: 0.67rem;
 }
 
-.solved-board-pinyin {
+.lang-zh .solved-board-toggle {
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+}
+
+.pinyin-learning-summary {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: 0.35rem;
+  row-gap: 0.08rem;
+}
+
+.pinyin-learning-hanzi {
+  color: #f4f4f5;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.pinyin-learning-pronunciation {
+  min-width: 0;
   overflow: hidden;
   color: #a7f3d0;
-  font-size: 0.58rem;
+  font-size: 0.64rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.lang-zh .solved-board-toggle {
-  grid-template-columns: auto auto minmax(0, 1fr) minmax(0, 1fr) auto auto;
+.pinyin-learning-tones,
+.learning-card-tones {
+  color: #c7d2fe;
+  font-size: 0.58rem;
+  white-space: nowrap;
+}
+
+.learning-card-header .learning-card-tones {
+  color: #c7d2fe;
+  font-size: 0.62rem;
+}
+
+.pinyin-learning-meaning {
+  min-width: 0;
+  grid-column: 1 / -1;
+  color: #d4d4d8;
+  font-size: 0.58rem;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 480px) {

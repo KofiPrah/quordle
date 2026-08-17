@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
+import { createFakeRedis } from './fakeRedis.js';
 
 const serverDirectory = fileURLToPath(new URL('..', import.meta.url));
 const puzzleVariant = 'pinyin-latin-v2';
@@ -29,6 +30,19 @@ async function waitForHealth(baseUrl, child, logs) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`server health check timed out\n${logs()}`);
+}
+
+async function waitForRedis(baseUrl, child, logs) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      const response = await fetch(`${baseUrl}/api/debug/persist`);
+      const health = await response.json();
+      if (health.redisConnected === true) return;
+    } catch {}
+    if (child.exitCode !== null) throw new Error(`server exited before Redis was ready\n${logs()}`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`server Redis connection timed out\n${logs()}`);
 }
 
 function createInbox(socket) {
@@ -72,10 +86,11 @@ async function connectSocket(url) {
 
 test('Pinyin REST and WebSocket paths enforce one versioned authoritative contract', { timeout: 30_000 }, async () => {
   const port = await reservePort();
+  const fakeRedis = await createFakeRedis();
   const baseUrl = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ['server.js'], {
     cwd: serverDirectory,
-    env: { ...process.env, PORT: String(port), REDIS_URL: '', DEBUG_WS: 'false' },
+    env: { ...process.env, PORT: String(port), REDIS_URL: fakeRedis.url, DEBUG_WS: 'false' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
@@ -92,9 +107,15 @@ test('Pinyin REST and WebSocket paths enforce one versioned authoritative contra
 
   try {
     await waitForHealth(baseUrl, child, () => output);
+    await waitForRedis(baseUrl, child, () => output);
     const dateKey = '2026-08-17';
-    const restIdentity = { roomId: 'pinyin-parity', userId: 'rest-player', dateKey, language: 'zh', puzzleVariant };
-    const wsIdentity = { roomId: 'pinyin-parity', visibleUserId: 'ws-player', dateKey, language: 'zh', puzzleVariant };
+    const profile = { displayName: 'Canonical Player', avatarUrl: 'https://cdn.example/avatar.png' };
+    const restIdentity = {
+      roomId: 'pinyin-parity', userId: 'rest-player', dateKey, language: 'zh', puzzleVariant, guildId: 'guild-1', profile,
+    };
+    const wsIdentity = {
+      roomId: 'pinyin-parity', visibleUserId: 'ws-player', dateKey, language: 'zh', puzzleVariant, guildId: 'guild-1', profile,
+    };
 
     for (const badVariant of [undefined, 'hanzi-v1', 'unknown-v9']) {
       const rejected = await post('/api/game/join', { ...restIdentity, puzzleVariant: badVariant });
@@ -272,32 +293,84 @@ test('Pinyin REST and WebSocket paths enforce one versioned authoritative contra
     );
     assert.equal(conflictingWsGuess.submissionId, wsSubmissionId);
 
+    const restSubmissionB = randomUUID();
+    const wsSubmissionB = randomUUID();
+    const restGuessB = await post('/api/game/guess', {
+      ...restIdentity, guess: 'gongsi', submissionId: restSubmissionB,
+    });
+    assert.equal(restGuessB.status, 200);
+    assert.equal(restGuessB.body.gameState.guessCount, 2);
+    connection.socket.send(JSON.stringify({
+      type: 'GUESS', ...wsIdentity, guess: 'gongsi', submissionId: wsSubmissionB,
+    }));
+    const wsGuessB = await connection.inbox.wait(
+      (message) => message.type === 'STATE' && message.playerState.gameState.guessCount === 2,
+      'second accepted Pinyin state',
+    );
+
+    const oldRestReplay = await post('/api/game/guess', {
+      ...restIdentity, guess: 'jie3 jie3', submissionId: restSubmissionId,
+    });
+    assert.equal(oldRestReplay.status, 200);
+    assert.equal(oldRestReplay.body.gameState.guessCount, 2);
+    assert.deepEqual(oldRestReplay.body.pinyinSubmissionReceipt, restGuessB.body.pinyinSubmissionReceipt);
+    connection.socket.send(JSON.stringify({
+      type: 'GUESS', ...wsIdentity, guess: 'jie3 jie3', submissionId: wsSubmissionId,
+    }));
+    const oldWsReplay = await connection.inbox.wait(
+      (message) => message.type === 'STATE'
+        && message.playerState.gameState.guessCount === 2
+        && message.playerState.pinyinSubmissionReceipt?.submissionId === wsSubmissionB,
+      'old idempotent Pinyin state',
+    );
+    assert.deepEqual(oldWsReplay.playerState.pinyinSubmissionReceipt, wsGuessB.playerState.pinyinSubmissionReceipt);
+
+    const oldRestConflict = await post('/api/game/guess', {
+      ...restIdentity, guess: 'qunian', submissionId: restSubmissionId,
+    });
+    assert.equal(oldRestConflict.status, 409);
+    assert.equal(oldRestConflict.body.code, 'SUBMISSION_ID_REUSED');
+    connection.socket.send(JSON.stringify({
+      type: 'GUESS', ...wsIdentity, guess: 'qunian', submissionId: wsSubmissionId,
+    }));
+    assert.equal((await connection.inbox.wait(
+      (message) => message.type === 'ERROR' && message.code === 'SUBMISSION_ID_REUSED',
+      'old reused submission ID error',
+    )).submissionId, wsSubmissionId);
+
     const restAfterIdempotency = await (
       await fetch(`${baseUrl}/api/room/pinyin-parity/${dateKey}/player/rest-player?language=zh&puzzleVariant=${puzzleVariant}`)
     ).json();
-    assert.equal(restAfterIdempotency.playerState.gameState.guessCount, 1);
+    assert.equal(restAfterIdempotency.playerState.gameState.guessCount, 2);
     const wsAfterIdempotency = await (
       await fetch(`${baseUrl}/api/room/pinyin-parity/${dateKey}/player/ws-player?language=zh&puzzleVariant=${puzzleVariant}`)
     ).json();
-    assert.equal(wsAfterIdempotency.playerState.gameState.guessCount, 1);
+    assert.equal(wsAfterIdempotency.playerState.gameState.guessCount, 2);
 
     const restored = await post('/api/game/join', restIdentity);
-    assert.equal(restored.body.gameState.guessCount, 1);
-    assert.deepEqual(restored.body.pinyinSubmissionReceipt, restGuess.body.pinyinSubmissionReceipt);
+    assert.equal(restored.body.gameState.guessCount, 2);
+    assert.deepEqual(restored.body.pinyinSubmissionReceipt, restGuessB.body.pinyinSubmissionReceipt);
     connection.socket.send(JSON.stringify({ type: 'JOIN', ...wsIdentity }));
     const restoredWs = await connection.inbox.wait(
-      (message) => message.type === 'STATE' && message.playerState.gameState.guessCount === 1,
+      (message) => message.type === 'STATE' && message.playerState.gameState.guessCount === 2,
       'restored WebSocket state',
     );
-    assert.equal(restoredWs.playerState.gameState.guessCount, 1);
-    assert.deepEqual(restoredWs.playerState.pinyinSubmissionReceipt, wsGuess.playerState.pinyinSubmissionReceipt);
+    assert.equal(restoredWs.playerState.gameState.guessCount, 2);
+    assert.deepEqual(restoredWs.playerState.pinyinSubmissionReceipt, wsGuessB.playerState.pinyinSubmissionReceipt);
 
     const restHintWithReceipt = await post('/api/game/hint', {
       ...restIdentity, boardIndex: 0, hintType: 'syllable-boundary',
     });
     assert.deepEqual(
       restHintWithReceipt.body.pinyinSubmissionReceipt,
-      restGuess.body.pinyinSubmissionReceipt,
+      restGuessB.body.pinyinSubmissionReceipt,
+    );
+    connection.socket.send(JSON.stringify({
+      type: 'HINT', ...wsIdentity, boardIndex: 0, hintType: 'syllable-boundary',
+    }));
+    await connection.inbox.wait(
+      (message) => message.type === 'STATE' && message.playerState.gameState.assistance?.hints?.length === 1,
+      'WebSocket hint state',
     );
 
     const hintIdentity = { roomId: 'pinyin-hints', userId: 'hint-player', dateKey, language: 'zh', puzzleVariant };
@@ -331,12 +404,16 @@ test('Pinyin REST and WebSocket paths enforce one versioned authoritative contra
     });
     assert.equal(wrongHintVersion.body.code, 'UNSUPPORTED_PUZZLE_VERSION');
 
-    for (const target of ['qunian', 'gongsi', 'lanqiu']) {
+    let restFinalSubmissionId;
+    let wsFinalSubmissionId;
+    for (const target of ['qunian', 'lanqiu']) {
+      restFinalSubmissionId = randomUUID();
+      wsFinalSubmissionId = randomUUID();
       assert.equal((await post('/api/game/guess', {
-        ...restIdentity, guess: target, submissionId: randomUUID(),
+        ...restIdentity, guess: target, submissionId: restFinalSubmissionId,
       })).status, 200);
       connection.socket.send(JSON.stringify({
-        type: 'GUESS', ...wsIdentity, guess: target, submissionId: randomUUID(),
+        type: 'GUESS', ...wsIdentity, guess: target, submissionId: wsFinalSubmissionId,
       }));
       await connection.inbox.wait(
         (message) => message.type === 'STATE' && message.playerState.gameState.boards.some(
@@ -352,6 +429,93 @@ test('Pinyin REST and WebSocket paths enforce one versioned authoritative contra
       gameOver: true,
       won: true,
     });
+
+    const finishRecords = await fakeRedis.waitForPublished(2);
+    assert.equal(finishRecords.length, 2);
+    assert.ok(finishRecords.every((record) => record.channel === 'activity:events'));
+    const restFinish = finishRecords.find((record) => record.payload.visibleUserId === 'rest-player')?.payload;
+    const wsFinish = finishRecords.find((record) => record.payload.visibleUserId === 'ws-player')?.payload;
+    assert.ok(restFinish);
+    assert.ok(wsFinish);
+    assert.deepEqual(Object.keys(restFinish).sort(), Object.keys(wsFinish).sort());
+    const withoutTransportIdentity = ({ visibleUserId, timestamp, ...event }) => event;
+    assert.deepEqual(withoutTransportIdentity(restFinish), withoutTransportIdentity(wsFinish));
+    assert.deepEqual({
+      type: restFinish.type,
+      roomId: restFinish.roomId,
+      channelId: restFinish.channelId,
+      guildId: restFinish.guildId,
+      displayName: restFinish.displayName,
+      avatarUrl: restFinish.avatarUrl,
+      language: restFinish.language,
+      puzzleVariant: restFinish.puzzleVariant,
+      won: restFinish.won,
+      guessCount: restFinish.guessCount,
+      solvedBoards: restFinish.solvedBoards,
+      totalBoards: restFinish.totalBoards,
+      hintCount: restFinish.hintCount,
+      hintPenalty: restFinish.hintPenalty,
+      assisted: restFinish.assisted,
+      score: restFinish.score,
+    }, {
+      type: 'DAILY_FINISHED',
+      roomId: 'pinyin-parity',
+      channelId: 'pinyin-parity',
+      guildId: 'guild-1',
+      displayName: 'Canonical Player',
+      avatarUrl: 'https://cdn.example/avatar.png',
+      language: 'zh',
+      puzzleVariant,
+      won: true,
+      guessCount: 4,
+      solvedBoards: 4,
+      totalBoards: 4,
+      hintCount: 1,
+      hintPenalty: 2,
+      assisted: true,
+      score: 98,
+    });
+
+    const duplicateFinalRest = await post('/api/game/guess', {
+      ...restIdentity, guess: 'lanqiu', submissionId: restFinalSubmissionId,
+    });
+    assert.equal(duplicateFinalRest.status, 200);
+    assert.equal(duplicateFinalRest.body.gameState.guessCount, 4);
+    connection.socket.send(JSON.stringify({
+      type: 'GUESS', ...wsIdentity, guess: 'lanqiu', submissionId: wsFinalSubmissionId,
+    }));
+    assert.equal((await connection.inbox.wait(
+      (message) => message.type === 'STATE' && message.playerState.gameState.gameOver,
+      'completed latest-id replay state',
+    )).playerState.gameState.guessCount, 4);
+
+    const completedOldRestReplay = await post('/api/game/guess', {
+      ...restIdentity, guess: 'jie3 jie3', submissionId: restSubmissionId,
+    });
+    assert.equal(completedOldRestReplay.status, 200);
+    assert.equal(completedOldRestReplay.body.gameState.guessCount, 4);
+    connection.socket.send(JSON.stringify({
+      type: 'GUESS', ...wsIdentity, guess: 'jie3 jie3', submissionId: wsSubmissionId,
+    }));
+    assert.equal((await connection.inbox.wait(
+      (message) => message.type === 'STATE' && message.playerState.gameState.gameOver,
+      'completed old-id replay state',
+    )).playerState.gameState.guessCount, 4);
+
+    const completedConflict = await post('/api/game/guess', {
+      ...restIdentity, guess: 'gongsi', submissionId: restSubmissionId,
+    });
+    assert.equal(completedConflict.status, 409);
+    assert.equal(completedConflict.body.code, 'SUBMISSION_ID_REUSED');
+    connection.socket.send(JSON.stringify({
+      type: 'GUESS', ...wsIdentity, guess: 'gongsi', submissionId: wsSubmissionId,
+    }));
+    assert.equal((await connection.inbox.wait(
+      (message) => message.type === 'ERROR' && message.code === 'SUBMISSION_ID_REUSED',
+      'completed reused submission ID error',
+    )).submissionId, wsSubmissionId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(fakeRedis.published.length, 2);
 
     const english = await post('/api/game/join', {
       roomId: restIdentity.roomId, userId: restIdentity.userId, dateKey, language: 'en',
@@ -379,5 +543,6 @@ test('Pinyin REST and WebSocket paths enforce one versioned authoritative contra
       new Promise((resolve) => child.once('exit', resolve)),
       new Promise((resolve) => setTimeout(resolve, 3000)).then(() => child.kill('SIGKILL')),
     ]);
+    await fakeRedis.close();
   }
 });
