@@ -1,3 +1,5 @@
+import { ZH_PINYIN_SYLLABLES } from './zhPinyinSyllables.generated.js';
+
 const MARKED_VOWELS: Record<string, { base: string; tone: number }> = {
     'ā': { base: 'a', tone: 1 }, 'á': { base: 'a', tone: 2 }, 'ǎ': { base: 'a', tone: 3 }, 'à': { base: 'a', tone: 4 },
     'ē': { base: 'e', tone: 1 }, 'é': { base: 'e', tone: 2 }, 'ě': { base: 'e', tone: 3 }, 'è': { base: 'e', tone: 4 },
@@ -17,7 +19,85 @@ const TONE_MARKS: Record<string, readonly string[]> = {
 };
 
 function normalizeUmlaut(value: string): string {
-    return value.replace(/u:/gu, 'v').replace(/ü/gu, 'v');
+    return value.replace(/u:/gu, 'v').replace(/ü/gu, 'v').replace(/Ã¼/gu, 'v');
+}
+
+const PINYIN_SYLLABLE_SET = new Set(ZH_PINYIN_SYLLABLES);
+
+export interface ParsedChinesePinyinSyllable {
+    key: string;
+    tone: number | null;
+}
+
+export interface ParsedChinesePinyinInput {
+    key: string;
+    syllables: [ParsedChinesePinyinSyllable, ParsedChinesePinyinSyllable];
+}
+
+function parsePinyinSyllable(source: string, numericTone: number | null): ParsedChinesePinyinSyllable | null {
+    let key = '';
+    let markedTone: number | null = null;
+    for (const character of normalizeUmlaut(source.normalize('NFC').toLowerCase())) {
+        const marked = MARKED_VOWELS[character];
+        if (marked) {
+            if (numericTone !== null || markedTone !== null) return null;
+            key += marked.base;
+            markedTone = marked.tone;
+        } else if (/^[a-z]$/u.test(character)) {
+            key += character;
+        } else {
+            return null;
+        }
+    }
+    if (!key || !PINYIN_SYLLABLE_SET.has(key)) return null;
+    return { key, tone: numericTone ?? markedTone };
+}
+
+function parsePlainPinyinPair(source: string): [ParsedChinesePinyinSyllable, ParsedChinesePinyinSyllable] | null {
+    const characters = Array.from(source);
+    for (let boundary = 1; boundary < characters.length; boundary += 1) {
+        const first = parsePinyinSyllable(characters.slice(0, boundary).join(''), null);
+        const second = parsePinyinSyllable(characters.slice(boundary).join(''), null);
+        if (first && second) return [first, second];
+    }
+    return null;
+}
+
+/**
+ * Parses exactly two Pinyin syllables without permitting lossy punctuation or mixed notation.
+ * The returned key is the gameplay spelling: lowercase ASCII with `v` representing umlaut-u.
+ */
+export function parseChinesePinyinInput(input: string): ParsedChinesePinyinInput | null {
+    const value = normalizeUmlaut(String(input ?? '').normalize('NFC').toLowerCase()).trim();
+    if (!value) return null;
+    const hasSeparators = /[\s'’\-·]/u.test(value);
+    const parts = hasSeparators ? value.split(/[\s'’\-·]+/u) : [value];
+    if (parts.some((part) => !part)) return null;
+    const digits = value.match(/\d/gu) ?? [];
+    if (digits.length > 0) {
+        if (digits.some((digit) => !/^[1-5]$/u.test(digit)) || Object.keys(MARKED_VOWELS).some((marked) => value.includes(marked))) {
+            return null;
+        }
+        const numericParts = hasSeparators
+            ? parts.map((part) => /^([a-z]+)([1-5])$/u.exec(part))
+            : [...value.matchAll(/([a-z]+)([1-5])/gu)];
+        if (numericParts.length !== 2 || numericParts.some((match) => !match)
+            || (!hasSeparators && numericParts.map((match) => match![0]).join('') !== value)) return null;
+        const syllables = numericParts.map((match) => (
+            parsePinyinSyllable(match![1], Number(match![2]))
+        ));
+        if (!syllables[0] || !syllables[1]) return null;
+        return { key: `${syllables[0].key}${syllables[1].key}`, syllables: [syllables[0], syllables[1]] };
+    }
+    if (hasSeparators) {
+        if (parts.length !== 2) return null;
+        const first = parsePinyinSyllable(parts[0], null);
+        const second = parsePinyinSyllable(parts[1], null);
+        if (!first || !second) return null;
+        return { key: `${first.key}${second.key}`, syllables: [first, second] };
+    }
+    const syllables = parsePlainPinyinPair(value);
+    return syllables ? { key: `${syllables[0].key}${syllables[1].key}`, syllables } : null;
 }
 
 /** A compact, lower-case, tone-insensitive key used by the Chinese candidate index. */

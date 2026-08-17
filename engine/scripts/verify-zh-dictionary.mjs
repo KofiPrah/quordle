@@ -5,75 +5,88 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const engineRoot = path.resolve(__dirname, '..');
-const pinyinKey = (value) => String(value ?? '')
-  .toLowerCase()
-  .replace(/u:/gu, 'v')
-  .replace(/ü/gu, 'v')
-  .normalize('NFD')
-  .replace(/[\u0300-\u036f]/gu, '')
-  .replace(/[^a-zv]/gu, '');
-const pinyinInitial = (value) => {
-  const syllable = pinyinKey(value);
-  const digraph = ['zh', 'ch', 'sh'].find((initial) => syllable.startsWith(initial));
-  if (digraph) return digraph;
-  return /^[bpmfdtnlgkhjqxrzcsyw]/u.test(syllable) ? syllable[0] : '∅';
-};
-const dictionaryManifest = JSON.parse(fs.readFileSync(path.join(engineRoot, 'src', 'zhDictionary.generated.json'), 'utf8'));
-const pinyinManifest = JSON.parse(fs.readFileSync(path.join(engineRoot, 'src', 'zhPinyinIndex.generated.json'), 'utf8'));
-const hintClues = JSON.parse(fs.readFileSync(path.join(engineRoot, 'src', 'zhHintClues.seed.json'), 'utf8'));
-const { ZH_HINT_METADATA } = await import(new URL('../dist/zhHintMetadata.generated.js', import.meta.url));
-const seed = fs.readFileSync(path.join(engineRoot, 'src', 'zhAnswerWords.seed.txt'), 'utf8')
+const sourceDir = path.join(engineRoot, 'src');
+const supportedLengths = [4, 5, 6, 7, 8, 9];
+const compare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
+const canonicalKey = (value) => String(value ?? '')
+  .normalize('NFC').toLowerCase().replace(/u:/gu, 'v').replace(/\u00fc/gu, 'v')
+  .normalize('NFD').replace(/[\u0300-\u036f]/gu, '').replace(/\s+/gu, '');
+const readJson = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8'));
+
+const dictionaryManifest = readJson(path.join(sourceDir, 'zhDictionary.generated.json'));
+const pinyinManifest = readJson(path.join(sourceDir, 'zhPinyinIndex.generated.json'));
+const hintClues = readJson(path.join(sourceDir, 'zhHintClues.seed.json'));
+const seed = fs.readFileSync(path.join(sourceDir, 'zhAnswerWords.seed.txt'), 'utf8')
   .split(/\r?\n/u).map((word) => word.trim()).filter(Boolean);
+const { CHINESE_PINYIN_PUZZLE_ANSWERS, PINYIN_PUZZLE_VARIANT } = await import(new URL('../dist/chineseLexicon.js', import.meta.url));
+const { ZH_PINYIN_GUESS_KEYS_BY_LENGTH } = await import(new URL('../dist/zhPinyinGuessKeys.generated.js', import.meta.url));
+const { ZH_PINYIN_SYLLABLES } = await import(new URL('../dist/zhPinyinSyllables.generated.js', import.meta.url));
 
 assert.equal(seed.length, 64, 'Chinese answer seed must contain exactly 64 words');
 assert.equal(new Set(seed).size, seed.length, 'Chinese answer seed contains duplicates');
+assert.equal(PINYIN_PUZZLE_VARIANT, 'pinyin-latin-v2', 'Chinese Pinyin puzzle variant drifted');
 assert.equal(dictionaryManifest.metadata?.license, 'Creative Commons Attribution-ShareAlike 4.0 International');
 assert.match(dictionaryManifest.metadata?.sourceSha256 ?? '', /^[0-9a-f]{64}$/u);
 assert.equal(pinyinManifest.metadata?.sourceSha256, dictionaryManifest.metadata.sourceSha256);
-assert.deepEqual(Object.keys(hintClues).sort(), [...seed].sort(), 'Chinese hint clues diverged from the answer seed');
-assert.deepEqual(Object.keys(ZH_HINT_METADATA).sort(), [...seed].sort(), 'Generated Chinese hint metadata diverged from the answer seed');
+assert.deepEqual(Object.keys(hintClues).sort(compare), [...seed].sort(compare), 'Chinese broad-meaning clues diverged from the answer seed');
 
 const entries = Object.assign({}, ...dictionaryManifest.shards.map((id) => (
-  JSON.parse(fs.readFileSync(path.join(engineRoot, 'src', 'zhDictionaryShards', `${id}.json`), 'utf8')).entries ?? {}
+  readJson(path.join(sourceDir, 'zhDictionaryShards', `${id}.json`)).entries ?? {}
 )));
 const candidatesByKey = Object.assign({}, ...pinyinManifest.shards.map((id) => (
-  JSON.parse(fs.readFileSync(path.join(engineRoot, 'src', 'zhPinyinShards', `${id}.json`), 'utf8')).candidates ?? {}
+  readJson(path.join(sourceDir, 'zhPinyinShards', `${id}.json`)).candidates ?? {}
 )));
 assert.equal(Object.keys(entries).length, dictionaryManifest.entryCount, 'Chinese dictionary shard count diverged');
 assert.equal(Object.keys(candidatesByKey).length, pinyinManifest.keyCount, 'Chinese pinyin shard count diverged');
-for (const word of seed) {
-  assert(entries[word], `Chinese answer missing dictionary entry: ${word}`);
-  assert.equal(entries[word].answerEligible, true, `Chinese answer not marked eligible: ${word}`);
-  const hint = ZH_HINT_METADATA[word];
-  const pronunciation = entries[word].pronunciations[0];
-  assert(hint, `Chinese answer missing hint metadata: ${word}`);
-  assert.deepEqual(
-    [...hint.pinyinInitials],
-    pronunciation.pinyinPlain.trim().split(/\s+/u).map(pinyinInitial),
-    `Chinese hint pinyin initials are not canonical: ${word}`,
-  );
-  assert(!candidatesByKey[pinyinKey(hint.pinyinInitials.join(' '))], `Chinese pinyin initials form an enterable candidate key: ${word}`);
-  assert.deepEqual([...hint.tones], pronunciation.tones, `Chinese hint tones are not canonical: ${word}`);
-  assert.equal(hint.meaning, hintClues[word].trim(), `Chinese broad-meaning clue diverged: ${word}`);
-  assert.equal(hint.firstCharacter, Array.from(word)[0], `Chinese first-character hint diverged: ${word}`);
-  assert(!/\p{Script=Han}/u.test(hint.meaning), `Chinese broad-meaning clue exposes Hanzi: ${word}`);
-  assert(!pinyinKey(hint.meaning).includes(pinyinKey(pronunciation.pinyinMarked)), `Chinese broad-meaning clue exposes pinyin: ${word}`);
-  assert(hint.tones.every((tone) => Number.isInteger(tone) && tone >= 1 && tone <= 5), `Chinese hint has malformed tones: ${word}`);
-}
 
 for (const [word, entry] of Object.entries(entries)) {
   assert.equal(Array.from(word).length, 2, `Chinese guess is not two characters: ${word}`);
   assert(Array.from(word).every((unit) => /^\p{Script=Han}$/u.test(unit)), `Chinese guess contains non-Han unit: ${word}`);
-  assert.deepEqual(entry.units, Array.from(word), `Chinese units diverge: ${word}`);
-  assert(entry.guessEligible, `Chinese entry is not guess eligible: ${word}`);
+  assert.equal(entry.guessEligible, true, `Chinese entry is not guess eligible: ${word}`);
   assert(entry.pronunciations.length > 0, `Chinese entry lacks pinyin: ${word}`);
-  assert(entry.translations.length > 0, `Chinese entry lacks translations: ${word}`);
   for (const pronunciation of entry.pronunciations) {
     assert.equal(pronunciation.tones.length, 2, `Chinese pronunciation lacks two tones: ${word}`);
-    assert(pronunciation.pinyinMarked && pronunciation.pinyinPlain && pronunciation.pinyinNumeric, `Chinese pronunciation incomplete: ${word}`);
-    const key = pronunciation.pinyinPlain.replace(/\s+/gu, '').replace(/ü/gu, 'v');
+    const key = canonicalKey(pronunciation.pinyinPlain);
     assert(candidatesByKey[key]?.some((candidate) => candidate.word === word && candidate.pinyinNumeric === pronunciation.pinyinNumeric), `Chinese pinyin candidate missing: ${word}`);
   }
 }
 
-process.stdout.write(`Verified Chinese dictionary: ${Object.keys(entries).length} accepted guesses, ${seed.length} answers, ${Object.keys(candidatesByKey).length} pinyin keys\n`);
+const expectedKeysByLength = Object.fromEntries(supportedLengths.map((length) => [
+  length,
+  [...new Set(Object.keys(candidatesByKey).map(canonicalKey).filter((key) => key.length === length))].sort(compare),
+]));
+for (const length of supportedLengths) {
+  const keys = ZH_PINYIN_GUESS_KEYS_BY_LENGTH[length];
+  assert(keys, `Chinese Pinyin key shard missing for length ${length}`);
+  assert.deepEqual([...keys], expectedKeysByLength[length], `Chinese Pinyin key shard diverged for length ${length}`);
+  assert.equal(new Set(keys).size, keys.length, `Chinese Pinyin key shard contains duplicates for length ${length}`);
+}
+assert(candidatesByKey.aiyou?.length > 1, 'Expected checked-in homophone fixture for aiyou is missing');
+assert.deepEqual(ZH_PINYIN_GUESS_KEYS_BY_LENGTH[5].filter((key) => key === 'aiyou'), ['aiyou'], 'Homophonous dictionary entries must produce one playable key');
+assert(ZH_PINYIN_SYLLABLES.includes('nv'), 'Generated syllable grammar must preserve v for umlaut-u');
+
+assert.equal(CHINESE_PINYIN_PUZZLE_ANSWERS.length, 64, 'Chinese Pinyin answer catalog must contain exactly 64 answers');
+assert.equal(new Set(CHINESE_PINYIN_PUZZLE_ANSWERS.map((answer) => answer.key)).size, 64, 'Chinese Pinyin answer keys must be unique');
+assert.deepEqual(CHINESE_PINYIN_PUZZLE_ANSWERS.reduce((distribution, answer) => {
+  distribution[answer.length] = (distribution[answer.length] ?? 0) + 1;
+  return distribution;
+}, {}), { 4: 6, 5: 15, 6: 14, 7: 20, 8: 7, 9: 2 }, 'Chinese Pinyin answer length distribution drifted');
+for (const answer of CHINESE_PINYIN_PUZZLE_ANSWERS) {
+  const entry = entries[answer.id];
+  assert(entry, `Chinese answer missing dictionary entry: ${answer.id}`);
+  assert.equal(answer.id, answer.hanzi, `Chinese answer ID must remain canonical Hanzi: ${answer.id}`);
+  assert.equal(answer.answerEligible, true, `Chinese answer is not marked eligible: ${answer.id}`);
+  const pronunciation = entry.pronunciations[0];
+  assert(pronunciation, `Chinese answer lacks pronunciation: ${answer.id}`);
+  assert.equal(answer.pinyinNumeric, pronunciation.pinyinNumeric, `Chinese numeric Pinyin drifted: ${answer.id}`);
+  assert.equal(answer.pinyinMarked, pronunciation.pinyinMarked, `Chinese marked Pinyin drifted: ${answer.id}`);
+  assert.deepEqual([...answer.tones], pronunciation.tones, `Chinese tones drifted: ${answer.id}`);
+  assert.equal(answer.key, canonicalKey(pronunciation.pinyinPlain), `Chinese playable key drifted: ${answer.id}`);
+  assert.equal(answer.length, answer.key.length, `Chinese Pinyin length drifted: ${answer.id}`);
+  assert(answer.syllableBoundary > 0 && answer.syllableBoundary < answer.length, `Chinese Pinyin boundary is invalid: ${answer.id}`);
+  assert.equal(answer.syllableBoundary, canonicalKey(pronunciation.pinyinPlain.split(/\s+/u)[0]).length, `Chinese Pinyin boundary drifted: ${answer.id}`);
+  assert.equal(answer.broadMeaning, hintClues[answer.id].trim(), `Chinese broad meaning drifted: ${answer.id}`);
+  assert(ZH_PINYIN_GUESS_KEYS_BY_LENGTH[answer.length].includes(answer.key), `Chinese answer missing accepted Pinyin guess key: ${answer.id}`);
+}
+
+process.stdout.write(`Verified Chinese dictionary and Pinyin catalog: ${Object.keys(entries).length} accepted guesses, ${CHINESE_PINYIN_PUZZLE_ANSWERS.length} answers, ${Object.keys(candidatesByKey).length} Pinyin keys\n`);

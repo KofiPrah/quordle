@@ -44,7 +44,14 @@ export type {
 export type {
     ChinesePinyinCandidate,
     ChinesePinyinIndex,
+    ParsedChinesePinyinInput,
+    ParsedChinesePinyinSyllable,
 } from './pinyin.js';
+
+export type {
+    ChinesePinyinPuzzleAnswer,
+    ChinesePinyinRound,
+} from './chineseLexicon.js';
 
 export type {
     KoreanWordLevel,
@@ -96,6 +103,7 @@ export {
     numericPinyinToMarked,
     numericPinyinToPlain,
     findChinesePinyinCandidates,
+    parseChinesePinyinInput,
 } from './pinyin.js';
 
 // Korean vocabulary discovery
@@ -180,7 +188,15 @@ export {
     ZH_GUESS_WORDS_LIST,
     isValidChineseGuess,
     isChineseAnswerWord,
+    PINYIN_PUZZLE_VARIANT,
+    ENABLED_ZH_PINYIN_LENGTHS,
+    CHINESE_PINYIN_PUZZLE_ANSWERS,
 } from './chineseLexicon.js';
+
+export {
+    ZH_PINYIN_GUESS_KEYS_BY_LENGTH,
+    isValidChinesePinyinGuessKey,
+} from './zhPinyinGuessKeys.generated.js';
 
 // Daily
 export { getDailyTargets } from './daily.js';
