@@ -1,4 +1,4 @@
-import { getLanguageConfig } from './languageConfig.js';
+import { getLegacyLanguageConfig } from './legacyLanguageConfig.js';
 import type { Language } from './types.js';
 export { getDailyChinesePinyinRound, getPracticeChinesePinyinRound } from './pinyinDaily.js';
 
@@ -84,7 +84,7 @@ export function getDailyTargets(dateKey: string, language: Language = 'en'): [st
     const seedInput = language === 'en' ? dateKey : `${dateKey}:${language}`;
     const seed = dateKeyToSeed(seedInput);
     const random = mulberry32(seed);
-    const wordList = getLanguageConfig(language).answerWords;
+    const wordList = getLegacyLanguageConfig(language).answerWords;
     const indices = selectDistinctIndices(wordList.length, 4, random);
 
     return [

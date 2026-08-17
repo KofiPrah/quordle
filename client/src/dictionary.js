@@ -68,9 +68,14 @@ export function getDictionaryEligibleWords(gameState, entries = null, supplement
     eligible.push(normalized);
   };
 
-  chronologicalSubmittedWords(gameState).forEach(add);
-  gameState.boards.filter((board) => board.solved).forEach((board) => add(board.targetWord));
-  if (gameState.gameOver) gameState.boards.forEach((board) => add(board.targetWord));
+  const isPinyin = gameState.language === 'zh' && gameState.puzzleVariant === 'pinyin-latin-v2';
+  if (!isPinyin) chronologicalSubmittedWords(gameState).forEach(add);
+  gameState.boards.filter((board) => board.solved).forEach((board) => add(
+    isPinyin ? board.targetId : board.targetWord,
+  ));
+  if (gameState.gameOver) gameState.boards.forEach((board) => add(
+    isPinyin ? board.targetId : board.targetWord,
+  ));
   supplementalWords.forEach(add);
   return eligible;
 }
@@ -83,7 +88,9 @@ export function getKoreanRecognitionLevel(word, snapshot = loadedRecognitionSnap
 export function getDefaultDictionaryWord(gameState, eligibleWords) {
   if (!Array.isArray(eligibleWords) || eligibleWords.length === 0) return null;
   const eligible = new Set(eligibleWords);
-  const submitted = chronologicalSubmittedWords(gameState);
+  const submitted = gameState?.language === 'zh' && gameState?.puzzleVariant === 'pinyin-latin-v2'
+    ? []
+    : chronologicalSubmittedWords(gameState);
   for (let index = submitted.length - 1; index >= 0; index -= 1) {
     if (eligible.has(submitted[index])) return submitted[index];
   }

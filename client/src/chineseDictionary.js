@@ -1,11 +1,10 @@
 import { getChineseDictionaryShardId } from '../../engine/src/chineseDictionary.ts';
-import { findChinesePinyinCandidates, normalizePinyin } from '../../engine/src/pinyin.ts';
 import dictionaryManifest from '../../engine/src/zhDictionary.generated.json';
+import { createChineseGuessKeyLoader } from './chineseInput.js';
 
 const dictionaryModules = import.meta.glob('../../engine/src/zhDictionaryShards/*.json');
-const pinyinModules = import.meta.glob('../../engine/src/zhPinyinShards/*.json');
+const pinyinGuessKeyModules = import.meta.glob('../../engine/src/zhPinyinGuessKeyShards/*.generated.ts');
 const dictionaryShardPromises = new Map();
-const pinyinShardPromises = new Map();
 const loadedEntries = new Map();
 
 export const chineseDictionaryMetadata = dictionaryManifest.metadata;
@@ -43,18 +42,13 @@ export function getLoadedChineseDictionaryEntry(word) {
   return loadedEntries.get(String(word ?? '').normalize('NFC')) ?? null;
 }
 
-export async function loadChinesePinyinCandidates(input) {
-  const key = normalizePinyin(input);
-  if (!key) return [];
-  const id = /^[a-z]/u.test(key) ? key[0] : '_';
-  if (!pinyinShardPromises.has(id)) {
-    const loader = getModuleLoader(pinyinModules, `/zhPinyinShards/${id}.json`);
-    if (!loader) throw new Error(`Chinese pinyin shard is unavailable: ${id}`);
-    pinyinShardPromises.set(id, loader().then((module) => module.default ?? module));
-  }
-  const shard = await pinyinShardPromises.get(id);
-  return findChinesePinyinCandidates(input, shard);
-}
+export const loadChinesePinyinGuessKeys = createChineseGuessKeyLoader(async (wordLength) => {
+  const suffix = `/zhPinyinGuessKeyShards/${wordLength}.generated.ts`;
+  const loader = getModuleLoader(pinyinGuessKeyModules, suffix);
+  if (!loader) throw new Error(`Chinese Pinyin guess keys are unavailable for length ${wordLength}`);
+  const module = await loader();
+  return module[`ZH_PINYIN_GUESS_KEYS_${wordLength}`] ?? [];
+});
 
 export function getPrimaryChinesePronunciation(entry) {
   return entry?.pronunciations?.[0] ?? null;

@@ -15,7 +15,7 @@ const assistance = {
   ],
 };
 
-test('hint UI exposes language-specific graduated options', () => {
+test('hint UI exposes the Korean and version-2 Pinyin contracts', () => {
   assert.deepEqual(getHintUiOptions('ko').map((option) => option.type), [
     'part-of-speech',
     'semantic-category',
@@ -23,10 +23,9 @@ test('hint UI exposes language-specific graduated options', () => {
     'reveal-first-syllable',
   ]);
   assert.deepEqual(getHintUiOptions('zh').map((option) => option.type), [
-    'tone-pattern',
-    'pinyin-initials',
+    'syllable-boundary',
+    'reveal-letter',
     'broad-meaning',
-    'reveal-first-character',
   ]);
   assert.deepEqual(getHintUiOptions('en'), []);
 });
@@ -42,9 +41,9 @@ test('hint payloads receive concise accessible labels', () => {
   assert.equal(formatHintPayload('ko', 'batchim-count', 1), '1 of 2 syllables has batchim');
   assert.equal(formatHintPayload('ko', 'batchim-count', 2), '2 of 2 syllables have batchim');
   assert.equal(formatHintPayload('ko', 'reveal-first-syllable', '가'), '가');
-  assert.equal(formatHintPayload('zh', 'tone-pattern', ['2', '5']), 'Tone pattern: tone 2 + neutral tone');
-  assert.equal(formatHintPayload('zh', 'pinyin-initials', ['x', 'sh']), 'Pinyin initials: x… · sh…');
-  assert.equal(formatHintPayload('zh', 'pinyin-initials', ['∅', 'z']), 'Pinyin initials: no initial · z…');
-  assert.equal(formatHintPayload('zh', 'broad-meaning', 'a person enrolled in learning'), 'Meaning: a person enrolled in learning');
-  assert.equal(formatHintPayload('zh', 'reveal-first-character', '学'), 'First character: 学');
+  assert.equal(formatHintPayload('zh', 'syllable-boundary', 3), 'Syllable boundary: after letter 3');
+  assert.equal(formatHintPayload('zh', 'syllable-boundary', 0), '');
+  assert.equal(formatHintPayload('zh', 'reveal-letter', { index: 2, letter: 'e' }), 'Letter hint: E in position 3');
+  assert.equal(formatHintPayload('zh', 'reveal-letter', { index: -1, letter: 'e' }), '');
+  assert.equal(formatHintPayload('zh', 'broad-meaning', 'a learner'), 'Meaning: a learner');
 });

@@ -23,24 +23,19 @@ const KOREAN_HINT_UI_OPTIONS = Object.freeze([
 
 const CHINESE_HINT_UI_OPTIONS = Object.freeze([
   {
-    type: 'tone-pattern',
-    label: 'Tone pattern',
-    description: 'Shows the tones of both syllables without revealing their sounds.',
+    type: 'syllable-boundary',
+    label: 'Syllable boundary',
+    description: 'Shows where the first Pinyin syllable ends.',
   },
   {
-    type: 'pinyin-initials',
-    label: 'Pinyin initials',
-    description: 'Shows only the opening sound of each pinyin syllable.',
+    type: 'reveal-letter',
+    label: 'Reveal a letter',
+    description: 'Shows one unresolved letter and its position.',
   },
   {
     type: 'broad-meaning',
     label: 'Broad meaning',
     description: 'Shows a curated English meaning clue.',
-  },
-  {
-    type: 'reveal-first-character',
-    label: 'Reveal first character',
-    description: 'Shows the answer’s first Simplified Chinese character.',
   },
 ]);
 
@@ -61,19 +56,20 @@ export function getBoardHintUse(assistance, boardIndex, type) {
 
 export function formatHintPayload(language, type, payload) {
   if (language === 'zh') {
-    if (type === 'tone-pattern') {
-      const tones = Array.isArray(payload) ? payload : [];
-      if (tones.length !== 2 || tones.some((tone) => !['1', '2', '3', '4', '5'].includes(String(tone)))) return '';
-      const labels = tones.map((tone) => String(tone) === '5' ? 'neutral tone' : `tone ${tone}`);
-      return `Tone pattern: ${labels.join(' + ')}`;
+    if (type === 'syllable-boundary') {
+      const boundary = Number(payload);
+      return Number.isInteger(boundary) && boundary > 0
+        ? `Syllable boundary: after letter ${boundary}`
+        : '';
     }
-    if (type === 'pinyin-initials') {
-      const initials = Array.isArray(payload) ? payload : [];
-      if (initials.length !== 2 || initials.some((initial) => typeof initial !== 'string' || !initial)) return '';
-      return `Pinyin initials: ${initials.map((initial) => initial === '∅' ? 'no initial' : `${initial}…`).join(' · ')}`;
+    if (type === 'reveal-letter') {
+      const index = Number(payload?.index);
+      const letter = typeof payload?.letter === 'string' ? payload.letter : '';
+      return Number.isInteger(index) && index >= 0 && /^[a-z]$/iu.test(letter)
+        ? `Letter hint: ${letter.toUpperCase()} in position ${index + 1}`
+        : '';
     }
     if (type === 'broad-meaning') return payload ? `Meaning: ${String(payload)}` : '';
-    if (type === 'reveal-first-character') return payload ? `First character: ${String(payload)}` : '';
     return '';
   }
   if (type === 'part-of-speech' || type === 'semantic-category') {

@@ -16,6 +16,7 @@ import { getGameLanguageConfig } from './gameLanguageConfig.js';
 import { expandHangulToJamoUnits, isHangulSyllable } from './jamo.js';
 import { PINYIN_PUZZLE_VARIANT } from './chineseLexicon.js';
 import { parseChinesePinyinInput } from './pinyin.js';
+import { isValidChinesePinyinGuessKey } from './zhPinyinGuessKeys.generated.js';
 
 const DEFAULT_MAX_GUESSES = 9;
 
@@ -103,8 +104,7 @@ export function validateGuessForGame(state: GameState, guess: string): GameGuess
                 error: `Guess must be ${state.wordLength} letters.`,
             };
         }
-        const config = getGameLanguageConfig(state.language, state.wordLength, state.puzzleVariant);
-        if (!config.guessWords.has(parsed.key)) {
+        if (!isValidChinesePinyinGuessKey(parsed.key, state.wordLength)) {
             return { valid: false, code: 'NOT_IN_LIST', error: 'Not in the Pinyin word list.' };
         }
         return { valid: true, normalizedGuess: parsed.key };

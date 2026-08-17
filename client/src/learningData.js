@@ -66,6 +66,7 @@ export function buildLearningEvent(type, context, details = {}) {
     occurredAt: Number.isFinite(details.occurredAt) ? details.occurredAt : Date.now(),
     dateKey: context.dateKey,
     language: context.language,
+    ...(context.puzzleVariant ? { puzzleVariant: context.puzzleVariant } : {}),
     mode: context.mode,
     roundId: context.roundId,
     ...(Number.isFinite(context.roundStartedAt) ? { roundStartedAt: context.roundStartedAt } : {}),

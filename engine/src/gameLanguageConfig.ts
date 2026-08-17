@@ -6,7 +6,6 @@ import {
     zhGuessWordsSet,
 } from './chineseLexicon.js';
 import { KO_ANSWER_WORDS, koGuessWordsSet } from './koreanLexicon.js';
-import { ZH_PINYIN_GUESS_KEYS_BY_LENGTH } from './zhPinyinGuessKeys.generated.js';
 
 const EMPTY_WORDS: readonly string[] = Object.freeze([]);
 const EMPTY_WORD_SET: ReadonlySet<string> = new Set();
@@ -49,7 +48,6 @@ export function getGameLanguageConfig(
     if (language === 'zh' && puzzleVariant === PINYIN_PUZZLE_VARIANT && wordLength !== undefined) {
         const existing = PINYIN_CONFIGS.get(wordLength);
         if (existing) return existing;
-        const guessKeys = ZH_PINYIN_GUESS_KEYS_BY_LENGTH[wordLength] ?? [];
         const config: LanguageConfig = {
             wordLength,
             maxGuesses: 9,
@@ -58,7 +56,7 @@ export function getGameLanguageConfig(
             answerWords: CHINESE_PINYIN_PUZZLE_ANSWERS
                 .filter((answer) => answer.length === wordLength)
                 .map((answer) => answer.key),
-            guessWords: new Set(guessKeys),
+            guessWords: EMPTY_WORD_SET,
         };
         PINYIN_CONFIGS.set(wordLength, config);
         return config;

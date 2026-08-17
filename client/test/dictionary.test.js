@@ -60,6 +60,28 @@ test('Chinese dictionary eligibility hides unsolved targets until game over', ()
   assert.deepEqual(getDictionaryEligibleWords({ ...state, gameOver: true }), ['学校', '学生', '老师', '朋友', '工作']);
 });
 
+test('Pinyin dictionary and learning identity use targetId without exposing guesses or unsolved targets', () => {
+  const state = {
+    language: 'zh',
+    puzzleVariant: 'pinyin-latin-v2',
+    gameOver: false,
+    boards: [
+      { targetWord: 'xuesheng', targetId: '学生', guesses: ['xuesheng'], solved: true },
+      { targetWord: 'laoshi', targetId: '老师', guesses: ['xuesheng'], solved: false },
+      { targetWord: 'pengyou', targetId: '朋友', guesses: ['xuesheng'], solved: false },
+      { targetWord: 'gongzuo', targetId: '工作', guesses: ['xuesheng'], solved: false },
+    ],
+  };
+
+  assert.deepEqual(getDictionaryEligibleWords(state), ['学生']);
+  assert.equal(getDictionaryEligibleWords(state).includes('xuesheng'), false);
+  assert.deepEqual(
+    getDictionaryEligibleWords({ ...state, gameOver: true }),
+    ['学生', '老师', '朋友', '工作'],
+  );
+  assert.equal(getDefaultDictionaryWord(state, ['学生']), '学生');
+});
+
 test('explicit nearby suggestions are eligible without exposing unrelated answers', () => {
   const eligible = getDictionaryEligibleWords(createState(), entries, ['기관']);
   assert.deepEqual(eligible, ['기차', '학교', '기관']);

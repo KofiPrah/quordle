@@ -53,6 +53,19 @@ test('stable learning event IDs are deterministic UUIDs', () => {
   assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 });
 
+test('Chinese Pinyin learning and completion events retain the gameplay variant', () => {
+  const event = buildLearningEvent('round_completed', {
+    dateKey: '2026-08-17',
+    language: 'zh',
+    puzzleVariant: 'pinyin-latin-v2',
+    mode: 'practice',
+    roundId: 'practice:round-123:zh:pinyin-latin-v2',
+  }, { eventId: 'complete' });
+
+  assert.equal(event.puzzleVariant, 'pinyin-latin-v2');
+  assert.equal(event.roundId, 'practice:round-123:zh:pinyin-latin-v2');
+});
+
 test('one-time view tracking rejects rerender duplicates', () => {
   const tracker = createOneTimeEventTracker();
   assert.equal(tracker.claim('review:기관'), true);
