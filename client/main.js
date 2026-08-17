@@ -79,7 +79,9 @@ import {
   getClientGameStorageKey,
   getClientRoundId,
   isChineseSubmissionConfirmed,
+  reconcileChineseSubmissionAgainstState,
   rejectChineseSubmission,
+  rejectChineseSubmissionFromAuthoritativeError,
   updateChineseInput,
   withChinesePuzzleVariant,
 } from "./src/chineseInput.js";
@@ -425,18 +427,27 @@ function clearGuessRequestTimeout() {
   guessRequestTimeout = null;
 }
 
-function rejectPendingChineseSubmission(message) {
+function rejectPendingChineseSubmission(message, options = {}) {
+  const nextState = options.authoritative === true
+    ? rejectChineseSubmissionFromAuthoritativeError(chineseInputState, message)
+    : rejectChineseSubmission(chineseInputState, message, options);
+  if (nextState === chineseInputState) return false;
   clearGuessRequestTimeout();
-  chineseInputState = rejectChineseSubmission(chineseInputState, message);
+  chineseInputState = nextState;
   syncChineseGuessState();
   persistChineseDraft();
+  return true;
 }
 
 function startGuessRequestTimeout() {
   clearGuessRequestTimeout();
   guessRequestTimeout = setTimeout(() => {
     if (!chineseInputState.pendingSubmission) return;
-    rejectPendingChineseSubmission('The guess response timed out. Your Pinyin draft was preserved.');
+    rejectPendingChineseSubmission(
+      'The guess response timed out. Your Pinyin draft was preserved.',
+      { retainSubmissionFingerprint: true },
+    );
+    joinCurrentDailyRoom();
     setMessageFeedback(chineseInputState.error, 'network-error');
     renderApp();
     setupKeyboardListeners();
@@ -735,7 +746,10 @@ function connectWebSocket() {
   ws.onclose = () => {
     console.log('WebSocket disconnected');
     if (currentLanguage === 'zh' && chineseInputState.pendingSubmission) {
-      rejectPendingChineseSubmission('Connection lost before the guess was confirmed.');
+      rejectPendingChineseSubmission(
+        'Connection lost before the guess was confirmed.',
+        { retainSubmissionFingerprint: true },
+      );
       renderApp();
       setupKeyboardListeners();
     }
@@ -771,12 +785,14 @@ function handleServerMessage(message) {
           console.warn('Ignoring invalid STATE payload from server');
           break;
         }
-        const preserveChineseDraft = nextLanguage === 'zh'
-          && chineseInputState.pendingSubmission
-          && !isChineseSubmissionConfirmed(chineseInputState, normalizedState);
-        if (nextLanguage === 'zh' && chineseInputState.pendingSubmission && !preserveChineseDraft) {
-          clearGuessRequestTimeout();
-          chineseInputState = confirmChineseSubmission(chineseInputState);
+        const chineseReconciliation = nextLanguage === 'zh'
+          ? reconcileChineseSubmissionAgainstState(chineseInputState, normalizedState)
+          : { state: chineseInputState, status: 'none' };
+        const preserveChineseDraft = chineseReconciliation.status === 'unconfirmed'
+          || chineseReconciliation.status === 'not-confirmed';
+        if (chineseReconciliation.status === 'confirmed') clearGuessRequestTimeout();
+        if (chineseReconciliation.state !== chineseInputState) {
+          chineseInputState = chineseReconciliation.state;
           persistChineseDraft();
         }
         initialStateApplied = true;
@@ -838,8 +854,11 @@ function handleServerMessage(message) {
         if (activeOverlay === OVERLAY_HINT) focusActiveOverlay();
         break;
       }
-      if (currentLanguage === 'zh' && chineseInputState.pendingSubmission) {
-        rejectPendingChineseSubmission(message.message || 'The guess was not accepted.');
+      if (currentLanguage === 'zh') {
+        rejectPendingChineseSubmission(
+          message.message || 'The guess was not accepted.',
+          { authoritative: true },
+        );
       }
       setMessageFeedback(message.message, 'server-error');
       renderApp();
@@ -3609,7 +3628,9 @@ async function submitChineseGuessWithPersistence(submission) {
 
     const result = await serverSubmitGuess(submission.sourceText);
     if (!result.ok) {
-      rejectPendingChineseSubmission(result.error);
+      rejectPendingChineseSubmission(result.error, {
+        retainSubmissionFingerprint: result.code === 'NETWORK_ERROR',
+      });
       setMessageFeedback(result.error, result.code === 'NETWORK_ERROR' ? 'network-error' : 'server-error');
       renderApp();
       setupKeyboardListeners();

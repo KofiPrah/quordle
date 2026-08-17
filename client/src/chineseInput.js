@@ -16,6 +16,7 @@ export function createChineseInputState() {
     validationError: '',
     pendingSubmission: false,
     submissionGuessCount: null,
+    submissionFingerprint: null,
     error: '',
   };
 }
@@ -61,6 +62,7 @@ export function updateChineseInput(state, value, options = {}) {
     validationError,
     pendingSubmission: false,
     submissionGuessCount: null,
+    submissionFingerprint: null,
     error: '',
   };
 }
@@ -76,6 +78,15 @@ export function backspaceChineseInput(state, options = {}) {
 
 export function beginChineseSubmission(state, guessCount) {
   if (state?.pendingSubmission) return { state, submission: null };
+  if (hasChineseSubmissionAwaitingConfirmation(state)) {
+    return {
+      state: {
+        ...state,
+        error: 'Checking the previous guess with the server before retrying.',
+      },
+      submission: null,
+    };
+  }
   if (state?.validationStatus !== 'valid') {
     return {
       state: {
@@ -90,6 +101,10 @@ export function beginChineseSubmission(state, guessCount) {
     ...state,
     pendingSubmission: true,
     submissionGuessCount: Number.isInteger(guessCount) ? guessCount : 0,
+    submissionFingerprint: {
+      normalizedText: state.normalizedText,
+      guessCount: Number.isInteger(guessCount) ? guessCount : 0,
+    },
     error: '',
   };
   return {
@@ -101,25 +116,59 @@ export function beginChineseSubmission(state, guessCount) {
   };
 }
 
-export function rejectChineseSubmission(state, error) {
+export function rejectChineseSubmission(state, error, options = {}) {
   return {
     ...state,
     pendingSubmission: false,
     submissionGuessCount: null,
+    submissionFingerprint: options.retainSubmissionFingerprint === true
+      ? state?.submissionFingerprint ?? null
+      : null,
     error: String(error || 'The guess was not accepted.'),
   };
+}
+
+export function rejectChineseSubmissionFromAuthoritativeError(state, error) {
+  if (!hasChineseSubmissionAwaitingConfirmation(state)) return state;
+  return rejectChineseSubmission(state, error);
 }
 
 export function confirmChineseSubmission() {
   return createChineseInputState();
 }
 
+export function hasChineseSubmissionAwaitingConfirmation(state) {
+  const fingerprint = state?.submissionFingerprint;
+  return typeof fingerprint?.normalizedText === 'string'
+    && fingerprint.normalizedText.length > 0
+    && Number.isInteger(fingerprint.guessCount);
+}
+
 export function isChineseSubmissionConfirmed(state, gameState) {
-  if (!state?.pendingSubmission || !Number.isInteger(state.submissionGuessCount)) return false;
-  if (!Number.isInteger(gameState?.guessCount) || gameState.guessCount <= state.submissionGuessCount) return false;
+  if (!hasChineseSubmissionAwaitingConfirmation(state)) return false;
+  const { normalizedText, guessCount } = state.submissionFingerprint;
+  if (!Number.isInteger(gameState?.guessCount) || gameState.guessCount <= guessCount) return false;
   return gameState.boards?.some((board) => (
-    board?.guesses?.[state.submissionGuessCount] === state.normalizedText
+    board?.guesses?.[guessCount] === normalizedText
   )) ?? false;
+}
+
+export function reconcileChineseSubmissionAgainstState(state, gameState) {
+  if (!hasChineseSubmissionAwaitingConfirmation(state)) return { state, status: 'none' };
+  if (isChineseSubmissionConfirmed(state, gameState)) {
+    return { state: confirmChineseSubmission(state), status: 'confirmed' };
+  }
+  if (!state.pendingSubmission && Number.isInteger(gameState?.guessCount) && Array.isArray(gameState?.boards)) {
+    return {
+      state: {
+        ...state,
+        submissionGuessCount: null,
+        submissionFingerprint: null,
+      },
+      status: 'not-confirmed',
+    };
+  }
+  return { state, status: 'unconfirmed' };
 }
 
 export function createChineseGuessKeyLoader(loadShard) {

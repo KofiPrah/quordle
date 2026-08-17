@@ -101,6 +101,73 @@ test('server and network rejection release pending state without changing either
   }
 });
 
+test('transport failure retains a late-confirmation fingerprint while allowing an intentional retry', () => {
+  const started = chineseInput.beginChineseSubmission?.(update('jie3 jie3', 6), 2);
+  const disconnected = chineseInput.rejectChineseSubmission?.(
+    started.state,
+    'Network unavailable.',
+    { retainSubmissionFingerprint: true },
+  );
+
+  assert.equal(disconnected?.pendingSubmission, false);
+  assert.equal(disconnected?.sourceText, 'jie3 jie3');
+  assert.equal(disconnected?.normalizedText, 'jiejie');
+  assert.deepEqual(disconnected?.submissionFingerprint, {
+    normalizedText: 'jiejie',
+    guessCount: 2,
+  });
+  assert.equal(chineseInput.beginChineseSubmission?.(disconnected, 2).submission, null);
+
+  const notAcceptedYet = {
+    guessCount: 2,
+    boards: [{ guesses: ['laoshi', 'gongsi'] }],
+  };
+  const retryable = chineseInput.reconcileChineseSubmissionAgainstState?.(disconnected, notAcceptedYet);
+  assert.equal(retryable?.status, 'not-confirmed');
+  assert.equal(retryable?.state.sourceText, 'jie3 jie3');
+  assert.equal(retryable?.state.submissionFingerprint, null);
+  assert.ok(chineseInput.beginChineseSubmission?.(retryable.state, 2).submission);
+
+  const acceptedLate = {
+    guessCount: 3,
+    boards: [{ guesses: ['laoshi', 'gongsi', 'jiejie'] }],
+  };
+  const confirmed = chineseInput.reconcileChineseSubmissionAgainstState?.(disconnected, acceptedLate);
+  assert.equal(confirmed?.status, 'confirmed');
+  assert.equal(confirmed?.state.sourceText, '');
+});
+
+test('known authoritative rejection discards late-confirmation metadata', () => {
+  const started = chineseInput.beginChineseSubmission?.(update('jie3 jie3', 6), 2);
+  const disconnected = chineseInput.rejectChineseSubmission?.(
+    started.state,
+    'Network unavailable.',
+    { retainSubmissionFingerprint: true },
+  );
+  const rejected = chineseInput.rejectChineseSubmission?.(disconnected, 'Not accepted.');
+
+  assert.equal(rejected?.sourceText, 'jie3 jie3');
+  assert.equal(rejected?.pendingSubmission, false);
+  assert.equal(rejected?.submissionFingerprint, null);
+});
+
+test('a late authoritative server error discards transport confirmation metadata', () => {
+  const started = chineseInput.beginChineseSubmission?.(update('jie3 jie3', 6), 2);
+  const disconnected = chineseInput.rejectChineseSubmission?.(
+    started.state,
+    'Network unavailable.',
+    { retainSubmissionFingerprint: true },
+  );
+  const rejected = chineseInput.rejectChineseSubmissionFromAuthoritativeError?.(
+    disconnected,
+    'Not accepted.',
+  );
+
+  assert.equal(disconnected.pendingSubmission, false);
+  assert.equal(rejected?.sourceText, 'jie3 jie3');
+  assert.equal(rejected?.submissionFingerprint, null);
+});
+
 test('a duplicate Enter while pending is ignored and confirmation is the only path that clears the draft', () => {
   const initial = update('jie3 jie3', 6);
   const started = chineseInput.beginChineseSubmission?.(initial, 0);
