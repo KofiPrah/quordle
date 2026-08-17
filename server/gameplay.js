@@ -50,15 +50,77 @@ export function getNewlySolvedTargetIds(previousGameState, nextGameState) {
   return targets;
 }
 
-export function transitionPlayerGuess(playerState, sourceGuess, validators = {}, timestamp = Date.now()) {
+function isPinyinPlayer(playerState) {
+  return playerState?.language === 'zh'
+    && playerState?.puzzleVariant === PINYIN_PUZZLE_VARIANT;
+}
+
+export function transitionPlayerGuess(
+  playerState,
+  sourceGuess,
+  validators = {},
+  timestamp = Date.now(),
+  submissionId,
+) {
   const previousGameState = playerState.gameState;
+  const pinyinPlayer = isPinyinPlayer(playerState);
+  if (pinyinPlayer && (typeof submissionId !== 'string' || submissionId.length === 0 || submissionId.length > 128)) {
+    return {
+      ok: false,
+      code: 'INVALID_SUBMISSION_ID',
+      error: 'A valid submissionId is required for Pinyin guesses.',
+    };
+  }
   const validation = validateDailyGuess(previousGameState, sourceGuess, validators);
-  if (!validation.valid) return { ok: false, ...validation };
+  const previousReceipt = pinyinPlayer ? playerState.pinyinSubmissionReceipt : null;
+  if (previousReceipt && previousReceipt.submissionId === submissionId) {
+    if (!validation.valid || validation.normalizedGuess !== previousReceipt.normalizedGuess) {
+      return {
+        ok: false,
+        code: 'SUBMISSION_ID_REUSED',
+        error: 'submissionId was already used for a different Pinyin guess.',
+        submissionId,
+      };
+    }
+    return {
+      ok: true,
+      idempotent: true,
+      submissionId,
+      normalizedGuess: previousReceipt.normalizedGuess,
+      previousGameState,
+      gameState: previousGameState,
+      newlySolvedTargetIds: [],
+      justCompleted: false,
+      playerState,
+    };
+  }
+  if (!validation.valid) {
+    return {
+      ok: false,
+      ...validation,
+      ...(pinyinPlayer ? { submissionId } : {}),
+    };
+  }
+  if (pinyinPlayer && previousGameState.gameOver) {
+    return {
+      ok: false,
+      code: 'GAME_OVER',
+      error: 'Game already over',
+      submissionId,
+    };
+  }
 
   const gameState = applyValidatedGuess(previousGameState, validation.normalizedGuess);
   const justCompleted = !previousGameState.gameOver && gameState.gameOver;
+  const pinyinSubmissionReceipt = pinyinPlayer ? {
+    submissionId,
+    normalizedGuess: validation.normalizedGuess,
+    guessIndex: previousGameState.guessCount,
+  } : null;
   return {
     ok: true,
+    idempotent: false,
+    ...(pinyinPlayer ? { submissionId } : {}),
     normalizedGuess: validation.normalizedGuess,
     previousGameState,
     gameState,
@@ -67,6 +129,7 @@ export function transitionPlayerGuess(playerState, sourceGuess, validators = {},
     playerState: {
       ...playerState,
       gameState,
+      ...(pinyinSubmissionReceipt ? { pinyinSubmissionReceipt } : {}),
       updatedAt: timestamp,
       finishedAt: justCompleted && !playerState.finishedAt ? timestamp : playerState.finishedAt,
     },

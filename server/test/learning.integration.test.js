@@ -176,6 +176,7 @@ test('learning APIs authenticate, persist Saved Words, ingest practice events, a
         language: 'zh',
         puzzleVariant: 'pinyin-latin-v2',
         guess: 'tai yang',
+        submissionId: randomUUID(),
       }),
     });
     assert.equal(pinyinGuess.status, 200);
@@ -298,13 +299,15 @@ test('learning APIs authenticate, persist Saved Words, ingest practice events, a
 
     let finished;
     do {
-      finished = await (await request('/api/game/guess', {
+      const guessResponse = await request('/api/game/guess', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           roomId: 'learning-room', userId: 'learning-player', dateKey: '2026-08-06', language: 'ko', guess: word,
         }),
-      })).json();
+      });
+      finished = await guessResponse.json();
+      assert.equal(guessResponse.status, 200, JSON.stringify(finished));
     } while (!finished.gameState.gameOver);
 
     const wsClient = await connectSocket(`ws://127.0.0.1:${port}/ws`);

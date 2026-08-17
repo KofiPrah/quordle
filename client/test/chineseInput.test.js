@@ -23,6 +23,8 @@ const parseInput = (sourceText) => {
 
 const normalizeInput = (sourceText) => parsedKeys.get(sourceText) ?? '';
 
+const submissionIdFactory = (...ids) => () => ids.shift();
+
 function update(sourceText, wordLength, keys = guessKeys) {
   return chineseInput.updateChineseInput(
     chineseInput.createChineseInputState(),
@@ -87,9 +89,14 @@ test('known local rejection never creates a submission and preserves the exact s
 
 test('server and network rejection release pending state without changing either draft representation', () => {
   const initial = update('xué shēng', 8);
-  const started = chineseInput.beginChineseSubmission?.(initial, 2);
+  const createSubmissionId = submissionIdFactory('submission-1');
+  const started = chineseInput.beginChineseSubmission?.(initial, 2, { createSubmissionId });
 
-  assert.deepEqual(started?.submission, { sourceText: 'xué shēng', normalizedText: 'xuesheng' });
+  assert.deepEqual(started?.submission, {
+    sourceText: 'xué shēng',
+    normalizedText: 'xuesheng',
+    submissionId: 'submission-1',
+  });
   assert.equal(started?.state.pendingSubmission, true);
 
   for (const message of ['Not in the Pinyin word list.', 'Network unavailable.']) {
@@ -101,8 +108,13 @@ test('server and network rejection release pending state without changing either
   }
 });
 
-test('transport failure retains a late-confirmation fingerprint while allowing an intentional retry', () => {
-  const started = chineseInput.beginChineseSubmission?.(update('jie3 jie3', 6), 2);
+test('transport failure retains a correlated receipt through stale state until late confirmation', () => {
+  const createSubmissionId = submissionIdFactory('submission-1');
+  const started = chineseInput.beginChineseSubmission?.(
+    update('jie3 jie3', 6),
+    2,
+    { createSubmissionId },
+  );
   const disconnected = chineseInput.rejectChineseSubmission?.(
     started.state,
     'Network unavailable.',
@@ -113,32 +125,84 @@ test('transport failure retains a late-confirmation fingerprint while allowing a
   assert.equal(disconnected?.sourceText, 'jie3 jie3');
   assert.equal(disconnected?.normalizedText, 'jiejie');
   assert.deepEqual(disconnected?.submissionFingerprint, {
+    submissionId: 'submission-1',
     normalizedText: 'jiejie',
     guessCount: 2,
   });
-  assert.equal(chineseInput.beginChineseSubmission?.(disconnected, 2).submission, null);
 
-  const notAcceptedYet = {
-    guessCount: 2,
-    boards: [{ guesses: ['laoshi', 'gongsi'] }],
+  const staleState = {
+    pinyinSubmissionReceipt: {
+      submissionId: 'older-submission',
+      normalizedGuess: 'gongsi',
+      guessIndex: 1,
+    },
+    gameState: {
+      guessCount: 2,
+      boards: [{ guesses: ['laoshi', 'gongsi'] }],
+    },
   };
-  const retryable = chineseInput.reconcileChineseSubmissionAgainstState?.(disconnected, notAcceptedYet);
-  assert.equal(retryable?.status, 'not-confirmed');
-  assert.equal(retryable?.state.sourceText, 'jie3 jie3');
-  assert.equal(retryable?.state.submissionFingerprint, null);
-  assert.ok(chineseInput.beginChineseSubmission?.(retryable.state, 2).submission);
+  const unresolved = chineseInput.reconcileChineseSubmissionAgainstState?.(disconnected, staleState);
+  assert.equal(unresolved?.status, 'unconfirmed');
+  assert.deepEqual(unresolved?.state.submissionFingerprint, disconnected.submissionFingerprint);
 
   const acceptedLate = {
-    guessCount: 3,
-    boards: [{ guesses: ['laoshi', 'gongsi', 'jiejie'] }],
+    pinyinSubmissionReceipt: {
+      submissionId: 'submission-1',
+      normalizedGuess: 'jiejie',
+      guessIndex: 2,
+    },
+    gameState: {
+      guessCount: 3,
+      boards: [{ guesses: ['laoshi', 'gongsi', 'jiejie'] }],
+    },
   };
-  const confirmed = chineseInput.reconcileChineseSubmissionAgainstState?.(disconnected, acceptedLate);
+  const confirmed = chineseInput.reconcileChineseSubmissionAgainstState?.(unresolved.state, acceptedLate);
   assert.equal(confirmed?.status, 'confirmed');
   assert.equal(confirmed?.state.sourceText, '');
 });
 
+test('same-draft retry reuses its submission ID and a different draft stays blocked while unresolved', () => {
+  const createSubmissionId = submissionIdFactory('submission-1');
+  const started = chineseInput.beginChineseSubmission?.(
+    update('jie3 jie3', 6),
+    2,
+    { createSubmissionId },
+  );
+  const disconnected = chineseInput.rejectChineseSubmission?.(
+    started.state,
+    'Network unavailable.',
+    { retainSubmissionFingerprint: true },
+  );
+
+  const retry = chineseInput.beginChineseSubmission?.(disconnected, 2, { createSubmissionId });
+  assert.equal(retry?.state.pendingSubmission, true);
+  assert.equal(retry?.submission.submissionId, 'submission-1');
+
+  const released = chineseInput.rejectChineseSubmission?.(
+    retry.state,
+    'Network unavailable.',
+    { retainSubmissionFingerprint: true },
+  );
+  const differentDraft = chineseInput.updateChineseInput?.(released, 'mi miao', {
+    wordLength: 6,
+    guessKeys,
+    parseInput,
+    normalizeInput,
+  });
+  const blocked = chineseInput.beginChineseSubmission?.(differentDraft, 2, { createSubmissionId });
+  assert.equal(differentDraft?.sourceText, 'mi miao');
+  assert.deepEqual(differentDraft?.submissionFingerprint, released.submissionFingerprint);
+  assert.equal(blocked?.submission, null);
+  assert.match(blocked?.state.error ?? '', /previous guess/i);
+});
+
 test('known authoritative rejection discards late-confirmation metadata', () => {
-  const started = chineseInput.beginChineseSubmission?.(update('jie3 jie3', 6), 2);
+  const createSubmissionId = submissionIdFactory('submission-1');
+  const started = chineseInput.beginChineseSubmission?.(
+    update('jie3 jie3', 6),
+    2,
+    { createSubmissionId },
+  );
   const disconnected = chineseInput.rejectChineseSubmission?.(
     started.state,
     'Network unavailable.',
@@ -151,21 +215,56 @@ test('known authoritative rejection discards late-confirmation metadata', () => 
   assert.equal(rejected?.submissionFingerprint, null);
 });
 
-test('a late authoritative server error discards transport confirmation metadata', () => {
-  const started = chineseInput.beginChineseSubmission?.(update('jie3 jie3', 6), 2);
+test('only a correlated authoritative server error releases retained submission metadata', () => {
+  const createSubmissionId = submissionIdFactory('submission-1', 'submission-2');
+  const started = chineseInput.beginChineseSubmission?.(
+    update('jie3 jie3', 6),
+    2,
+    { createSubmissionId },
+  );
   const disconnected = chineseInput.rejectChineseSubmission?.(
     started.state,
     'Network unavailable.',
     { retainSubmissionFingerprint: true },
   );
-  const rejected = chineseInput.rejectChineseSubmissionFromAuthoritativeError?.(
+  const unrelated = chineseInput.rejectChineseSubmissionFromAuthoritativeError?.(
     disconnected,
+    'Unrelated JOIN error.',
+    'unrelated-submission',
+  );
+  const rejected = chineseInput.rejectChineseSubmissionFromAuthoritativeError?.(
+    unrelated,
     'Not accepted.',
+    'submission-1',
   );
 
   assert.equal(disconnected.pendingSubmission, false);
+  assert.equal(unrelated, disconnected);
   assert.equal(rejected?.sourceText, 'jie3 jie3');
   assert.equal(rejected?.submissionFingerprint, null);
+
+  const retry = chineseInput.beginChineseSubmission?.(rejected, 2, { createSubmissionId });
+  assert.equal(retry?.submission.submissionId, 'submission-2');
+});
+
+test('REST failures distinguish correlated rejection from ambiguous server failure', () => {
+  assert.deepEqual(chineseInput.getChineseSubmissionFailureOptions?.({
+    status: 400,
+    code: 'NOT_IN_LIST',
+    requestSubmissionId: 'submission-1',
+  }), {
+    authoritative: true,
+    submissionId: 'submission-1',
+  });
+  assert.deepEqual(chineseInput.getChineseSubmissionFailureOptions?.({
+    status: 500,
+    code: 'INTERNAL_ERROR',
+    requestSubmissionId: 'submission-1',
+  }), { retainSubmissionFingerprint: true });
+  assert.deepEqual(chineseInput.getChineseSubmissionFailureOptions?.({
+    code: 'NETWORK_ERROR',
+    requestSubmissionId: 'submission-1',
+  }), { retainSubmissionFingerprint: true });
 });
 
 test('a duplicate Enter while pending is ignored and confirmation is the only path that clears the draft', () => {
@@ -179,17 +278,42 @@ test('a duplicate Enter while pending is ignored and confirmation is the only pa
 });
 
 test('authoritative confirmation matches the submitted normalized guess and later guess count', () => {
-  const started = chineseInput.beginChineseSubmission?.(update('jie3 jie3', 6), 0).state;
+  const createSubmissionId = submissionIdFactory('submission-1');
+  const started = chineseInput.beginChineseSubmission?.(
+    update('jie3 jie3', 6),
+    0,
+    { createSubmissionId },
+  ).state;
   const confirmedState = {
-    guessCount: 1,
-    boards: [{ guesses: ['jiejie'] }, { guesses: ['jiejie'] }, { guesses: ['jiejie'] }, { guesses: ['jiejie'] }],
+    pinyinSubmissionReceipt: {
+      submissionId: 'submission-1',
+      normalizedGuess: 'jiejie',
+      guessIndex: 0,
+    },
+    gameState: {
+      guessCount: 1,
+      boards: [{ guesses: ['jiejie'] }, { guesses: ['jiejie'] }, { guesses: ['jiejie'] }, { guesses: ['jiejie'] }],
+    },
   };
 
   assert.equal(chineseInput.isChineseSubmissionConfirmed?.(started, confirmedState), true);
-  assert.equal(chineseInput.isChineseSubmissionConfirmed?.(started, { ...confirmedState, guessCount: 0 }), false);
   assert.equal(chineseInput.isChineseSubmissionConfirmed?.(started, {
     ...confirmedState,
-    boards: confirmedState.boards.map(() => ({ guesses: ['gongsi'] })),
+    gameState: { ...confirmedState.gameState, guessCount: 0 },
+  }), false);
+  assert.equal(chineseInput.isChineseSubmissionConfirmed?.(started, {
+    ...confirmedState,
+    gameState: {
+      ...confirmedState.gameState,
+      boards: confirmedState.gameState.boards.map(() => ({ guesses: ['gongsi'] })),
+    },
+  }), false);
+  assert.equal(chineseInput.isChineseSubmissionConfirmed?.(started, {
+    ...confirmedState,
+    pinyinSubmissionReceipt: {
+      ...confirmedState.pinyinSubmissionReceipt,
+      submissionId: 'unrelated-submission',
+    },
   }), false);
 });
 

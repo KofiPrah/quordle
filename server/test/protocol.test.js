@@ -55,7 +55,7 @@ test('Chinese protocol guards require the exact Pinyin puzzle version', () => {
     language: 'zh',
     puzzleVariant: 'pinyin-latin-v2',
   };
-  const guess = { ...join, type: 'GUESS', guess: 'qu nian' };
+  const guess = { ...join, type: 'GUESS', guess: 'qu nian', submissionId: 'submission-1' };
   const hint = { ...join, type: 'HINT', boardIndex: 0, hintType: 'syllable-boundary' };
   const invalidAttempt = { ...join, type: 'INVALID_GUESS_ATTEMPT', guess: 'qu/nian', attemptId: 'attempt' };
 
@@ -65,6 +65,8 @@ test('Chinese protocol guards require the exact Pinyin puzzle version', () => {
   assert.equal(isInvalidGuessAttemptMessage(invalidAttempt), true);
   assert.equal(isJoinMessage({ ...join, puzzleVariant: undefined }), false);
   assert.equal(isGuessMessage({ ...guess, puzzleVariant: 'hanzi-v1' }), false);
+  assert.equal(isGuessMessage({ ...guess, submissionId: undefined }), false);
+  assert.equal(isGuessMessage({ ...guess, language: 'ko', puzzleVariant: undefined, submissionId: undefined }), true);
   assert.equal(isHintMessage({ ...hint, puzzleVariant: undefined }), false);
   assert.equal(isInvalidGuessAttemptMessage({ ...invalidAttempt, puzzleVariant: undefined }), false);
   assert.equal(isJoinMessage({ ...join, language: 'ko', puzzleVariant: undefined }), true);
@@ -72,6 +74,8 @@ test('Chinese protocol guards require the exact Pinyin puzzle version', () => {
   assert.equal(ErrorCodes.INVALID_FORMAT, 'INVALID_FORMAT');
   assert.equal(ErrorCodes.INVALID_LENGTH, 'INVALID_LENGTH');
   assert.equal(ErrorCodes.NOT_IN_LIST, 'NOT_IN_LIST');
+  assert.equal(ErrorCodes.INVALID_SUBMISSION_ID, 'INVALID_SUBMISSION_ID');
+  assert.equal(ErrorCodes.SUBMISSION_ID_REUSED, 'SUBMISSION_ID_REUSED');
   assert.equal(makeRoomKey('room', '2026-08-17', 'zh', 'pinyin-latin-v2'), 'room:2026-08-17:zh:pinyin-latin-v2');
   assert.equal(
     makePlayerKey('room', '2026-08-17', 'player', 'zh', 'pinyin-latin-v2'),

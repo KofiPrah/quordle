@@ -66,6 +66,12 @@ export interface LeaderboardEntry {
     puzzleVariant?: PuzzleVariant;
 }
 
+export interface PinyinSubmissionReceipt {
+    submissionId: string;
+    normalizedGuess: string;
+    guessIndex: number;
+}
+
 /** Server-authoritative state for a single player */
 export interface PlayerState {
     visibleUserId: VisibleUserId;
@@ -76,6 +82,7 @@ export interface PlayerState {
     puzzleVariant?: PuzzleVariant;
     profile: UserProfile;
     gameState: GameState;
+    pinyinSubmissionReceipt?: PinyinSubmissionReceipt;
     createdAt: number;         // timestamp
     updatedAt: number;         // timestamp
     finishedAt: number | null; // timestamp when game completed
@@ -112,6 +119,7 @@ export interface GuessMessage {
     dateKey: DateKey;
     visibleUserId: VisibleUserId;
     guess: string;
+    submissionId?: string;
     language?: Language;
     puzzleVariant?: PuzzleVariant;
 }
@@ -178,6 +186,7 @@ export interface ErrorMessage {
     type: 'ERROR';
     code: string;
     message: string;
+    submissionId?: string;
 }
 
 /** Union of all server-to-client messages */
@@ -196,6 +205,8 @@ export const ErrorCodes = {
     INVALID_FORMAT: 'INVALID_FORMAT',
     INVALID_LENGTH: 'INVALID_LENGTH',
     NOT_IN_LIST: 'NOT_IN_LIST',
+    INVALID_SUBMISSION_ID: 'INVALID_SUBMISSION_ID',
+    SUBMISSION_ID_REUSED: 'SUBMISSION_ID_REUSED',
     UNSUPPORTED_PUZZLE_VERSION: 'UNSUPPORTED_PUZZLE_VERSION',
     INVALID_LANGUAGE: 'INVALID_LANGUAGE',
     INVALID_BOARD: 'INVALID_BOARD',
@@ -225,6 +236,11 @@ function hasSupportedPuzzleVersion(message: Record<string, unknown>): boolean {
     return message.language !== 'zh' || message.puzzleVariant === 'pinyin-latin-v2';
 }
 
+function hasPinyinSubmissionId(message: Record<string, unknown>): boolean {
+    return message.language !== 'zh'
+        || (typeof message.submissionId === 'string' && message.submissionId.length > 0);
+}
+
 export function isJoinMessage(msg: unknown): msg is JoinMessage {
     if (typeof msg !== 'object' || msg === null) return false;
     const m = msg as Record<string, unknown>;
@@ -246,6 +262,7 @@ export function isGuessMessage(msg: unknown): msg is GuessMessage {
         typeof m.dateKey === 'string' &&
         typeof m.visibleUserId === 'string' &&
         typeof m.guess === 'string' &&
+        hasPinyinSubmissionId(m) &&
         hasSupportedPuzzleVersion(m)
     );
 }

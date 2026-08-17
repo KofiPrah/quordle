@@ -28,7 +28,12 @@ export function getChineseInputValue(state) {
 export function updateChineseInput(state, value, options = {}) {
   if (state?.pendingSubmission) return state;
   const sourceText = String(value ?? '').slice(0, 64);
-  if (!sourceText) return createChineseInputState();
+  if (!sourceText) {
+    return {
+      ...createChineseInputState(),
+      submissionFingerprint: state?.submissionFingerprint ?? null,
+    };
+  }
 
   const wordLength = Number(options.wordLength);
   const parsed = typeof options.parseInput === 'function' ? options.parseInput(sourceText) : null;
@@ -62,7 +67,7 @@ export function updateChineseInput(state, value, options = {}) {
     validationError,
     pendingSubmission: false,
     submissionGuessCount: null,
-    submissionFingerprint: null,
+    submissionFingerprint: state?.submissionFingerprint ?? null,
     error: '',
   };
 }
@@ -76,9 +81,13 @@ export function backspaceChineseInput(state, options = {}) {
   return updateChineseInput(state, sourceText, options);
 }
 
-export function beginChineseSubmission(state, guessCount) {
+export function beginChineseSubmission(state, guessCount, options = {}) {
   if (state?.pendingSubmission) return { state, submission: null };
-  if (hasChineseSubmissionAwaitingConfirmation(state)) {
+  const guessIndex = Number.isInteger(guessCount) ? guessCount : 0;
+  const retainedFingerprint = hasChineseSubmissionAwaitingConfirmation(state)
+    ? state.submissionFingerprint
+    : null;
+  if (retainedFingerprint && retainedFingerprint.normalizedText !== state?.normalizedText) {
     return {
       state: {
         ...state,
@@ -97,13 +106,28 @@ export function beginChineseSubmission(state, guessCount) {
       submission: null,
     };
   }
+  const createSubmissionId = typeof options.createSubmissionId === 'function'
+    ? options.createSubmissionId
+    : () => globalThis.crypto?.randomUUID?.();
+  const submissionId = retainedFingerprint?.submissionId || createSubmissionId();
+  if (typeof submissionId !== 'string' || !submissionId) {
+    return {
+      state: {
+        ...state,
+        pendingSubmission: false,
+        error: 'Unable to create a Pinyin submission identifier.',
+      },
+      submission: null,
+    };
+  }
   const pendingState = {
     ...state,
     pendingSubmission: true,
-    submissionGuessCount: Number.isInteger(guessCount) ? guessCount : 0,
+    submissionGuessCount: retainedFingerprint?.guessCount ?? guessIndex,
     submissionFingerprint: {
+      submissionId,
       normalizedText: state.normalizedText,
-      guessCount: Number.isInteger(guessCount) ? guessCount : 0,
+      guessCount: retainedFingerprint?.guessCount ?? guessIndex,
     },
     error: '',
   };
@@ -112,6 +136,7 @@ export function beginChineseSubmission(state, guessCount) {
     submission: {
       sourceText: pendingState.sourceText,
       normalizedText: pendingState.normalizedText,
+      submissionId,
     },
   };
 }
@@ -128,9 +153,25 @@ export function rejectChineseSubmission(state, error, options = {}) {
   };
 }
 
-export function rejectChineseSubmissionFromAuthoritativeError(state, error) {
+export function rejectChineseSubmissionFromAuthoritativeError(state, error, submissionId) {
   if (!hasChineseSubmissionAwaitingConfirmation(state)) return state;
+  if (state.submissionFingerprint.submissionId !== submissionId) return state;
   return rejectChineseSubmission(state, error);
+}
+
+export function getChineseSubmissionFailureOptions({
+  status,
+  code,
+  requestSubmissionId,
+  responseSubmissionId,
+} = {}) {
+  if (code === 'NETWORK_ERROR' || !Number.isInteger(status) || status >= 500) {
+    return { retainSubmissionFingerprint: true };
+  }
+  return {
+    authoritative: true,
+    submissionId: responseSubmissionId || requestSubmissionId,
+  };
 }
 
 export function confirmChineseSubmission() {
@@ -141,32 +182,29 @@ export function hasChineseSubmissionAwaitingConfirmation(state) {
   const fingerprint = state?.submissionFingerprint;
   return typeof fingerprint?.normalizedText === 'string'
     && fingerprint.normalizedText.length > 0
+    && typeof fingerprint.submissionId === 'string'
+    && fingerprint.submissionId.length > 0
     && Number.isInteger(fingerprint.guessCount);
 }
 
-export function isChineseSubmissionConfirmed(state, gameState) {
+export function isChineseSubmissionConfirmed(state, playerState) {
   if (!hasChineseSubmissionAwaitingConfirmation(state)) return false;
-  const { normalizedText, guessCount } = state.submissionFingerprint;
+  const { submissionId, normalizedText, guessCount } = state.submissionFingerprint;
+  const receipt = playerState?.pinyinSubmissionReceipt;
+  if (receipt?.submissionId !== submissionId
+    || receipt.normalizedGuess !== normalizedText
+    || receipt.guessIndex !== guessCount) return false;
+  const gameState = playerState?.gameState;
   if (!Number.isInteger(gameState?.guessCount) || gameState.guessCount <= guessCount) return false;
   return gameState.boards?.some((board) => (
     board?.guesses?.[guessCount] === normalizedText
   )) ?? false;
 }
 
-export function reconcileChineseSubmissionAgainstState(state, gameState) {
+export function reconcileChineseSubmissionAgainstState(state, playerState) {
   if (!hasChineseSubmissionAwaitingConfirmation(state)) return { state, status: 'none' };
-  if (isChineseSubmissionConfirmed(state, gameState)) {
+  if (isChineseSubmissionConfirmed(state, playerState)) {
     return { state: confirmChineseSubmission(state), status: 'confirmed' };
-  }
-  if (!state.pendingSubmission && Number.isInteger(gameState?.guessCount) && Array.isArray(gameState?.boards)) {
-    return {
-      state: {
-        ...state,
-        submissionGuessCount: null,
-        submissionFingerprint: null,
-      },
-      status: 'not-confirmed',
-    };
   }
   return { state, status: 'unconfirmed' };
 }

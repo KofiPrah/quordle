@@ -66,12 +66,17 @@ function parseLanguage(value) {
   return { ok: false, language: null };
 }
 
-function gameplayError(code, message) {
-  return { code, error: message, message };
+function gameplayError(code, message, details = {}) {
+  return { code, error: message, message, ...details };
 }
 
 function sendWebSocketError(ws, error) {
-  ws.send(JSON.stringify({ type: 'ERROR', code: error.code, message: error.message || error.error }));
+  ws.send(JSON.stringify({
+    type: 'ERROR',
+    code: error.code,
+    message: error.message || error.error,
+    ...(error.submissionId ? { submissionId: error.submissionId } : {}),
+  }));
 }
 
 function parseGameplayRequest(language, puzzleVariant) {
@@ -656,6 +661,9 @@ const gameStateStore = {
         gameMode: player.mode,
         dateKey: player.dateKey,
         language: player.language || language,
+        ...(player.pinyinSubmissionReceipt
+          ? { pinyinSubmissionReceipt: player.pinyinSubmissionReceipt }
+          : {}),
         ...(player.puzzleVariant ? { puzzleVariant: player.puzzleVariant } : {}),
       };
     }
@@ -691,6 +699,9 @@ const gameStateStore = {
         ...player,
         gameState,
         language,
+        ...(state.pinyinSubmissionReceipt
+          ? { pinyinSubmissionReceipt: state.pinyinSubmissionReceipt }
+          : {}),
         ...(puzzleVariant ? { puzzleVariant } : {}),
         updatedAt: now,
         finishedAt: gameState.gameOver && !player.finishedAt ? now : player.finishedAt,
@@ -874,31 +885,59 @@ wss.on("connection", (ws, req) => {
         }
 
         case "GUESS": {
-          const { roomId, dateKey, visibleUserId, guess, language: guessLanguage, puzzleVariant: guessPuzzleVariant } = message;
+          const {
+            roomId,
+            dateKey,
+            visibleUserId,
+            guess,
+            submissionId,
+            language: guessLanguage,
+            puzzleVariant: guessPuzzleVariant,
+          } = message;
           const parsedLanguage = parseLanguage(guessLanguage);
           if (!parsedLanguage.ok) {
-            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_LANGUAGE', message: 'Unsupported language' }));
+            sendWebSocketError(ws, {
+              code: 'INVALID_LANGUAGE',
+              message: 'Unsupported language',
+              ...(submissionId ? { submissionId } : {}),
+            });
             return;
           }
           const language = parsedLanguage.language;
           const parsedVariant = parseGameplayRequest(language, guessPuzzleVariant);
           if (!parsedVariant.ok) {
-            sendWebSocketError(ws, parsedVariant);
+            sendWebSocketError(ws, { ...parsedVariant, ...(submissionId ? { submissionId } : {}) });
             return;
           }
           const puzzleVariant = parsedVariant.puzzleVariant;
           if (!roomId || !dateKey || !visibleUserId || !guess) {
-            ws.send(JSON.stringify({ type: 'ERROR', code: 'INVALID_MESSAGE', message: 'Missing required fields' }));
+            sendWebSocketError(ws, {
+              code: 'INVALID_MESSAGE',
+              message: 'Missing required fields',
+              ...(submissionId ? { submissionId } : {}),
+            });
+            return;
+          }
+          if (language === 'zh' && (typeof submissionId !== 'string' || !submissionId || submissionId.length > 128)) {
+            sendWebSocketError(ws, {
+              code: 'INVALID_SUBMISSION_ID',
+              message: 'A valid submissionId is required for Pinyin guesses.',
+              ...(typeof submissionId === 'string' && submissionId ? { submissionId } : {}),
+            });
             return;
           }
 
           const playerState = getPlayer(roomId, dateKey, visibleUserId, language, puzzleVariant);
           if (!playerState) {
-            ws.send(JSON.stringify({ type: 'ERROR', code: 'PLAYER_NOT_FOUND', message: 'Player not found. Send JOIN first.' }));
+            sendWebSocketError(ws, {
+              code: 'PLAYER_NOT_FOUND',
+              message: 'Player not found. Send JOIN first.',
+              ...(submissionId ? { submissionId } : {}),
+            });
             return;
           }
 
-          if (playerState.gameState.gameOver) {
+          if (language !== 'zh' && playerState.gameState.gameOver) {
             ws.send(JSON.stringify({ type: 'ERROR', code: 'GAME_OVER', message: 'Game already over' }));
             return;
           }
@@ -906,13 +945,15 @@ wss.on("connection", (ws, req) => {
           const transition = transitionPlayerGuess(playerState, guess, {
             isAcceptedEnglishGuess: (word) => englishGuessWords.has(word),
             isAcceptedKoreanGuess: isValidKoreanGuess,
-          });
+          }, Date.now(), submissionId);
           if (!transition.ok) {
-            await recordDailyInvalidGuess(
-              playerState,
-              guess,
-              UUID_RE.test(String(message.attemptId ?? '')) ? message.attemptId : crypto.randomUUID(),
-            );
+            if (!['INVALID_SUBMISSION_ID', 'SUBMISSION_ID_REUSED', 'GAME_OVER'].includes(transition.code)) {
+              await recordDailyInvalidGuess(
+                playerState,
+                guess,
+                UUID_RE.test(String(message.attemptId ?? '')) ? message.attemptId : crypto.randomUUID(),
+              );
+            }
             sendWebSocketError(ws, submissionError(language, transition));
             return;
           }
@@ -922,6 +963,10 @@ wss.on("connection", (ws, req) => {
             playerState: updatedPlayerState,
             normalizedGuess,
           } = transition;
+          if (transition.idempotent) {
+            ws.send(JSON.stringify({ type: 'STATE', playerState: updatedPlayerState }));
+            break;
+          }
           const newBoards = newGameState.boards;
           const newGuessCount = newGameState.guessCount;
           const newGameOver = newGameState.gameOver;
@@ -1782,6 +1827,9 @@ app.post("/api/game/join", async (req, res) => {
       gameMode: playerState.mode,
       dateKey: playerState.dateKey,
       language: playerState.language,
+      ...(playerState.pinyinSubmissionReceipt
+        ? { pinyinSubmissionReceipt: playerState.pinyinSubmissionReceipt }
+        : {}),
       ...(playerState.puzzleVariant ? { puzzleVariant: playerState.puzzleVariant } : {}),
     } : await gameStateStore.get(roomId, dateKey, userId, language, puzzleVariant);
 
@@ -1800,6 +1848,9 @@ app.post("/api/game/join", async (req, res) => {
         gameMode: playerState.mode,
         dateKey: playerState.dateKey,
         language: playerState.language,
+        ...(playerState.pinyinSubmissionReceipt
+          ? { pinyinSubmissionReceipt: playerState.pinyinSubmissionReceipt }
+          : {}),
         ...(playerState.puzzleVariant ? { puzzleVariant: playerState.puzzleVariant } : {}),
       };
     }
@@ -1860,19 +1911,46 @@ app.post('/api/game/invalid-guess', async (req, res) => {
 // GUESS: Submit a guess and get updated state
 app.post("/api/game/guess", async (req, res) => {
   try {
-    const { roomId, userId, guess, dateKey: clientDateKey, language: reqLanguage, puzzleVariant: reqPuzzleVariant } = req.body;
+    const {
+      roomId,
+      userId,
+      guess,
+      submissionId,
+      dateKey: clientDateKey,
+      language: reqLanguage,
+      puzzleVariant: reqPuzzleVariant,
+    } = req.body;
     const parsedLanguage = parseLanguage(reqLanguage);
     if (!parsedLanguage.ok) {
-      return res.status(400).json({ error: 'Unsupported language', code: 'INVALID_LANGUAGE' });
+      return res.status(400).json(gameplayError(
+        'INVALID_LANGUAGE',
+        'Unsupported language',
+        submissionId ? { submissionId } : {},
+      ));
     }
     const language = parsedLanguage.language;
     const parsedVariant = parseGameplayRequest(language, reqPuzzleVariant);
     if (!parsedVariant.ok) {
-      return res.status(400).json(gameplayError(parsedVariant.code, parsedVariant.message));
+      return res.status(400).json(gameplayError(
+        parsedVariant.code,
+        parsedVariant.message,
+        submissionId ? { submissionId } : {},
+      ));
     }
     const puzzleVariant = parsedVariant.puzzleVariant;
     if (!roomId || !userId || !guess) {
-      return res.status(400).json({ error: "roomId, userId, and guess required" });
+      return res.status(400).json(gameplayError(
+        'INVALID_MESSAGE',
+        'roomId, userId, and guess required',
+        submissionId ? { submissionId } : {},
+      ));
+    }
+    if (language === 'zh' && (typeof submissionId !== 'string' || !submissionId || submissionId.length > 128)) {
+      return res.status(400).json(gameplayError(
+        'INVALID_SUBMISSION_ID',
+        'A valid submissionId is required for Pinyin guesses.',
+        typeof submissionId === 'string' && submissionId ? { submissionId } : {},
+      ));
     }
 
     // Use client-provided dateKey if valid, otherwise compute on server
@@ -1882,12 +1960,16 @@ app.post("/api/game/guess", async (req, res) => {
     let state = await gameStateStore.get(roomId, dateKey, userId, language, puzzleVariant);
 
     if (!state) {
-      return res.status(404).json({ error: "No game found. Call /api/game/join first." });
+      return res.status(404).json(gameplayError(
+        'PLAYER_NOT_FOUND',
+        'No game found. Call /api/game/join first.',
+        submissionId ? { submissionId } : {},
+      ));
     }
 
     const { gameState } = state;
     const existingPlayer = await getPlayerAsync(roomId, dateKey, userId, language, puzzleVariant);
-    if (gameState.gameOver) {
+    if (language !== 'zh' && gameState.gameOver) {
       return res.json(state); // Game already over, return current state
     }
 
@@ -1904,9 +1986,9 @@ app.post("/api/game/guess", async (req, res) => {
     const transition = transitionPlayerGuess(playerForTransition, guess, {
       isAcceptedEnglishGuess: (word) => englishGuessWords.has(word),
       isAcceptedKoreanGuess: isValidKoreanGuess,
-    });
+    }, Date.now(), submissionId);
     if (!transition.ok) {
-      if (existingPlayer) {
+      if (existingPlayer && !['INVALID_SUBMISSION_ID', 'SUBMISSION_ID_REUSED', 'GAME_OVER'].includes(transition.code)) {
         await recordDailyInvalidGuess(
           existingPlayer,
           guess,
@@ -1914,15 +1996,28 @@ app.post("/api/game/guess", async (req, res) => {
         );
       }
       const error = submissionError(language, transition);
-      return res.status(400).json(gameplayError(error.code, error.message));
+      return res.status(error.code === 'SUBMISSION_ID_REUSED' ? 409 : 400).json(gameplayError(
+        error.code,
+        error.message || error.error,
+        error.submissionId ? { submissionId: error.submissionId } : {},
+      ));
     }
-    const { previousGameState, gameState: newGameState, normalizedGuess } = transition;
+    const {
+      previousGameState,
+      gameState: newGameState,
+      normalizedGuess,
+      playerState: transitionedPlayer,
+    } = transition;
     state = {
       ...state,
       gameState: newGameState,
       language,
+      ...(transitionedPlayer.pinyinSubmissionReceipt
+        ? { pinyinSubmissionReceipt: transitionedPlayer.pinyinSubmissionReceipt }
+        : {}),
       ...(puzzleVariant ? { puzzleVariant } : {}),
     };
+    if (transition.idempotent) return res.json(state);
     await gameStateStore.set(roomId, dateKey, userId, state, language, puzzleVariant);
 
     const updatedPlayer = getPlayer(roomId, dateKey, userId, language, puzzleVariant) || transition.playerState;
@@ -1993,6 +2088,9 @@ app.post("/api/game/hint", async (req, res) => {
         gameMode: updatedPlayerState.mode,
         dateKey: updatedPlayerState.dateKey,
         language: updatedPlayerState.language,
+        ...(updatedPlayerState.pinyinSubmissionReceipt
+          ? { pinyinSubmissionReceipt: updatedPlayerState.pinyinSubmissionReceipt }
+          : {}),
         ...(updatedPlayerState.puzzleVariant ? { puzzleVariant: updatedPlayerState.puzzleVariant } : {}),
       });
     }

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -103,13 +104,13 @@ test('Chinese REST and WebSocket games validate, persist, and isolate language s
     assert.ok(joined.payload.gameState.boards.every((board) => /^\p{Script=Han}{2}$/u.test(board.targetId)));
 
     const invalidGuess = await post('/api/game/guess', {
-      roomId: 'phase7', userId: 'rest-zh', dateKey, language: 'zh', puzzleVariant, guess: 'hello',
+      roomId: 'phase7', userId: 'rest-zh', dateKey, language: 'zh', puzzleVariant, guess: 'hello', submissionId: randomUUID(),
     });
     assert.equal(invalidGuess.response.status, 400);
 
     const target = joined.payload.gameState.boards[0].targetWord;
     const guessed = await post('/api/game/guess', {
-      roomId: 'phase7', userId: 'rest-zh', dateKey, language: 'zh', puzzleVariant, guess: target,
+      roomId: 'phase7', userId: 'rest-zh', dateKey, language: 'zh', puzzleVariant, guess: target, submissionId: randomUUID(),
     });
     assert.equal(guessed.response.status, 200);
     assert.equal(guessed.payload.gameState.guessCount, 1);
@@ -137,7 +138,9 @@ test('Chinese REST and WebSocket games validate, persist, and isolate language s
     const state = await inbox.wait((message) => message.type === 'STATE');
     assert.equal(state.playerState.language, 'zh');
     const wsTarget = state.playerState.gameState.boards[0].targetWord;
-    socket.send(JSON.stringify({ type: 'GUESS', roomId: 'phase7-ws', dateKey, visibleUserId: 'ws-zh', language: 'zh', puzzleVariant, guess: wsTarget }));
+    socket.send(JSON.stringify({
+      type: 'GUESS', roomId: 'phase7-ws', dateKey, visibleUserId: 'ws-zh', language: 'zh', puzzleVariant, guess: wsTarget, submissionId: randomUUID(),
+    }));
     const updated = await inbox.wait((message) => message.type === 'STATE' && message.playerState.gameState.guessCount === 1);
     assert.equal(updated.playerState.gameState.boards[0].solved, true);
     socket.close();

@@ -128,21 +128,58 @@ test('Pinyin REST and WebSocket paths enforce one versioned authoritative contra
       joined.body.gameState.boards.map((board) => ({ targetWord: board.targetWord, targetId: board.targetId })),
     );
 
+    const missingPlayerSubmissionId = randomUUID();
+    const missingPlayer = await post('/api/game/guess', {
+      ...restIdentity,
+      userId: 'missing-player',
+      guess: 'jiejie',
+      submissionId: missingPlayerSubmissionId,
+    });
+    assert.equal(missingPlayer.status, 404);
+    assert.equal(missingPlayer.body.submissionId, missingPlayerSubmissionId);
+    connection.socket.send(JSON.stringify({
+      type: 'GUESS',
+      ...wsIdentity,
+      visibleUserId: 'missing-player',
+      guess: 'jiejie',
+      submissionId: missingPlayerSubmissionId,
+    }));
+    const missingWsPlayer = await connection.inbox.wait(
+      (message) => message.type === 'ERROR' && message.code === 'PLAYER_NOT_FOUND',
+      'correlated missing player error',
+    );
+    assert.equal(missingWsPlayer.submissionId, missingPlayerSubmissionId);
+    connection.socket.send(JSON.stringify({
+      type: 'HINT',
+      ...wsIdentity,
+      visibleUserId: 'missing-player',
+      boardIndex: 0,
+      hintType: 'syllable-boundary',
+    }));
+    assert.equal((await connection.inbox.wait(
+      (message) => message.type === 'ERROR'
+        && ['PLAYER_NOT_FOUND', 'INTERNAL_ERROR'].includes(message.code),
+      'missing hint player error',
+    )).code, 'PLAYER_NOT_FOUND');
+
     const errorCases = [
       ['xue/sheng', 'INVALID_FORMAT'],
       ['xue sheng', 'INVALID_LENGTH'],
       ['mi miao', 'NOT_IN_LIST'],
     ];
     for (const [guess, code] of errorCases) {
-      const restError = await post('/api/game/guess', { ...restIdentity, guess });
+      const submissionId = randomUUID();
+      const restError = await post('/api/game/guess', { ...restIdentity, guess, submissionId });
       assert.equal(restError.status, 400);
       assert.equal(restError.body.code, code);
-      connection.socket.send(JSON.stringify({ type: 'GUESS', ...wsIdentity, guess }));
+      assert.equal(restError.body.submissionId, submissionId);
+      connection.socket.send(JSON.stringify({ type: 'GUESS', ...wsIdentity, guess, submissionId }));
       const wsError = await connection.inbox.wait(
         (message) => message.type === 'ERROR' && message.code === code,
         `${code} WebSocket error`,
       );
       assert.equal(wsError.code, restError.body.code);
+      assert.equal(wsError.submissionId, submissionId);
     }
 
     const restAfterErrors = await (
@@ -165,36 +202,103 @@ test('Pinyin REST and WebSocket paths enforce one versioned authoritative contra
     )).code, invalidAttempt.body.code);
 
     const missingGuessVersion = await post('/api/game/guess', {
-      ...restIdentity, puzzleVariant: undefined, guess: 'jiejie',
+      ...restIdentity, puzzleVariant: undefined, guess: 'jiejie', submissionId: randomUUID(),
     });
     assert.equal(missingGuessVersion.status, 400);
     assert.equal(missingGuessVersion.body.code, 'UNSUPPORTED_PUZZLE_VERSION');
     connection.socket.send(JSON.stringify({
-      type: 'GUESS', ...wsIdentity, puzzleVariant: 'hanzi-v1', guess: 'jiejie',
+      type: 'GUESS', ...wsIdentity, puzzleVariant: 'hanzi-v1', guess: 'jiejie', submissionId: randomUUID(),
     }));
     assert.equal((await connection.inbox.wait(
       (message) => message.type === 'ERROR' && message.code === 'UNSUPPORTED_PUZZLE_VERSION',
       'guess version error',
     )).code, missingGuessVersion.body.code);
 
-    const restGuess = await post('/api/game/guess', { ...restIdentity, guess: 'jiě jie' });
+    const restSubmissionId = randomUUID();
+    const wsSubmissionId = randomUUID();
+    const restGuess = await post('/api/game/guess', {
+      ...restIdentity, guess: 'jiě jie', submissionId: restSubmissionId,
+    });
     assert.equal(restGuess.status, 200);
-    connection.socket.send(JSON.stringify({ type: 'GUESS', ...wsIdentity, guess: 'jiě jie' }));
+    assert.deepEqual(restGuess.body.pinyinSubmissionReceipt, {
+      submissionId: restSubmissionId,
+      normalizedGuess: 'jiejie',
+      guessIndex: 0,
+    });
+    connection.socket.send(JSON.stringify({
+      type: 'GUESS', ...wsIdentity, guess: 'jiě jie', submissionId: wsSubmissionId,
+    }));
     const wsGuess = await connection.inbox.wait(
       (message) => message.type === 'STATE' && message.playerState.gameState.guessCount === 1,
       'accepted Pinyin state',
     );
+    assert.deepEqual(wsGuess.playerState.pinyinSubmissionReceipt, {
+      submissionId: wsSubmissionId,
+      normalizedGuess: 'jiejie',
+      guessIndex: 0,
+    });
     assert.deepEqual(wsGuess.playerState.gameState, restGuess.body.gameState);
     assert.equal(restGuess.body.gameState.boards[1].solved, true);
     assert.ok(restGuess.body.gameState.boards.every((board) => board.guesses[0] === 'jiejie'));
 
+    const duplicateRestGuess = await post('/api/game/guess', {
+      ...restIdentity, guess: 'jie3 jie3', submissionId: restSubmissionId,
+    });
+    assert.equal(duplicateRestGuess.status, 200);
+    assert.equal(duplicateRestGuess.body.gameState.guessCount, 1);
+    assert.deepEqual(duplicateRestGuess.body.pinyinSubmissionReceipt, restGuess.body.pinyinSubmissionReceipt);
+    connection.socket.send(JSON.stringify({
+      type: 'GUESS', ...wsIdentity, guess: 'jie3 jie3', submissionId: wsSubmissionId,
+    }));
+    const duplicateWsGuess = await connection.inbox.wait(
+      (message) => message.type === 'STATE'
+        && message.playerState.pinyinSubmissionReceipt?.submissionId === wsSubmissionId,
+      'idempotent Pinyin state',
+    );
+    assert.equal(duplicateWsGuess.playerState.gameState.guessCount, 1);
+
+    const conflictingRestGuess = await post('/api/game/guess', {
+      ...restIdentity, guess: 'gongsi', submissionId: restSubmissionId,
+    });
+    assert.equal(conflictingRestGuess.status, 409);
+    assert.equal(conflictingRestGuess.body.code, 'SUBMISSION_ID_REUSED');
+    assert.equal(conflictingRestGuess.body.submissionId, restSubmissionId);
+    connection.socket.send(JSON.stringify({
+      type: 'GUESS', ...wsIdentity, guess: 'gongsi', submissionId: wsSubmissionId,
+    }));
+    const conflictingWsGuess = await connection.inbox.wait(
+      (message) => message.type === 'ERROR' && message.code === 'SUBMISSION_ID_REUSED',
+      'reused submission ID error',
+    );
+    assert.equal(conflictingWsGuess.submissionId, wsSubmissionId);
+
+    const restAfterIdempotency = await (
+      await fetch(`${baseUrl}/api/room/pinyin-parity/${dateKey}/player/rest-player?language=zh&puzzleVariant=${puzzleVariant}`)
+    ).json();
+    assert.equal(restAfterIdempotency.playerState.gameState.guessCount, 1);
+    const wsAfterIdempotency = await (
+      await fetch(`${baseUrl}/api/room/pinyin-parity/${dateKey}/player/ws-player?language=zh&puzzleVariant=${puzzleVariant}`)
+    ).json();
+    assert.equal(wsAfterIdempotency.playerState.gameState.guessCount, 1);
+
     const restored = await post('/api/game/join', restIdentity);
     assert.equal(restored.body.gameState.guessCount, 1);
+    assert.deepEqual(restored.body.pinyinSubmissionReceipt, restGuess.body.pinyinSubmissionReceipt);
     connection.socket.send(JSON.stringify({ type: 'JOIN', ...wsIdentity }));
-    assert.equal((await connection.inbox.wait(
+    const restoredWs = await connection.inbox.wait(
       (message) => message.type === 'STATE' && message.playerState.gameState.guessCount === 1,
       'restored WebSocket state',
-    )).playerState.gameState.guessCount, 1);
+    );
+    assert.equal(restoredWs.playerState.gameState.guessCount, 1);
+    assert.deepEqual(restoredWs.playerState.pinyinSubmissionReceipt, wsGuess.playerState.pinyinSubmissionReceipt);
+
+    const restHintWithReceipt = await post('/api/game/hint', {
+      ...restIdentity, boardIndex: 0, hintType: 'syllable-boundary',
+    });
+    assert.deepEqual(
+      restHintWithReceipt.body.pinyinSubmissionReceipt,
+      restGuess.body.pinyinSubmissionReceipt,
+    );
 
     const hintIdentity = { roomId: 'pinyin-hints', userId: 'hint-player', dateKey, language: 'zh', puzzleVariant };
     await post('/api/game/join', hintIdentity);
@@ -209,7 +313,9 @@ test('Pinyin REST and WebSocket paths enforce one versioned authoritative contra
     const unavailableIdentity = { roomId: 'pinyin-unavailable', userId: 'no-charge', dateKey, language: 'zh', puzzleVariant };
     const unavailableJoin = await post('/api/game/join', unavailableIdentity);
     const jiejieBoard = unavailableJoin.body.gameState.boards.findIndex((board) => board.targetWord === 'jiejie');
-    assert.equal((await post('/api/game/guess', { ...unavailableIdentity, guess: 'jiejin' })).status, 200);
+    assert.equal((await post('/api/game/guess', {
+      ...unavailableIdentity, guess: 'jiejin', submissionId: randomUUID(),
+    })).status, 200);
     const unavailable = await post('/api/game/hint', {
       ...unavailableIdentity, boardIndex: jiejieBoard, hintType: 'reveal-letter',
     });
@@ -226,8 +332,12 @@ test('Pinyin REST and WebSocket paths enforce one versioned authoritative contra
     assert.equal(wrongHintVersion.body.code, 'UNSUPPORTED_PUZZLE_VERSION');
 
     for (const target of ['qunian', 'gongsi', 'lanqiu']) {
-      assert.equal((await post('/api/game/guess', { ...restIdentity, guess: target })).status, 200);
-      connection.socket.send(JSON.stringify({ type: 'GUESS', ...wsIdentity, guess: target }));
+      assert.equal((await post('/api/game/guess', {
+        ...restIdentity, guess: target, submissionId: randomUUID(),
+      })).status, 200);
+      connection.socket.send(JSON.stringify({
+        type: 'GUESS', ...wsIdentity, guess: target, submissionId: randomUUID(),
+      }));
       await connection.inbox.wait(
         (message) => message.type === 'STATE' && message.playerState.gameState.boards.some(
           (board) => board.targetWord === target && board.solved,

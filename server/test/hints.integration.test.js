@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -183,7 +184,9 @@ test('daily Korean and Chinese REST and WebSocket hints are authoritative, idemp
     assert.equal(zhRestored.body.gameState.assistance.hints.length, 3);
 
     const firstTarget = joined.body.gameState.boards[0].targetWord;
-    const solvedState = await post('/api/game/guess', { ...restIdentity, guess: firstTarget });
+    const solvedState = await post('/api/game/guess', {
+      ...restIdentity, guess: firstTarget, submissionId: randomUUID(),
+    });
     assert.equal(solvedState.body.gameState.boards[0].solved, true);
     const solvedBoardHint = await post('/api/game/hint', {
       ...restIdentity,
@@ -195,7 +198,9 @@ test('daily Korean and Chinese REST and WebSocket hints are authoritative, idemp
 
     let finishedState = solvedState;
     while (!finishedState.body.gameState.gameOver) {
-      finishedState = await post('/api/game/guess', { ...restIdentity, guess: firstTarget });
+      finishedState = await post('/api/game/guess', {
+        ...restIdentity, guess: firstTarget, submissionId: randomUUID(),
+      });
     }
     const unfinishedBoardIndex = finishedState.body.gameState.boards.findIndex((board) => !board.solved);
     assert.ok(unfinishedBoardIndex >= 0);
