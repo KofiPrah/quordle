@@ -20,13 +20,18 @@ import { getLegacyLanguageConfig, getLegacyQuordleWordsForLanguage, isValidLegac
 import { canBeCoda, canBeOnset, combineCodas, combineVowels, expandHangulToJamoUnits, isConsonant, isHangulSyllable, isVowel, splitCompoundCoda, splitCompoundVowel } from "../engine/src/jamo.ts";
 import { backspaceKoIme, createKoImeState, finalizeKoIme, getKoImeDisplayChar, processKoImeJamo } from "../engine/src/koIme.ts";
 import { classifyKoreanGuess, rankNearbyKoreanWords } from "../engine/src/nearbyWords.ts";
-import { calculatePerformanceMetrics, HINT_COSTS, normalizeAssistanceState } from "../engine/src/assistance.ts";
+import { calculatePerformanceMetrics, normalizeAssistanceState } from "../engine/src/assistance.ts";
 import { isHintAvailable, requestHint } from "../engine/src/hints.ts";
 import {
+  activateBoardStatus,
+  estimateOverviewTileWidth,
   getRemainingGuessCount,
+  getVisibleActiveBoardEntries,
   partitionBoards,
   reconcileExpandedSolvedBoardIndex,
   reconcileSelectedBoardIndex,
+  resolveRoundBoardLayoutMode,
+  setRoundBoardLayoutMode,
   toggleExpandedSolvedBoardIndex,
 } from "./src/boardLayout.js";
 import {
@@ -38,7 +43,13 @@ import {
   loadKoreanRecognitionSnapshot,
 } from "./src/dictionary.js";
 import { getSheetDragAction, renderOverlaySheet, trapOverlayFocus } from "./src/overlaySheet.js";
-import { formatHintPayload, getBoardHintUse, getHintUiOptions } from "./src/hintUi.js";
+import {
+  formatHintPayload,
+  getBoardGridHintVisuals,
+  getBoardHintUse,
+  getHintOptionPresentation,
+  getHintUiOptions,
+} from "./src/hintUi.js";
 import {
   createKoreanFeedback,
   createMessageFeedback,
@@ -161,6 +172,8 @@ let boardScrollTop = 0;
 let selectedBoardIndex = null;
 let expandedSolvedBoardIndex = null;
 let boardUiGameIdentity = null;
+let roundBoardLayoutState = null;
+let estimatedOverviewTileWidth = null;
 let pendingBoardSelectionAnnouncement = '';
 let pendingHintRequest = null;
 let hintRequestError = null;
@@ -507,6 +520,8 @@ function resetBoardUiState() {
   selectedBoardIndex = null;
   expandedSolvedBoardIndex = null;
   boardUiGameIdentity = null;
+  roundBoardLayoutState = null;
+  estimatedOverviewTileWidth = null;
   pendingBoardSelectionAnnouncement = '';
 }
 
@@ -619,6 +634,8 @@ function syncBoardUiState() {
   if (nextIdentity !== boardUiGameIdentity) {
     selectedBoardIndex = null;
     expandedSolvedBoardIndex = null;
+    estimatedOverviewTileWidth = null;
+    if (roundBoardLayoutState?.roundId !== currentRoundId) roundBoardLayoutState = null;
     boardUiGameIdentity = nextIdentity;
   }
 
@@ -629,6 +646,89 @@ function syncBoardUiState() {
   if (previousSelection !== null && selectedBoardIndex !== null && previousSelection !== selectedBoardIndex) {
     pendingBoardSelectionAnnouncement = `Board ${selectedBoardIndex + 1} selected`;
   }
+}
+
+function cssPixelValue(value, fallback = 0) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function getActivityViewportWidth() {
+  const candidates = [
+    window.visualViewport?.width,
+    document.documentElement.clientWidth,
+    window.innerWidth,
+  ];
+  return candidates.find((value) => Number.isFinite(value) && value > 0) ?? 0;
+}
+
+function estimateCurrentOverviewTileWidth() {
+  if (!gameState?.wordLength) return 0;
+  const viewportWidth = getActivityViewportWidth();
+  if (viewportWidth <= 0) return 0;
+
+  const rootStyle = getComputedStyle(document.documentElement);
+  const container = document.querySelector('.quordle-container');
+  const stage = document.querySelector('.boards-stage');
+  const boardGrid = document.querySelector('.active-boards-grid');
+  const board = document.querySelector('.board-active');
+  const row = document.querySelector('.board-active .row');
+  const containerStyle = container ? getComputedStyle(container) : null;
+  const stageStyle = stage ? getComputedStyle(stage) : null;
+  const boardGridStyle = boardGrid ? getComputedStyle(boardGrid) : null;
+  const boardStyle = board ? getComputedStyle(board) : null;
+  const rowStyle = row ? getComputedStyle(row) : null;
+  const isMobile = viewportWidth <= 700;
+  const fallbackContentPadding = isMobile
+    ? Math.min(8, Math.max(4, viewportWidth * 0.01))
+    : 16;
+  const fallbackStagePadding = isMobile
+    ? Math.min(8, Math.max(4.8, viewportWidth * 0.0125))
+    : Math.min(12.8, Math.max(7.2, viewportWidth * 0.01));
+  const fallbackBoardPadding = isMobile ? 4 : 9;
+  const fallbackBoardGap = isMobile
+    ? Math.min(6, Math.max(2, viewportWidth * 0.0055))
+    : Math.min(16, Math.max(4, viewportWidth * 0.008));
+  const fallbackTileGap = isMobile
+    ? Math.min(3, Math.max(1, viewportWidth * 0.0035))
+    : Math.min(4, Math.max(2, viewportWidth * 0.004));
+  const safeAreaLeft = cssPixelValue(rootStyle.getPropertyValue('--discord-safe-area-inset-left'));
+  const safeAreaRight = cssPixelValue(rootStyle.getPropertyValue('--discord-safe-area-inset-right'));
+  const totalPaddingLeft = cssPixelValue(containerStyle?.paddingLeft, safeAreaLeft + fallbackContentPadding);
+  const totalPaddingRight = cssPixelValue(containerStyle?.paddingRight, safeAreaRight + fallbackContentPadding);
+  const measuredStageWidth = stage?.getBoundingClientRect().width;
+  const hasMeasuredStageWidth = Number.isFinite(measuredStageWidth) && measuredStageWidth > 0;
+
+  return estimateOverviewTileWidth({
+    viewportWidth: hasMeasuredStageWidth ? measuredStageWidth : viewportWidth,
+    safeAreaLeft: hasMeasuredStageWidth ? 0 : safeAreaLeft,
+    safeAreaRight: hasMeasuredStageWidth ? 0 : safeAreaRight,
+    contentPaddingLeft: hasMeasuredStageWidth ? 0 : Math.max(0, totalPaddingLeft - safeAreaLeft),
+    contentPaddingRight: hasMeasuredStageWidth ? 0 : Math.max(0, totalPaddingRight - safeAreaRight),
+    stagePaddingLeft: cssPixelValue(stageStyle?.paddingLeft, fallbackStagePadding),
+    stagePaddingRight: cssPixelValue(stageStyle?.paddingRight, fallbackStagePadding),
+    boardGap: cssPixelValue(boardGridStyle?.columnGap, fallbackBoardGap),
+    boardPaddingLeft: cssPixelValue(boardStyle?.paddingLeft, fallbackBoardPadding),
+    boardPaddingRight: cssPixelValue(boardStyle?.paddingRight, fallbackBoardPadding),
+    tileGap: cssPixelValue(rowStyle?.columnGap, fallbackTileGap),
+    wordLength: gameState.wordLength,
+  });
+}
+
+function getCurrentBoardLayoutMode() {
+  if (gameState?.gameOver) return 'overview';
+  const roundId = currentRoundId || getBoardUiGameIdentity();
+  const tileWidth = Number.isFinite(estimatedOverviewTileWidth)
+    ? estimatedOverviewTileWidth
+    : estimateCurrentOverviewTileWidth();
+  return resolveRoundBoardLayoutMode(roundBoardLayoutState, roundId, tileWidth);
+}
+
+function syncAdaptiveBoardLayoutMeasurement() {
+  if (!gameState || uiScreen !== 'game' || gameState.gameOver) return false;
+  const before = getCurrentBoardLayoutMode();
+  estimatedOverviewTileWidth = estimateCurrentOverviewTileWidth();
+  return getCurrentBoardLayoutMode() !== before;
 }
 
 function measureActivityViewportHeight() {
@@ -678,6 +778,11 @@ function syncActivityViewportHeight() {
   if (measurement.height <= 0) return;
 
   document.documentElement.style.setProperty('--app-height', `${measurement.height}px`);
+  if (syncAdaptiveBoardLayoutMeasurement()) {
+    renderApp();
+    setupKeyboardListeners();
+    return;
+  }
   requestAnimationFrame(() => logViewportMetrics(measurement));
 }
 
@@ -2128,20 +2233,28 @@ function renderHintOverlay() {
     const used = getBoardHintUse(gameState.assistance, boardIndex, option.type);
     const available = used || isHintAvailable(gameState, boardIndex, option.type);
     const pending = pendingHintRequest === `${boardIndex}:${option.type}`;
-    const disabled = Boolean(used) || !available || pendingHintRequest !== null;
-    const status = used ? 'Used' : pending ? 'Requesting…' : available ? `−${HINT_COSTS[option.type]} points` : 'Unavailable';
+    const presentation = getHintOptionPresentation(option, {
+      used,
+      available: Boolean(available),
+      pending,
+      requestPending: pendingHintRequest !== null,
+    });
     return `
-      <article class="hint-option-card ${used ? 'hint-option-used' : ''} ${!available ? 'hint-option-unavailable' : ''}">
+      <article class="hint-option-card hint-option-${presentation.state}" data-hint-state="${presentation.state}">
         <button
           class="hint-option"
           type="button"
           data-hint-type="${option.type}"
-          ${disabled ? 'disabled' : ''}
-          aria-label="${escapeHtml(option.label)}, ${escapeHtml(status)}"
+          ${presentation.disabled ? 'disabled' : ''}
+          aria-disabled="${presentation.disabled}"
+          aria-label="${escapeHtml(presentation.ariaLabel)}"
         >
           <span class="hint-option-heading">
             <strong>${escapeHtml(option.label)}</strong>
-            <span>${escapeHtml(status)}</span>
+            <span class="hint-option-meta">
+              <span class="hint-option-cost">${escapeHtml(presentation.costLabel)}</span>
+              ${presentation.statusLabel ? `<span class="hint-option-state">${escapeHtml(presentation.statusLabel)}</span>` : ''}
+            </span>
           </span>
           <span class="hint-option-description">${escapeHtml(option.description)}</span>
         </button>
@@ -2508,6 +2621,7 @@ function renderGuessFeedback() {
 function renderGameScreen() {
   const app = document.querySelector('#app');
   syncBoardUiState();
+  const boardLayoutMode = getCurrentBoardLayoutMode();
   const solvedCount = gameState.boards.filter(b => b.solved).length;
   const lang = currentLanguage;
   const currentGuessDisplay = getCurrentGuessDisplayText();
@@ -2568,8 +2682,8 @@ function renderGameScreen() {
         </div>
       </div>
 
-      <main class="boards-grid game-scroll-region" aria-label="Quordle boards">
-        ${renderBoardRegion()}
+      <main class="boards-grid game-scroll-region" aria-label="Quordle boards" data-board-layout="${boardLayoutMode}">
+        ${renderBoardRegion(boardLayoutMode)}
       </main>
 
       <div class="sr-only" aria-live="polite" aria-atomic="true">${selectionAnnouncement}</div>
@@ -3033,20 +3147,71 @@ function renderLeaderboardContent() {
 // renderBanner removed — game status is now inline in renderGameScreen,
 // full results are in renderResultsScreen
 
-function renderBoardRegion() {
+function renderBoardLayoutControl(layoutMode) {
+  if (gameState.gameOver) return '';
+  return `
+    <div class="board-layout-toggle" role="group" aria-label="Board layout">
+      ${['overview', 'focus'].map((mode) => `
+        <button
+          class="board-layout-option ${layoutMode === mode ? 'board-layout-option-active' : ''}"
+          type="button"
+          data-board-layout-mode="${mode}"
+          aria-pressed="${layoutMode === mode}"
+        >${mode === 'overview' ? 'Overview' : 'Focus'}</button>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderFocusBoardStatusStrip() {
+  return `
+    <nav class="focus-board-status-strip" aria-label="Focus board navigation">
+      ${gameState.boards.map((board, index) => {
+        const selected = !board.solved && selectedBoardIndex === index;
+        const expanded = board.solved && expandedSolvedBoardIndex === index;
+        const stateLabel = board.solved ? 'Solved' : selected ? 'Current' : 'Unsolved';
+        const interactionLabel = board.solved
+          ? `${expanded ? 'Close' : 'Open'} solved board ${index + 1} history`
+          : `Select board ${index + 1}${['ko', 'zh'].includes(currentLanguage) ? ' for hints' : ''}${selected ? ', currently selected' : ''}`;
+        return `
+          <button
+            class="focus-board-status ${selected ? 'focus-board-status-active' : ''} ${board.solved ? 'focus-board-status-solved' : ''} ${expanded ? 'focus-board-status-expanded' : ''}"
+            type="button"
+            data-board-status="${index}"
+            ${board.solved
+              ? `aria-expanded="${expanded}" aria-controls="solved-board-history-${index}"`
+              : `aria-pressed="${selected}"`}
+            aria-label="${interactionLabel}"
+          >
+            <span class="focus-board-status-number">#${index + 1}</span>
+            <span class="focus-board-status-state">${board.solved ? '<span aria-hidden="true">✓</span> ' : ''}${stateLabel}</span>
+          </button>
+        `;
+      }).join('')}
+    </nav>
+  `;
+}
+
+function renderBoardRegion(layoutMode) {
   const { active, solved } = partitionBoards(gameState.boards);
-  const solvedHtml = solved.length > 0
+  const visibleSolved = solved;
+  const visibleActive = getVisibleActiveBoardEntries(gameState.boards, layoutMode, selectedBoardIndex);
+  const solvedHtml = visibleSolved.length > 0
     ? `<section class="solved-boards-strip" aria-label="Solved boards">
-        ${solved.map(({ board, index }) => renderSolvedBoardCard(board, index)).join('')}
+        ${visibleSolved.map(({ board, index }) => renderSolvedBoardCard(board, index)).join('')}
       </section>`
     : '';
-  const activeHtml = active.length > 0
-    ? `<section class="active-boards-grid" data-active-count="${active.length}" aria-label="Active boards">
-        ${active.map(({ board, index }) => renderActiveBoard(board, index)).join('')}
+  const activeHtml = visibleActive.length > 0
+    ? `<section class="active-boards-grid" data-active-count="${visibleActive.length}" data-total-active-count="${active.length}" data-layout="${layoutMode}" aria-label="Active boards">
+        ${visibleActive.map(({ board, index }) => renderActiveBoard(board, index)).join('')}
       </section>`
     : '';
 
-  return `<div class="boards-stage">${solvedHtml}${activeHtml}</div>`;
+  return `<div class="boards-stage boards-stage-${layoutMode}">
+    ${renderBoardLayoutControl(layoutMode)}
+    ${layoutMode === 'focus' ? renderFocusBoardStatusStrip() : ''}
+    ${solvedHtml}${activeHtml}
+  </div>`;
 }
 
 function renderSolvedBoardCard(board, index) {
@@ -3098,17 +3263,21 @@ function renderActiveBoard(board, index) {
   const rows = [];
   const lang = currentLanguage;
   const wordLen = gameState.wordLength;
+  const selected = selectedBoardIndex === index;
+  const gridHints = selected && lang === 'zh'
+    ? getBoardGridHintVisuals(gameState.assistance, index)
+    : null;
 
   for (let i = 0; i < board.guesses.length; i++) {
     const koResult = (lang === 'ko' && board.koResults) ? board.koResults[i] : null;
-    rows.push(renderRow(board.guesses[i], board.results[i], false, true, koResult));
+    rows.push(renderRow(board.guesses[i], board.results[i], false, true, koResult, gridHints));
   }
 
   if (!gameState.gameOver && board.guesses.length < gameState.maxGuesses) {
     const displayGuess = lang === 'ko'
       ? (gameState.currentGuess + compositionDisplayChar()).padEnd(wordLen, ' ')
       : gameState.currentGuess.padEnd(wordLen, ' ');
-    rows.push(renderRow(displayGuess, null, true, false, null));
+    rows.push(renderRow(displayGuess, null, true, false, null, gridHints));
   }
 
   const remainingGuesses = getRemainingGuessCount(gameState.maxGuesses, gameState.guessCount);
@@ -3119,16 +3288,15 @@ function renderActiveBoard(board, index) {
       </div>`
     : '';
   const hintsEnabled = ['ko', 'zh'].includes(currentLanguage);
-  const selected = hintsEnabled && selectedBoardIndex === index;
   const headerId = `board-header-${index}`;
-  const headerHtml = hintsEnabled
+  const headerHtml = !gameState.gameOver
     ? `<button
         class="board-select-button"
         id="${headerId}"
         type="button"
         data-select-board="${index}"
         aria-pressed="${selected}"
-        aria-label="Select board ${index + 1} for hints${selected ? ', currently selected' : ''}"
+        aria-label="Select board ${index + 1}${hintsEnabled ? ' for hints' : ''}${selected ? ', currently selected' : ''}"
       >
         <span>#${index + 1}</span>
         <span class="board-selected-indicator">${selected ? 'Selected' : 'Select'}</span>
@@ -3144,7 +3312,7 @@ function renderActiveBoard(board, index) {
   `;
 }
 
-function renderRow(guess, result, isCurrent = false, isCondensed = false, koResult = null) {
+function renderRow(guess, result, isCurrent = false, isCondensed = false, koResult = null, gridHints = null) {
   const lang = currentLanguage;
   const wordLen = gameState.wordLength;
   const chars = lang === 'en' ? guess.padEnd(wordLen, ' ').split('') : Array.from(guess.padEnd(wordLen, ' '));
@@ -3156,6 +3324,13 @@ function renderRow(guess, result, isCurrent = false, isCondensed = false, koResu
     } else if (isCurrent && ch.trim()) {
       tileClass += ' tile-filled';
     }
+    if (gridHints?.boundaryAfter === i + 1 && i < wordLen - 1) {
+      tileClass += ' tile-syllable-boundary-after';
+    }
+    const revealLetter = isCurrent && gridHints?.revealLetter?.index === i
+      ? gridHints.revealLetter
+      : null;
+    if (revealLetter) tileClass += ' tile-has-letter-ghost';
 
     const display = ['en', 'zh'].includes(lang) ? ch.trim().toUpperCase() : ch.trim();
 
@@ -3173,7 +3348,10 @@ function renderRow(guess, result, isCurrent = false, isCondensed = false, koResu
       }
     }
 
-    return `<div class="${tileClass}">${display}${jamoHintHtml}</div>`;
+    const revealLetterHtml = revealLetter
+      ? `<span class="tile-hint-ghost" role="note" aria-label="${escapeHtml(revealLetter.ariaLabel)}"><span aria-hidden="true">${escapeHtml(revealLetter.letter)}</span></span>`
+      : '';
+    return `<div class="${tileClass}">${display}${revealLetterHtml}${jamoHintHtml}</div>`;
   }).join('');
 
   const rowClass = isCondensed ? 'row row-condensed' : 'row';
@@ -3849,6 +4027,42 @@ function setupKeyboardListeners() {
       boardScrollTop = boardRegion.scrollTop;
     }, { passive: true });
   }
+
+  document.querySelectorAll('[data-board-layout-mode]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const mode = button.dataset.boardLayoutMode;
+      const roundId = currentRoundId || getBoardUiGameIdentity();
+      if (gameState.gameOver || !roundId || !['overview', 'focus'].includes(mode)) return;
+      roundBoardLayoutState = setRoundBoardLayoutMode(roundBoardLayoutState, roundId, mode);
+      boardScrollTop = 0;
+      pendingBoardSelectionAnnouncement = `${mode === 'overview' ? 'Overview' : 'Focus'} layout selected`;
+      renderApp();
+      setupKeyboardListeners();
+      requestAnimationFrame(() => document.querySelector(`[data-board-layout-mode="${mode}"]`)?.focus());
+    });
+  });
+
+  document.querySelectorAll('[data-board-status]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const boardIndex = Number(button.dataset.boardStatus);
+      const nextState = activateBoardStatus(
+        gameState.boards,
+        selectedBoardIndex,
+        expandedSolvedBoardIndex,
+        boardIndex,
+      );
+      if (!nextState.action) return;
+      selectedBoardIndex = nextState.selectedBoardIndex;
+      expandedSolvedBoardIndex = nextState.expandedSolvedBoardIndex;
+      hintRequestError = null;
+      pendingBoardSelectionAnnouncement = nextState.action === 'select'
+        ? `Board ${boardIndex + 1} selected`
+        : `Solved board ${boardIndex + 1} history ${expandedSolvedBoardIndex === boardIndex ? 'opened' : 'closed'}`;
+      renderApp();
+      setupKeyboardListeners();
+      requestAnimationFrame(() => document.querySelector(`[data-board-status="${boardIndex}"]`)?.focus());
+    });
+  });
 
   document.querySelectorAll('[data-select-board]').forEach((button) => {
     button.addEventListener('click', () => {

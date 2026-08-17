@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   formatHintPayload,
+  getBoardGridHintVisuals,
   getBoardHintUse,
   getBoardHintUses,
   getHintUiOptions,
+  getHintOptionPresentation,
 } from '../src/hintUi.js';
 
 const assistance = {
@@ -43,7 +45,54 @@ test('hint payloads receive concise accessible labels', () => {
   assert.equal(formatHintPayload('ko', 'reveal-first-syllable', '가'), '가');
   assert.equal(formatHintPayload('zh', 'syllable-boundary', 3), 'Syllable boundary: after letter 3');
   assert.equal(formatHintPayload('zh', 'syllable-boundary', 0), '');
-  assert.equal(formatHintPayload('zh', 'reveal-letter', { index: 2, letter: 'e' }), 'Letter hint: E in position 3');
+  assert.equal(formatHintPayload('zh', 'reveal-letter', { index: 2, letter: 'e' }), 'Hint: letter E in position 3.');
   assert.equal(formatHintPayload('zh', 'reveal-letter', { index: -1, letter: 'e' }), '');
   assert.equal(formatHintPayload('zh', 'broad-meaning', 'a learner'), 'Meaning: a learner');
+});
+
+test('used Pinyin boundary and letter hints stay isolated to their target board grid', () => {
+  const pinyinAssistance = {
+    hints: [
+      { boardIndex: 2, type: 'syllable-boundary', payload: 3, cost: 2, usedAt: 1 },
+      { boardIndex: 2, type: 'reveal-letter', payload: { index: 4, letter: 'h' }, cost: 5, usedAt: 2 },
+    ],
+  };
+
+  assert.deepEqual(getBoardGridHintVisuals(pinyinAssistance, 2), {
+    boundaryAfter: 3,
+    revealLetter: {
+      index: 4,
+      letter: 'H',
+      ariaLabel: 'Hint: letter H in position 5.',
+    },
+  });
+  assert.deepEqual(getBoardGridHintVisuals(pinyinAssistance, 1), {
+    boundaryAfter: null,
+    revealLetter: null,
+  });
+});
+
+test('hint option presentation keeps exact costs visible for used and unavailable states', () => {
+  const [boundary, letter] = getHintUiOptions('zh');
+
+  assert.deepEqual(getHintOptionPresentation(boundary, {
+    used: { payload: 3 },
+    available: true,
+  }), {
+    state: 'used',
+    disabled: true,
+    costLabel: '−2 points',
+    statusLabel: 'Used',
+    ariaLabel: 'Syllable boundary, −2 points, Used',
+  });
+  assert.deepEqual(getHintOptionPresentation(letter, {
+    used: null,
+    available: false,
+  }), {
+    state: 'unavailable',
+    disabled: true,
+    costLabel: '−5 points',
+    statusLabel: 'Unavailable',
+    ariaLabel: 'Reveal a letter, −5 points, Unavailable',
+  });
 });
