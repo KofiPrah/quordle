@@ -5,11 +5,10 @@ const INTERACTIVE_KEYBOARD_TARGET = [
   'select',
   'textarea',
   'summary',
-  '[contenteditable]:not([contenteditable="false"])',
 ].join(', ');
 
 function isInteractiveKeyboardTarget(target) {
-  return Boolean(target?.closest?.(INTERACTIVE_KEYBOARD_TARGET));
+  return Boolean(target?.isContentEditable || target?.closest?.(INTERACTIVE_KEYBOARD_TARGET));
 }
 
 export function handlePhysicalKeyboardEvent(event, {
