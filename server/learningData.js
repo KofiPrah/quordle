@@ -820,6 +820,7 @@ export function createLearningDataService(options = {}) {
       client: true,
       isAcceptedKoreanWord,
       isAcceptedChineseWord,
+      isAcceptedPinyinGuessKey,
       isRecognizedKoreanWord,
     }),
     recordEvent,

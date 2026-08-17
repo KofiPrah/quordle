@@ -229,6 +229,45 @@ test('Pinyin gameplay events keep guess keys separate from canonical target iden
   assert.equal('guessKey' in solved.event, false);
 });
 
+test('public client normalization accepts an authoritative catalog Pinyin key', () => {
+  const service = createLearningDataService({
+    enabled: true,
+    hmacSecret: 'analytics-secret',
+    allowMemoryFallback: true,
+    ...validators,
+  });
+
+  const result = service.normalizeClientEvent(event('valid_guess_submitted', {
+    suffix: 'public-valid-pinyin',
+    language: 'zh',
+    puzzleVariant: 'pinyin-latin-v2',
+    roundId: 'practice:zh:pinyin-latin-v2:public-valid',
+    guessKey: 'xuesheng',
+  }));
+
+  assert.equal(result.ok, true);
+  assert.equal(result.event.guessKey, 'xuesheng');
+});
+
+test('public client normalization rejects a regex-valid non-catalog Pinyin key', () => {
+  const service = createLearningDataService({
+    enabled: true,
+    hmacSecret: 'analytics-secret',
+    allowMemoryFallback: true,
+    ...validators,
+  });
+
+  const result = service.normalizeClientEvent(event('valid_guess_submitted', {
+    suffix: 'public-invalid-pinyin',
+    language: 'zh',
+    puzzleVariant: 'pinyin-latin-v2',
+    roundId: 'practice:zh:pinyin-latin-v2:public-invalid',
+    guessKey: 'zzzz',
+  }));
+
+  assert.deepEqual(result, { ok: false, code: 'INVALID_GUESS_KEY' });
+});
+
 test('Chinese summaries default to Pinyin aggregates and read legacy Hanzi only when requested', async () => {
   const service = createLearningDataService({
     enabled: true,
