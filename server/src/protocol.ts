@@ -387,11 +387,19 @@ export function parsePlayerKey(key: string): PlayerKey | null {
 /** Parse a room key string back to components */
 export function parseRoomKey(key: string): RoomKey | null {
     const parts = key.split(':');
-    if (parts.length !== 2) return null;
-    return {
-        roomId: parts[0],
-        dateKey: parts[1],
-    };
+    if (parts.length === 2) return { roomId: parts[0], dateKey: parts[1] };
+    if (parts.length === 3 && ['en', 'ko', 'zh'].includes(parts[2])) {
+        return { roomId: parts[0], dateKey: parts[1], language: parts[2] as Language };
+    }
+    if (parts.length === 4 && parts[2] === 'zh' && parts[3] === 'pinyin-latin-v2') {
+        return {
+            roomId: parts[0],
+            dateKey: parts[1],
+            language: 'zh',
+            puzzleVariant: 'pinyin-latin-v2',
+        };
+    }
+    return null;
 }
 
 /** Convert PlayerState to LeaderboardEntry */

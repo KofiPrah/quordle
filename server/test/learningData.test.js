@@ -6,6 +6,7 @@ import {
   normalizeLearningEvent,
 } from '../learningData.js';
 import { createAppSessionToken, verifyAppSessionToken } from '../sessionAuth.js';
+import { isValidChinesePinyinGuessKey } from '@quordle/engine/chineseLexicon';
 
 const accepted = new Set(['기관', '기차']);
 const acceptedChinese = new Set(['学生', '学校']);
@@ -13,6 +14,7 @@ const recognized = new Set(['기관', '기차', '학일']);
 const validators = {
   isAcceptedKoreanWord: (word) => accepted.has(word),
   isAcceptedChineseWord: (word) => acceptedChinese.has(word),
+  isAcceptedPinyinGuessKey: isValidChinesePinyinGuessKey,
   isRecognizedKoreanWord: (word) => recognized.has(word),
 };
 const eventIds = new Map();

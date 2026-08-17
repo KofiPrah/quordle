@@ -47,3 +47,5 @@ export {
     zhAnswerWordsSet,
     zhGuessWordsSet,
 };
+
+export { isValidChinesePinyinGuessKey } from './zhPinyinGuessKeys.generated.js';

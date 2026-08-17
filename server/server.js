@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "url";
 import Redis from "ioredis";
 import { KO_ANSWER_WORDS, isValidKoreanGuess } from "@quordle/engine/koreanLexicon";
-import { isValidChineseGuess } from "@quordle/engine/chineseLexicon";
+import { isValidChineseGuess, isValidChinesePinyinGuessKey } from "@quordle/engine/chineseLexicon";
 import { calculatePerformanceMetrics, normalizeAssistanceState } from "@quordle/engine/assistance";
 import { requestHint } from "@quordle/engine/hints";
 import {
@@ -184,6 +184,7 @@ const learningData = createLearningDataService({
   allowMemoryFallback: process.env.NODE_ENV === 'test',
   isAcceptedKoreanWord: isValidKoreanGuess,
   isAcceptedChineseWord: isValidChineseGuess,
+  isAcceptedPinyinGuessKey: isValidChinesePinyinGuessKey,
   isRecognizedKoreanWord: (word) => Boolean(koreanRecognitionWords[word]),
 });
 

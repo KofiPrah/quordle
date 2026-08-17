@@ -8,6 +8,7 @@ import {
   isJoinMessage,
   makePlayerKey,
   makeRoomKey,
+  parseRoomKey,
   sortLeaderboard,
   toLeaderboardEntry,
 } from '../dist/protocol.js';
@@ -77,6 +78,35 @@ test('Chinese protocol guards require the exact Pinyin puzzle version', () => {
     'room:2026-08-17:zh:pinyin-latin-v2:player',
   );
 });
+
+for (const roomKeyCase of [
+  {
+    name: 'legacy',
+    key: 'room:2026-08-17',
+    expected: { roomId: 'room', dateKey: '2026-08-17' },
+  },
+  {
+    name: 'English',
+    key: makeRoomKey('room', '2026-08-17', 'en'),
+    expected: { roomId: 'room', dateKey: '2026-08-17', language: 'en' },
+  },
+  {
+    name: 'Korean',
+    key: makeRoomKey('room', '2026-08-17', 'ko'),
+    expected: { roomId: 'room', dateKey: '2026-08-17', language: 'ko' },
+  },
+  {
+    name: 'Pinyin',
+    key: makeRoomKey('room', '2026-08-17', 'zh', 'pinyin-latin-v2'),
+    expected: {
+      roomId: 'room', dateKey: '2026-08-17', language: 'zh', puzzleVariant: 'pinyin-latin-v2',
+    },
+  },
+]) {
+  test(`${roomKeyCase.name} room keys round-trip through the protocol parser`, () => {
+    assert.deepEqual(parseRoomKey(roomKeyCase.key), roomKeyCase.expected);
+  });
+}
 
 test('legacy players normalize to unassisted leaderboard scoring', () => {
   const player = {

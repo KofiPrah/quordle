@@ -51,7 +51,7 @@ async function connectSocket(url) {
   return { socket, waitFor };
 }
 
-test('learning APIs authenticate, persist Saved Words, ingest practice events, and protect summaries', { timeout: 20_000 }, async () => {
+test('learning APIs authenticate, persist Saved Words, ingest practice events, and protect summaries', { timeout: 20_000 }, async (t) => {
   const port = await reservePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ['server.js'], {
@@ -91,6 +91,48 @@ test('learning APIs authenticate, persist Saved Words, ingest practice events, a
       'content-type': 'application/json',
       authorization: `Bearer ${session.app_session_token}`,
     };
+
+    await t.test('authenticated practice analytics rejects a nonexistent regex-shaped Pinyin guess key', async () => {
+      const eventId = randomUUID();
+      const validEventId = randomUUID();
+      const occurredAt = Date.now();
+      const response = await request('/api/analytics/events', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ events: [{
+          version: 1,
+          eventId,
+          type: 'valid_guess_submitted',
+          occurredAt,
+          roundStartedAt: occurredAt - 1,
+          dateKey: '2026-08-17',
+          language: 'zh',
+          puzzleVariant: 'pinyin-latin-v2',
+          mode: 'practice',
+          roundId: 'practice:pinyin-invalid-key',
+          guessKey: 'zzzz',
+        }, {
+          version: 1,
+          eventId: validEventId,
+          type: 'valid_guess_submitted',
+          occurredAt,
+          roundStartedAt: occurredAt - 1,
+          dateKey: '2026-08-17',
+          language: 'zh',
+          puzzleVariant: 'pinyin-latin-v2',
+          mode: 'practice',
+          roundId: 'practice:pinyin-valid-key',
+          guessKey: 'xuesheng',
+        }] }),
+      });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        version: 1,
+        acceptedIds: [validEventId],
+        duplicateIds: [],
+        rejected: [{ eventId, code: 'INVALID_GUESS_KEY' }],
+      });
+    });
 
     assert.equal((await request('/api/learning/saved-words')).status, 401);
 

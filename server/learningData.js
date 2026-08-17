@@ -178,7 +178,9 @@ export function normalizeLearningEvent(value, options = {}) {
     if (!canRetainRecognizedKorean) word = null;
   }
   if (type === 'valid_guess_submitted' && puzzleVariant === PINYIN_PUZZLE_VARIANT) {
-    if (!guessKey) return { ok: false, code: 'INVALID_GUESS_KEY' };
+    if (!guessKey || options.isAcceptedPinyinGuessKey?.(guessKey) !== true) {
+      return { ok: false, code: 'INVALID_GUESS_KEY' };
+    }
     word = null;
   } else if (
     ['valid_guess_submitted', 'board_solved', 'board_failed'].includes(type)
@@ -338,6 +340,7 @@ export function createLearningDataService(options = {}) {
   const now = options.now ?? (() => Date.now());
   const isAcceptedKoreanWord = options.isAcceptedKoreanWord ?? (() => false);
   const isAcceptedChineseWord = options.isAcceptedChineseWord ?? (() => false);
+  const isAcceptedPinyinGuessKey = options.isAcceptedPinyinGuessKey ?? (() => false);
   const isRecognizedKoreanWord = options.isRecognizedKoreanWord ?? (() => false);
   const memory = {
     dedupe: new Map(),
@@ -434,6 +437,7 @@ export function createLearningDataService(options = {}) {
       client: optionsForEvent.client === true,
       isAcceptedKoreanWord,
       isAcceptedChineseWord,
+      isAcceptedPinyinGuessKey,
       isRecognizedKoreanWord,
     });
     if (!normalized.ok) return { accepted: false, code: normalized.code };
