@@ -33,6 +33,27 @@ function update(sourceText, wordLength, keys = guessKeys) {
   );
 }
 
+function createMemoryStorage(entries = []) {
+  const values = new Map(entries);
+  const reads = [];
+  return {
+    reads,
+    getItem(key) {
+      reads.push(key);
+      return values.has(key) ? values.get(key) : null;
+    },
+    setItem(key, value) {
+      values.set(key, String(value));
+    },
+    removeItem(key) {
+      values.delete(key);
+    },
+    value(key) {
+      return values.get(key);
+    },
+  };
+}
+
 test('Chinese draft keeps exact source text and a normalized Latin tile value', () => {
   const state = update('xué shēng', 8);
 
@@ -265,6 +286,113 @@ test('REST failures distinguish correlated rejection from ambiguous server failu
     code: 'NETWORK_ERROR',
     requestSubmissionId: 'submission-1',
   }), { retainSubmissionFingerprint: true });
+});
+
+test('versioned unresolved draft survives reload, reuses its ID, and clears after matching receipt', () => {
+  const roundId = 'daily:2026-08-17:zh:pinyin-latin-v2';
+  const key = chineseInput.getChineseDraftStorageKey(roundId);
+  const legacyKey = 'quordle_draft_zh:daily:2026-08-17:zh';
+  const storage = createMemoryStorage([[legacyKey, '不应读取']]);
+  const createSubmissionId = submissionIdFactory('submission-1');
+  const started = chineseInput.beginChineseSubmission(
+    update('jie3 jie3', 6),
+    2,
+    { createSubmissionId },
+  );
+  const unresolved = chineseInput.rejectChineseSubmission(
+    started.state,
+    'Network unavailable.',
+    { retainSubmissionFingerprint: true },
+  );
+
+  chineseInput.persistChineseDraftState?.(storage, roundId, unresolved);
+  const persisted = JSON.parse(storage.value(key));
+  assert.deepEqual(persisted, {
+    schemaVersion: 1,
+    puzzleVariant: 'pinyin-latin-v2',
+    sourceText: 'jie3 jie3',
+    submissionFingerprint: {
+      submissionId: 'submission-1',
+      normalizedText: 'jiejie',
+      guessCount: 2,
+    },
+  });
+
+  const restored = chineseInput.loadChineseDraftState?.(storage, roundId, {
+    wordLength: 6,
+    guessKeys,
+    parseInput,
+    normalizeInput,
+  });
+  assert.equal(restored.sourceText, 'jie3 jie3');
+  assert.equal(restored.pendingSubmission, false);
+  assert.deepEqual(restored.submissionFingerprint, unresolved.submissionFingerprint);
+
+  const retry = chineseInput.beginChineseSubmission(restored, 2, {
+    createSubmissionId: submissionIdFactory('must-not-be-used'),
+  });
+  assert.equal(retry.submission.submissionId, 'submission-1');
+  const releasedRetry = chineseInput.rejectChineseSubmission(
+    retry.state,
+    'Network unavailable.',
+    { retainSubmissionFingerprint: true },
+  );
+  const confirmed = chineseInput.reconcileChineseSubmissionAgainstState(releasedRetry, {
+    pinyinSubmissionReceipt: {
+      submissionId: 'submission-1',
+      normalizedGuess: 'jiejie',
+      guessIndex: 2,
+    },
+    gameState: {
+      guessCount: 3,
+      boards: [{ guesses: ['laoshi', 'gongsi', 'jiejie'] }],
+    },
+  });
+  assert.equal(confirmed.status, 'confirmed');
+  assert.equal(confirmed.state.sourceText, '');
+  chineseInput.persistChineseDraftState?.(storage, roundId, confirmed.state);
+  assert.equal(storage.value(key), undefined);
+  assert.equal(storage.value(legacyKey), '不应读取');
+  assert.deepEqual(storage.reads, [key]);
+});
+
+test('versioned plain-string drafts remain readable while corrupt or stale fingerprints fail closed', () => {
+  const roundId = 'daily:2026-08-17:zh:pinyin-latin-v2';
+  const key = chineseInput.getChineseDraftStorageKey(roundId);
+  const legacyKey = 'quordle_draft_zh:daily:2026-08-17:zh';
+  const options = { wordLength: 6, guessKeys, parseInput, normalizeInput };
+  const plainStorage = createMemoryStorage([[key, 'jie3 jie3'], [legacyKey, '旧草稿']]);
+  const plain = chineseInput.loadChineseDraftState?.(plainStorage, roundId, options);
+  assert.equal(plain.sourceText, 'jie3 jie3');
+  assert.equal(plain.submissionFingerprint, null);
+  assert.equal(plain.submissionRecoveryBlocked, false);
+  assert.deepEqual(plainStorage.reads, [key]);
+  assert.equal(plainStorage.value(legacyKey), '旧草稿');
+
+  const staleStorage = createMemoryStorage([[key, JSON.stringify({
+    schemaVersion: 1,
+    puzzleVariant: 'pinyin-latin-v2',
+    sourceText: 'jie3 jie3',
+    submissionFingerprint: {
+      submissionId: 'submission-1',
+      normalizedText: 'gongsi',
+      guessCount: 2,
+    },
+  })], [legacyKey, '旧草稿']]);
+  const stale = chineseInput.loadChineseDraftState?.(staleStorage, roundId, options);
+  assert.equal(stale.sourceText, 'jie3 jie3');
+  assert.equal(stale.submissionFingerprint, null);
+  assert.equal(stale.submissionRecoveryBlocked, true);
+  assert.equal(chineseInput.beginChineseSubmission(stale, 2).submission, null);
+  assert.equal(staleStorage.value(legacyKey), '旧草稿');
+
+  const corruptStorage = createMemoryStorage([[key, '{"schemaVersion":'], [legacyKey, '旧草稿']]);
+  const corrupt = chineseInput.loadChineseDraftState?.(corruptStorage, roundId, options);
+  assert.equal(corrupt.sourceText, '');
+  assert.equal(corrupt.submissionRecoveryBlocked, true);
+  assert.equal(chineseInput.beginChineseSubmission(corrupt, 0).submission, null);
+  assert.equal(corruptStorage.value(key), '{"schemaVersion":');
+  assert.equal(corruptStorage.value(legacyKey), '旧草稿');
 });
 
 test('a duplicate Enter while pending is ignored and confirmation is the only path that clears the draft', () => {

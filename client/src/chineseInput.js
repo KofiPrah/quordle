@@ -1,4 +1,5 @@
 export const CHINESE_PINYIN_PUZZLE_VARIANT = 'pinyin-latin-v2';
+export const CHINESE_DRAFT_SCHEMA_VERSION = 1;
 
 const VALIDATION_MESSAGES = Object.freeze({
   INVALID_FORMAT: 'Enter exactly two valid Pinyin syllables.',
@@ -17,6 +18,7 @@ export function createChineseInputState() {
     pendingSubmission: false,
     submissionGuessCount: null,
     submissionFingerprint: null,
+    submissionRecoveryBlocked: false,
     error: '',
   };
 }
@@ -32,6 +34,7 @@ export function updateChineseInput(state, value, options = {}) {
     return {
       ...createChineseInputState(),
       submissionFingerprint: state?.submissionFingerprint ?? null,
+      submissionRecoveryBlocked: state?.submissionRecoveryBlocked === true,
     };
   }
 
@@ -68,6 +71,7 @@ export function updateChineseInput(state, value, options = {}) {
     pendingSubmission: false,
     submissionGuessCount: null,
     submissionFingerprint: state?.submissionFingerprint ?? null,
+    submissionRecoveryBlocked: state?.submissionRecoveryBlocked === true,
     error: '',
   };
 }
@@ -83,6 +87,15 @@ export function backspaceChineseInput(state, options = {}) {
 
 export function beginChineseSubmission(state, guessCount, options = {}) {
   if (state?.pendingSubmission) return { state, submission: null };
+  if (state?.submissionRecoveryBlocked) {
+    return {
+      state: {
+        ...state,
+        error: state.error || 'This saved Pinyin submission cannot be safely retried.',
+      },
+      submission: null,
+    };
+  }
   const guessIndex = Number.isInteger(guessCount) ? guessCount : 0;
   const retainedFingerprint = hasChineseSubmissionAwaitingConfirmation(state)
     ? state.submissionFingerprint
@@ -248,6 +261,102 @@ export function getClientRoundId({ mode, language, dateKey, instanceId }) {
 
 export function getChineseDraftStorageKey(roundId) {
   return `quordle_draft_zh_${CHINESE_PINYIN_PUZZLE_VARIANT}:${roundId}`;
+}
+
+function isValidStoredSubmissionFingerprint(value) {
+  return value !== null
+    && typeof value === 'object'
+    && typeof value.submissionId === 'string'
+    && value.submissionId.length > 0
+    && value.submissionId.length <= 128
+    && typeof value.normalizedText === 'string'
+    && /^[a-z]+$/.test(value.normalizedText)
+    && Number.isInteger(value.guessCount)
+    && value.guessCount >= 0;
+}
+
+function createBlockedChineseDraftState(sourceText, options) {
+  const state = updateChineseInput(createChineseInputState(), sourceText, options);
+  return {
+    ...state,
+    submissionFingerprint: null,
+    submissionRecoveryBlocked: true,
+    error: 'This saved Pinyin submission cannot be safely retried.',
+  };
+}
+
+export function serializeChineseDraftState(state) {
+  return JSON.stringify({
+    schemaVersion: CHINESE_DRAFT_SCHEMA_VERSION,
+    puzzleVariant: CHINESE_PINYIN_PUZZLE_VARIANT,
+    sourceText: String(state?.sourceText ?? '').slice(0, 64),
+    submissionFingerprint: hasChineseSubmissionAwaitingConfirmation(state)
+      ? { ...state.submissionFingerprint }
+      : null,
+  });
+}
+
+export function deserializeChineseDraftState(serialized, options = {}) {
+  if (serialized === null || serialized === undefined || serialized === '') {
+    return createChineseInputState();
+  }
+  if (typeof serialized !== 'string') return createBlockedChineseDraftState('', options);
+  if (!serialized.trimStart().startsWith('{')) {
+    return updateChineseInput(createChineseInputState(), serialized, options);
+  }
+
+  let stored;
+  try {
+    stored = JSON.parse(serialized);
+  } catch {
+    return createBlockedChineseDraftState('', options);
+  }
+  if (stored === null
+    || typeof stored !== 'object'
+    || stored.schemaVersion !== CHINESE_DRAFT_SCHEMA_VERSION
+    || stored.puzzleVariant !== CHINESE_PINYIN_PUZZLE_VARIANT
+    || typeof stored.sourceText !== 'string'
+    || stored.sourceText.length > 64) {
+    return createBlockedChineseDraftState('', options);
+  }
+
+  const state = updateChineseInput(createChineseInputState(), stored.sourceText, options);
+  if (stored.submissionFingerprint === null) return state;
+  if (!isValidStoredSubmissionFingerprint(stored.submissionFingerprint)
+    || stored.submissionFingerprint.normalizedText !== state.normalizedText) {
+    return createBlockedChineseDraftState(stored.sourceText, options);
+  }
+  return {
+    ...state,
+    submissionFingerprint: {
+      submissionId: stored.submissionFingerprint.submissionId,
+      normalizedText: stored.submissionFingerprint.normalizedText,
+      guessCount: stored.submissionFingerprint.guessCount,
+    },
+  };
+}
+
+export function loadChineseDraftState(storage, roundId, options = {}) {
+  if (!storage || !roundId) return createChineseInputState();
+  try {
+    return deserializeChineseDraftState(
+      storage.getItem(getChineseDraftStorageKey(roundId)),
+      options,
+    );
+  } catch {
+    return createChineseInputState();
+  }
+}
+
+export function persistChineseDraftState(storage, roundId, state) {
+  if (!storage || !roundId) return;
+  if (state?.submissionRecoveryBlocked) return;
+  const key = getChineseDraftStorageKey(roundId);
+  if (!state?.sourceText && !hasChineseSubmissionAwaitingConfirmation(state)) {
+    storage.removeItem(key);
+    return;
+  }
+  storage.setItem(key, serializeChineseDraftState(state));
 }
 
 export function getClientCompletionId(roundId) {

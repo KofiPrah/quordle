@@ -80,6 +80,8 @@ import {
   getClientGameStorageKey,
   getClientRoundId,
   isChineseSubmissionConfirmed,
+  loadChineseDraftState,
+  persistChineseDraftState,
   reconcileChineseSubmissionAgainstState,
   rejectChineseSubmission,
   rejectChineseSubmissionFromAuthoritativeError,
@@ -516,24 +518,21 @@ function getChineseInputOptions() {
   };
 }
 
-function getStoredChineseDraft() {
-  if (currentLanguage !== 'zh' || !currentRoundId) return '';
-  try {
-    return localStorage.getItem(getChineseDraftStorageKey(currentRoundId)) ?? '';
-  } catch {
-    return '';
-  }
-}
-
 function persistChineseDraft() {
   if (currentLanguage !== 'zh' || !currentRoundId) return;
   try {
-    const key = getChineseDraftStorageKey(currentRoundId);
-    if (chineseInputState.sourceText) localStorage.setItem(key, chineseInputState.sourceText);
-    else localStorage.removeItem(key);
+    persistChineseDraftState(localStorage, currentRoundId, chineseInputState);
   } catch (error) {
     console.warn('Failed to persist Chinese Pinyin draft:', error);
   }
+}
+
+function restoreStoredChineseDraft() {
+  chineseInputState = loadChineseDraftState(
+    localStorage,
+    currentRoundId,
+    getChineseInputOptions(),
+  );
 }
 
 function resetChineseInput(value = '') {
@@ -818,7 +817,11 @@ function handleServerMessage(message) {
           dateKey: message.playerState.dateKey || getTodayDateKey(),
           lastActiveAt: Date.now(),
           savedAt: Date.now(),
-        }, { markActive: true, preserveChineseDraft });
+        }, {
+          markActive: true,
+          preserveChineseDraft,
+          authoritativePlayerState: message.playerState,
+        });
         saveGameState();
         renderApp();
         setupKeyboardListeners();
@@ -1179,7 +1182,11 @@ function saveGameState({ overrideState = gameState, overrideMode = gameMode, ove
   }
 }
 
-function restoreSavedPayload(payload, { markActive = false, preserveChineseDraft = false } = {}) {
+function restoreSavedPayload(payload, {
+  markActive = false,
+  preserveChineseDraft = false,
+  authoritativePlayerState = null,
+} = {}) {
   if (!payload?.gameState) return false;
 
   currentLanguage = payload.language || currentLanguage;
@@ -1204,11 +1211,19 @@ function restoreSavedPayload(payload, { markActive = false, preserveChineseDraft
   koreanShiftActive = false;
   imeReset();
   if (currentLanguage === 'zh') {
-    if (preserveChineseDraft) {
+    let shouldPreserveChineseDraft = preserveChineseDraft;
+    if (!shouldPreserveChineseDraft) restoreStoredChineseDraft();
+    if (authoritativePlayerState) {
+      const reconciliation = reconcileChineseAuthoritativeState(
+        authoritativePlayerState,
+        gameState,
+        currentLanguage,
+      );
+      shouldPreserveChineseDraft = reconciliation.status === 'unconfirmed';
+    }
+    if (shouldPreserveChineseDraft) {
       syncChineseGuessState();
       persistChineseDraft();
-    } else {
-      resetChineseInput(getStoredChineseDraft());
     }
     ensureChineseGuessKeysLoaded();
   } else {
@@ -1773,7 +1788,11 @@ async function initDailyFromServer() {
           dateKey: serverState.dateKey || getTodayDateKey(),
           lastActiveAt: Date.now(),
           savedAt: Date.now(),
-        }, { markActive: true, preserveChineseDraft });
+        }, {
+          markActive: true,
+          preserveChineseDraft,
+          authoritativePlayerState: serverState,
+        });
         // Also save to localStorage as backup
         saveGameState();
         renderApp();
@@ -2196,6 +2215,7 @@ async function requestBoardHint(boardIndex, hintType) {
         }, {
           markActive: true,
           preserveChineseDraft: chineseReconciliation.status === 'unconfirmed',
+          authoritativePlayerState: serverState,
         });
         saveGameState();
       } else {
