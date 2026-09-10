@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ActivityType, InteractionType } from "discord.js";
 import dotenv from "dotenv";
-import Redis from "ioredis";
+import { createRedisConnection } from './redisConnection.js';
 import cron from "node-cron";
 import { calculatePerformanceMetrics } from "@quordle/engine/assistance";
 import { getBotCompletionStatus, getBotLanguagePresentation } from "./botPresentation.js";
@@ -31,36 +31,11 @@ if (!DISCORD_BOT_TOKEN) {
 
 // ========== REDIS CLIENT ==========
 let redis = null;
-let redisErrorLogged = false; // Prevent spam
 const REDIS_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days TTL for daily message records
 
 if (REDIS_URL) {
     try {
-        console.log("[Bot Redis] Connecting to:", REDIS_URL.replace(/:[^:@]+@/, ":***@"));
-        redis = new Redis(REDIS_URL, {
-            maxRetriesPerRequest: 3,
-            retryStrategy: (times) => {
-                if (times > 3) {
-                    if (!redisErrorLogged) {
-                        console.warn("[Bot Redis] Connection failed, using in-memory fallback");
-                        redisErrorLogged = true;
-                    }
-                    return null; // Stop retrying
-                }
-                return Math.min(times * 200, 2000);
-            },
-        });
-        redis.on("error", (err) => {
-            if (!redisErrorLogged) {
-                console.error("[Bot Redis] Error:", err.message);
-                redisErrorLogged = true;
-            }
-        });
-        redis.on("connect", () => {
-            redisErrorLogged = false;
-            console.log("[Bot Redis] Connected");
-        });
-        redis.on("ready", () => console.log("[Bot Redis] Ready"));
+        redis = createRedisConnection(REDIS_URL, { label: 'Bot Redis' });
     } catch (err) {
         console.error("[Bot Redis] Failed to initialize:", err);
         redis = null;
@@ -73,13 +48,9 @@ if (REDIS_URL) {
 let redisSub = null;
 if (REDIS_URL) {
     try {
-        redisSub = new Redis(REDIS_URL, {
-            maxRetriesPerRequest: 3,
-            retryStrategy: (times) => times > 3 ? null : Math.min(times * 200, 2000),
-        });
-        redisSub.on("error", () => { }); // Suppress errors (already logged by main client)
-        redisSub.on("ready", () => console.log("[Bot Redis Sub] Ready for pub/sub"));
+        redisSub = createRedisConnection(REDIS_URL, { label: 'Bot Redis Sub', subscriber: true });
     } catch (err) {
+        console.error('[Bot Redis Sub] Failed to initialize:', err.message);
         redisSub = null;
     }
 }

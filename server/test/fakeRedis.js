@@ -33,13 +33,18 @@ function bulkString(value) {
 
 export async function createFakeRedis() {
   const published = [];
+  const commands = [];
   const sockets = new Set();
+  const subscriptions = new Map();
   const waiters = [];
   const server = net.createServer((socket) => {
     sockets.add(socket);
     let buffer = Buffer.alloc(0);
     socket.on('error', () => {});
-    socket.on('close', () => sockets.delete(socket));
+    socket.on('close', () => {
+      sockets.delete(socket);
+      subscriptions.delete(socket);
+    });
     socket.on('data', (chunk) => {
       buffer = Buffer.concat([buffer, chunk]);
       while (true) {
@@ -48,6 +53,7 @@ export async function createFakeRedis() {
         buffer = buffer.subarray(parsed.consumed);
         const [rawCommand, ...args] = parsed.values;
         const command = rawCommand.toUpperCase();
+        commands.push({ command, args });
         if (command === 'INFO') {
           socket.write(bulkString('# Server\r\nredis_version:7.2.0\r\n'));
         } else if (command === 'PING') {
@@ -60,10 +66,24 @@ export async function createFakeRedis() {
           socket.write(':-1\r\n');
         } else if (command === 'SADD' || command === 'EXPIRE') {
           socket.write(':1\r\n');
+        } else if (command === 'SUBSCRIBE') {
+          const channels = subscriptions.get(socket) || new Set();
+          subscriptions.set(socket, channels);
+          for (const channel of args) {
+            channels.add(channel);
+            socket.write(`*3\r\n${bulkString('subscribe')}${bulkString(channel)}:${channels.size}\r\n`);
+          }
         } else if (command === 'PUBLISH') {
           const record = { channel: args[0], payload: JSON.parse(args[1]) };
           published.push(record);
-          socket.write(':1\r\n');
+          let recipients = 0;
+          for (const [subscriber, channels] of subscriptions) {
+            if (channels.has(args[0])) {
+              subscriber.write(`*3\r\n${bulkString('message')}${bulkString(args[0])}${bulkString(args[1])}`);
+              recipients += 1;
+            }
+          }
+          socket.write(`:${recipients}\r\n`);
           for (let index = waiters.length - 1; index >= 0; index -= 1) {
             if (published.length >= waiters[index].count) {
               const [waiter] = waiters.splice(index, 1);
@@ -77,14 +97,29 @@ export async function createFakeRedis() {
       }
     });
   });
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
-  });
-  const { port } = server.address();
+  let port = 0;
+  async function start() {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', () => {
+        server.off('error', reject);
+        resolve();
+      });
+    });
+    port = server.address().port;
+  }
+  async function stop() {
+    for (const socket of sockets) socket.destroy();
+    subscriptions.clear();
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+  }
+  await start();
   return {
     url: `redis://127.0.0.1:${port}`,
     published,
+    commands,
+    start,
+    stop,
     waitForPublished(count, timeoutMs = 2000) {
       if (published.length >= count) return Promise.resolve([...published]);
       return new Promise((resolve, reject) => {
@@ -97,9 +132,6 @@ export async function createFakeRedis() {
         waiters.push(waiter);
       });
     },
-    async close() {
-      for (const socket of sockets) socket.destroy();
-      await new Promise((resolve) => server.close(resolve));
-    },
+    close: stop,
   };
 }

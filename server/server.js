@@ -8,7 +8,7 @@ import path from "path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { fileURLToPath } from "url";
-import Redis from "ioredis";
+import { createRedisConnection } from './redisConnection.js';
 import { KO_ANSWER_WORDS, isValidKoreanGuess } from "@quordle/engine/koreanLexicon";
 import { isValidChineseGuess, isValidChinesePinyinGuessKey } from "@quordle/engine/chineseLexicon";
 import { calculatePerformanceMetrics, normalizeAssistanceState } from "@quordle/engine/assistance";
@@ -123,7 +123,6 @@ try {
 
 // Redis client (optional - falls back to in-memory if not configured)
 let redis = null;
-let redisErrorLogged = false;
 const REDIS_TTL_SECONDS = 60 * 60 * 48; // 48 hours TTL
 
 function hasRedisConnection() {
@@ -137,50 +136,7 @@ function getActivityEventPublisher() {
 
 if (process.env.REDIS_URL) {
   try {
-    console.log('[Redis] Attempting connection to:', process.env.REDIS_URL.replace(/:[^:@]+@/, ':***@'));
-    const redisClient = new Redis(process.env.REDIS_URL, {
-      maxRetriesPerRequest: 3,
-      retryStrategy: (times) => {
-        if (times > 1) {
-          if (!redisErrorLogged) {
-            console.warn('[Redis] Connection failed, using in-memory storage only');
-            redisErrorLogged = true;
-          }
-          return null;
-        }
-        return Math.min(times * 200, 2000);
-      },
-    });
-    redis = redisClient;
-
-    const disableRedis = () => {
-      if (redis === redisClient) {
-        redis = null;
-      }
-      redisClient.disconnect();
-    };
-
-    redisClient.on('error', (err) => {
-      if (!redisErrorLogged) {
-        console.error('[Redis] Error:', err.message);
-        redisErrorLogged = true;
-      }
-      if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED/.test(err.message)) {
-        console.warn('[Redis] Host unreachable, using in-memory storage only');
-        disableRedis();
-      }
-    });
-    redisClient.on('connect', () => console.log('[Redis] Connected successfully'));
-    redisClient.on('ready', () => {
-      redisErrorLogged = false;
-      console.log('[Redis] Ready to accept commands');
-    });
-    redisClient.on('close', () => console.log('[Redis] Connection closed'));
-    redisClient.on('reconnecting', () => {
-      if (!redisErrorLogged) {
-        console.log('[Redis] Reconnecting...');
-      }
-    });
+    redis = createRedisConnection(process.env.REDIS_URL);
   } catch (err) {
     console.error('[Redis] Failed to initialize:', err);
     redis = null;
@@ -1328,9 +1284,19 @@ function getTodayDateKey() {
 
 // Health check for deployment platforms
 app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
+  const redisConfigured = Boolean(process.env.REDIS_URL);
+  const redisConnected = hasRedisConnection();
+  const degraded = redisConfigured && !redisConnected;
+  res.status(degraded ? 503 : 200).json({
+    status: degraded ? 'degraded' : 'ok',
     timestamp: new Date().toISOString(),
+    dependencies: {
+      redis: {
+        configured: redisConfigured,
+        connected: redisConnected,
+        status: redisConfigured ? redis?.status || 'not initialized' : 'disabled',
+      },
+    },
     capabilities: {
       learningDataEnabled: LEARNING_ANALYTICS_ENABLED,
       learningDataAvailable: learningData.available(),

@@ -130,3 +130,25 @@ The summary supports at most 90 days per request. Dictionary, nearby-word,
 Saved Words, and review usage do not affect scores; only persisted hints mark a
 round Assisted or apply the existing hint penalty.
 
+## Redis recovery and notification health
+
+The game server and Discord bot keep reconnecting to Redis after outages, with
+retry delays capped at two seconds. Individual data commands have a limited retry
+budget; the bot's subscription waits through startup outages and automatically
+resubscribes after reconnecting. Connection failures are logged once per outage,
+including failures on the bot's separate subscription connection.
+
+When `REDIS_URL` is configured, `/health` returns HTTP 503 with `status: "degraded"`
+while the game server is disconnected, then returns HTTP 200 after recovery.
+`dependencies.redis` reports configuration, connectivity, and connection status
+without exposing credentials. Local development without Redis still returns 200.
+This checks the game server's Redis connection, not Discord message delivery.
+`railway.toml` uses this endpoint to gate new deployments. Railway's
+[healthcheck](https://docs.railway.com/deployments/healthchecks) runs at deployment
+time only; ongoing alerting requires a separate monitor polling `/health`.
+
+Gameplay can continue in memory during an outage. Subsequent game updates are
+persisted once Redis reconnects, and new completion/leave notifications resume.
+Events missed during the outage are not replayed; restarting the app can lose game
+progress that has only been stored in memory.
+
