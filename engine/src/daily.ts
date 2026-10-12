@@ -1,5 +1,6 @@
 import { getLegacyLanguageConfig } from './legacyLanguageConfig.js';
 import type { Language } from './types.js';
+import { ENGLISH_VOCABULARY_EXPANSION_DATE, LEGACY_ENGLISH_ANSWER_COUNT } from './words.js';
 export { getDailyChinesePinyinRound, getPracticeChinesePinyinRound } from './pinyinDaily.js';
 
 /**
@@ -84,7 +85,10 @@ export function getDailyTargets(dateKey: string, language: Language = 'en'): [st
     const seedInput = language === 'en' ? dateKey : `${dateKey}:${language}`;
     const seed = dateKeyToSeed(seedInput);
     const random = mulberry32(seed);
-    const wordList = getLegacyLanguageConfig(language).answerWords;
+    const allWords = getLegacyLanguageConfig(language).answerWords;
+    const wordList = language === 'en' && dateKey < ENGLISH_VOCABULARY_EXPANSION_DATE
+        ? allWords.slice(0, LEGACY_ENGLISH_ANSWER_COUNT)
+        : allWords;
     const indices = selectDistinctIndices(wordList.length, 4, random);
 
     return [

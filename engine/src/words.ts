@@ -1,4 +1,9 @@
 import guessWordsText from './guessWords.txt?raw';
+import additionalAnswerWordsText from './answerWords.additional.txt?raw';
+
+/** Daily puzzles before this date retain the original answer pool. */
+export const ENGLISH_VOCABULARY_EXPANSION_DATE = '2026-10-12';
+export const LEGACY_ENGLISH_ANSWER_COUNT = 1838;
 
 /**
  * Large word list for validating guesses.
@@ -13,8 +18,8 @@ export const GUESS_WORDS: readonly string[] = guessWordsText
 const guessWordsSet = new Set(GUESS_WORDS);
 
 /**
- * Sample word list for Quordle (ANSWER_WORDS).
- * In production, this would be a larger curated list.
+ * Curated English answer words. Keep the original entries in their existing
+ * order so daily puzzles before the vocabulary expansion remain reproducible.
  */
 export const WORD_LIST: readonly string[] = [
     // Original words
@@ -390,6 +395,7 @@ export const WORD_LIST: readonly string[] = [
     'heron', 'hewed', 'hicks', 'highs', 'hiked',
     'hiker', 'hikes', 'hilly', 'hilts', 'hinds',
     'hippy', 'hitch', 'hived', 'hives', 'hoard',
+    ...additionalAnswerWordsText.trim().split(/\r?\n/),
 ] as const;
 
 // Build Set for O(1) lookup of answer words
